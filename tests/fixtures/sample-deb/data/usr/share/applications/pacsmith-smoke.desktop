@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=PacSmith Smoke Fixture
+Exec=/usr/bin/pacsmith-smoke
+Icon=pacsmith-smoke

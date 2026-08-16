@@ -1,0 +1,70 @@
+name: Arch x86_64 release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install official Arch dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          cmake ninja qt6-base libarchive pacman polkit gnupg age libsecret
+          desktop-file-utils github-cli git
+
+      - uses: actions/checkout@v4
+
+      - name: Create unprivileged build user
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${GITHUB_REF_NAME#v}"
+          declared_version="$(sed -nE 's/^project\(PacSmith VERSION ([^ ]+).*/\1/p' CMakeLists.txt)"
+          if [[ "$release_version" != "$declared_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match CMake version $declared_version" >&2
+            exit 1
+          fi
+          runuser -u builder -- cmake -S . -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=ON
+          runuser -u builder -- cmake --build build-release --parallel
+          runuser -u builder -- ctest --test-dir build-release --output-on-failure
+
+      - name: Stage and build Arch package
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${GITHUB_REF_NAME#v}"
+          install -d -o builder -g builder release-package/stage
+          install -o builder -g builder -m 0644 packaging/release/PKGBUILD release-package/PKGBUILD
+          runuser -u builder -- env DESTDIR="$GITHUB_WORKSPACE/release-package/stage" \
+            cmake --install build-release --prefix /usr
+          runuser -u builder -- env PACSMITH_RELEASE_VERSION="$release_version" \
+            bash -lc 'cd "$1" && makepkg --clean --force --noconfirm' _ \
+            "$GITHUB_WORKSPACE/release-package"
+          sha256sum release-package/pacsmith-*.pkg.tar.zst > release-package/SHA256SUMS
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --generate-notes --title "PacSmith $GITHUB_REF_NAME"
+          fi
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            release-package/pacsmith-*.pkg.tar.zst \
+            release-package/SHA256SUMS --clobber

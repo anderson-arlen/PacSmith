@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically check PacSmith projects for upstream updates
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=0
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,3 @@
+#!/bin/sh
+# This file must be displayed as untrusted data and must never be executed.
+echo "repository: https://packages.example.invalid/stable"

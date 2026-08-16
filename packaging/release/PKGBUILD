@@ -1,0 +1,14 @@
+# This PKGBUILD packages PacSmith's already-built release staging tree.
+# PACSMITH_RELEASE_VERSION is supplied by the release workflow.
+pkgname=pacsmith
+pkgver="${PACSMITH_RELEASE_VERSION:-0.0.0}"
+pkgrel=1
+pkgdesc='Native Arch package workbench for official vendor artifacts'
+arch=('x86_64')
+url='https://github.com/anderson-arlen/pacsmith'
+depends=('qt6-base' 'qt6-svg' 'libarchive' 'squashfs-tools' 'pacman' 'polkit' 'gnupg' 'age' 'libsecret')
+options=('!strip')
+
+package() {
+  cp -a --no-preserve=ownership "$startdir/stage/." "$pkgdir/"
+}

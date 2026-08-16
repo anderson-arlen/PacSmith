@@ -1,0 +1,3 @@
+#!/bin/sh
+# Harmless fixture content. PacSmith must not execute it.
+exit 0

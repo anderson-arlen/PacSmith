@@ -1,0 +1,10 @@
+Package: pacsmith-smoke
+Version: 3:1.2.3~beta1-4
+Architecture: amd64
+Maintainer: PacSmith Test Vendor <packages@example.invalid>
+Homepage: https://example.invalid/pacsmith-smoke
+Depends: libc6 (>= 2.39), libgtk-3-0 | libgtk-4-1, unknown-vendor-runtime
+Recommends: libnss3
+Description: PacSmith smoke-test vendor package
+ A harmless fixture used to exercise the complete DEB import path.
+X-PacSmith-Fixture: preserved raw metadata
