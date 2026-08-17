@@ -61,7 +61,7 @@ foreach(expected IN ITEMS "postinst" "postrm" "unknown-vendor-runtime" "etc/apt"
     endif()
 endforeach()
 file(READ "${release_dir}/PKGBUILD" pkgbuild)
-foreach(expected IN ITEMS "pkgname='pacsmith-smoke-bin'" "depends=('glibc' 'gtk3')" "data.tar|data.tar.*" "rm -rf -- \"\${pkgdir}/etc/apt\"")
+foreach(expected IN ITEMS "pkgname='pacsmith-smoke-bin'" "depends=('glibc' 'gtk3')" "options=('!strip' '!debug')" "data.tar|data.tar.*" "rm -rf -- \"\${pkgdir}/etc/apt\"")
     string(FIND "${pkgbuild}" "${expected}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "PKGBUILD did not contain expected content: ${expected}")

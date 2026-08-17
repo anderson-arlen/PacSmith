@@ -20,6 +20,11 @@ QStringList packageFiles(const std::filesystem::path &directory) {
     return result;
 }
 
+bool validArchPackageName(const QString &name) {
+    static const QRegularExpression pattern(QStringLiteral("^[a-z0-9][a-z0-9@._+\\-]*$"));
+    return pattern.match(name).hasMatch();
+}
+
 } // namespace
 
 bool ProcessResult::succeeded() const noexcept {
@@ -61,8 +66,10 @@ bool BuildService::isRunning() const { return process_.state() != QProcess::NotR
 QStringList BuildService::makepkgArguments() {
     // Rebuilding a changed recipe at the same pkgver/pkgrel is a normal PacSmith
     // workflow. --force only permits replacing that existing output artifact; it
-    // does not bypass source hashes, dependency checks, or package() failures.
-    return {QStringLiteral("--force")};
+    // does not bypass source hashes or package() failures. --nodeps is required
+    // because PacSmith only repackages prebuilt vendor files: PKGBUILD depends=
+    // are runtime requirements for pacman -U, not libraries needed to run bsdtar.
+    return {QStringLiteral("--force"), QStringLiteral("--nodeps")};
 }
 
 void BuildService::start(const std::filesystem::path &projectDirectory) {
@@ -179,8 +186,7 @@ void InstallService::startUninstall(const QString &packageName,
         emit failedToStart(QStringLiteral("A package operation is already running"));
         return;
     }
-    static const QRegularExpression safePackageName(QStringLiteral("^[a-z0-9][a-z0-9@._+\\-]*$"));
-    if (!safePackageName.match(packageName).hasMatch()) {
+    if (!validArchPackageName(packageName)) {
         emit failedToStart(QStringLiteral("Invalid Arch package name: %1").arg(packageName));
         return;
     }

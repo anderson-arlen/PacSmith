@@ -253,6 +253,9 @@ QString PkgbuildGenerator::generate(const PackageRelease &project) {
     if (project.sourceType == SourcePackageType::AppImage) {
         result += QStringLiteral("makedepends=('squashfs-tools')\n");
     }
+    // makepkg strip/debugedit rewrite vendor ELF files and can break packed
+    // payloads. PacSmith only repackages prebuilt artifacts.
+    result += QStringLiteral("options=('!strip' '!debug')\n");
     const auto sourceIdentity = project.acquisition.canonicalIdentity.isEmpty()
         ? QStringLiteral("local:%1").arg(project.sourceSha256)
         : project.acquisition.canonicalIdentity;

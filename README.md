@@ -1,71 +1,126 @@
 # PacSmith
 
-PacSmith is a native Arch Linux workbench for maintaining local Arch packages from official vendor-provided binary artifacts. It imports Debian `.deb` files, RPM packages, existing Arch packages, tar/zip archives, Type 2 AppImages, and standalone ELF executables from local files, direct HTTPS URLs, signed APT/RPM repositories, or GitHub releases. It inspects them as data, generates an editable PKGBUILD, builds with `makepkg` as your normal user, and installs the result through a narrowly scoped `pkexec pacman -U` operation.
+> [!WARNING]
+> PacSmith is still experimental. Expect rough edges until the first release.
 
-PacSmith is **not an AUR helper**. It does not use the AUR and does not download community PKGBUILDs. The intended trust chain is:
+PacSmith lets you install software on Arch Linux directly from the developer.
+
+It takes the packages the developer actually publishes — Debian `.deb` files, RPMs, AppImages, archives, and related artifacts — and converts them into ordinary pacman packages that you can install, update, and remove like anything else on the system.
+
+It is not an AUR helper. It does not download community PKGBUILDs. You import the developer's own packages, review the generated recipe, and become the package maintainer. The point is a shorter trust chain: developer → you, with no extra packager in the middle.
+
+## Why PacSmith
+
+Arch Linux is excellent at what it ships in the official repositories. Third-party application support outside those repos is another story. The Arch User Repository exists to fill that gap, and for years it has been the default answer to "how do I install this on Arch?" It has real problems.
+
+### You have to trust a stranger
+
+Installing software always requires some trust in the people who wrote it. The AUR adds a second, often invisible, party: the package maintainer.
+
+A typical AUR package is not the developer's release. It is a community PKGBUILD that downloads, unpacks, and installs that release. The person who wrote that recipe is usually not the software author. You do not know them. If they later walk away, someone else can adopt the package and inherit the name, the history, and the trust that accumulated around it.
+
+PacSmith removes that extra person from the chain. You import the developer's package yourself, inspect it, generate the PKGBUILD, and keep the project. The only maintainer you have to trust is you. The optional [AI helper](#the-ai-helper-is-what-makes-this-practical) can take the painful parts of that conversion — especially Debian and RPM install scripts — so you are not doing a packager's job by hand.
+
+### The AUR has become a malware target
+
+That extra-maintainer model is not a theoretical weakness. It is how recent AUR attacks actually worked.
+
+In June 2026, a campaign later called **Atomic Arch** showed how cheap it is to buy existing trust. Attackers did not need to break into Arch's official repositories. They adopted abandoned AUR packages — a normal, documented process — and rewrote the PKGBUILDs. The first wave injected a malicious npm package during install. When that was noticed, they switched delivery methods within a day. Community tracking put the total above 1,500 packages. The payload was a credential stealer aimed at SSH keys, browser data, cloud tokens, password managers, and crypto wallets, with an eBPF rootkit available to hide on compromised machines.
+
+That was not the last wave. In late July and August 2026 another campaign hit, again through compromised maintainers and orphaned-package adoption. A loader installed a Tor client, fetched a second-stage payload from an onion service, then delivered a Rust infostealer with remote-access and SSH-worm behavior. Fairly popular packages were among those reported. Arch's response escalated from disabling new AUR account registrations, to freezing package adoption, to blocking AUR pushes entirely while the mess was cleaned up.
+
+None of this required a novel exploit in pacman. The AUR's trust model *is* the attack surface: recipes from people you do not know, attached to package names users already recognize. Similar orphaned-package takeovers go back years. 2026 simply made the scale impossible to ignore.
+
+If you install from the AUR, you are not only trusting the application developer. You are trusting whoever currently controls that PKGBUILD.
+
+### Updates depend on that same extra party
+
+Trust is only half of the problem. The other half is time.
+
+Once you rely on an AUR package, you also rely on that maintainer to notice upstream releases, update the recipe, and push. Developers ship; the AUR lags. Packages go stale. Maintainers disappear. Orphans sit with a trusted name until someone — possibly not a volunteer you would choose — picks them up.
+
+### The AUR also does not have everything
+
+Even a healthy AUR is incomplete. New applications, niche tools, and Linux builds that only the developer publishes often have no AUR package yet. Waiting for a volunteer to appear puts you back in the same trust-and-latency situation. PacSmith is for those cases too: if the developer publishes a Debian package, RPM, AppImage, GitHub release, or similar artifact, you can turn it into a local Arch package without waiting for the AUR to catch up.
+
+### Flathub is decent. It is still someone else's repo
+
+Flatpak, and Flathub in particular, is a reasonable answer for a lot of desktop software. The distribution model is cleaner than the AUR, updates come from a real repository, and the sandbox is a genuine security feature when it is actually used.
+
+You are still trusting a third party. The application on Flathub is packaged, reviewed, and shipped by people who are usually not the developer. That is a better-run extra party than a random AUR maintainer, but it is the same kind of extra party: another org in the trust chain, another place a recipe or manifest can drift from what the developer published.
+
+The sandbox also helps less often than the marketing implies. Flatpak permissions are powerful when they are tight. In practice, a large share of popular apps request far more than they need: full home-directory access, host filesystem access, unfiltered network, device nodes, and so on. Once an app can read `$HOME` and talk to the network, a lot of the isolation is already gone. You still get some benefits — a separate runtime, cleaner uninstall — but you should not treat "it is a Flatpak" as equivalent to "it is confined."
+
+PacSmith's bet is different. Take the developer's own package, make it a pacman package you control, and keep the update channel pointed at the developer. No Flathub maintainer, no AUR PKGBUILD, and no sandbox you have to pretend is tighter than the permissions on the app.
+
+## What PacSmith is
+
+PacSmith is a conversion wizard from foreign Linux artifacts into pacman-managed installs.
+
+You point it at a `.deb`, RPM, AppImage, Arch package, tar/zip archive, or standalone executable — from a local file, a direct HTTPS URL, a signed APT or RPM repository, or a GitHub release. PacSmith inspects the artifact as data, without executing it. It extracts metadata, dependencies, desktop entries, icons, payload layout, and (for DEB/RPM) maintainer scripts as review evidence. It then generates an editable PKGBUILD. Foreign install scripts and dependency mapping are the slow part of that review; the [AI helper](#the-ai-helper-is-what-makes-this-practical) can resolve them automatically if you want.
+
+From there the workbench walks you through ordinary Arch packaging:
+
+1. Review what the developer shipped.
+2. Map dependencies, commands, desktop files, and anything suspicious — or let the [AI helper](#the-ai-helper-is-what-makes-this-practical) propose those mappings.
+3. Build with `makepkg` as your normal user.
+4. Install with a narrowly scoped `pkexec pacman -U`.
+5. Uninstall or roll back later through pacman, because the result is a real package, not a pile of files in `/opt` that you will forget about.
+
+The last step is the point of using pacman at all. Third-party Linux software is often distributed as an AppImage, a tarball, or a Debian package "you can just extract." Those leave you with ad-hoc files, leftover systemd units, and no clean inverse operation. PacSmith's output is a pacman package, so the application shows up in the package database and comes off the system the same way official packages do.
+
+### Updates are the feature that actually matters
+
+Creating a one-off PKGBUILD from a developer's `.deb` or RPM is not why this app exists. Nobody would go to that trouble if the next release meant doing it again by hand. Keeping the package current, without handing the job back to an AUR maintainer, is the part most Arch users do not have a good answer for.
+
+PacSmith is the update authority for the packages it creates. After import, each project has an update configuration. You can watch:
+
+- **Signed Debian/Ubuntu APT repositories** — the same developer channel the `.deb` originally came from
+- **Signed RPM / Red Hat-style repositories** — Fedora, RHEL, OpenSUSE, and the developer's own Yum/DNF repos
+- **GitHub Releases** — tagged assets from the developer's repository, including cases where there is no Linux package repo at all.
+
+When a newer upstream version appears, PacSmith can notify you, optionally download and inspect it, and walk you through a new release of *your* package. Your reviewed choices — command names, `/opt` layout, desktop entries, dependency mappings — carry forward across same-format updates. You still review the new artifact, and the [AI helper](#the-ai-helper-is-what-makes-this-practical) can convert any new lifecycle scripts the same way it did on the first import. You do not start from a blank PKGBUILD, and you do not wait for a stranger to package the bump.
+
+That is the difference between "I converted a `.deb` once" and "I can actually live without the AUR." The first is a weekend script. The second is why PacSmith exists.
+
+Update checks can run on demand or on a systemd user timer. An optional tray helper badges available updates. Cleanup can retain older built artifacts so rollback stays possible.
+
+### The AI helper is what makes this practical
+
+Debian and RPM packages do not just drop files. They ship `preinst`, `postinst`, `prerm`, and `postrm` scripts that enable services, write configuration, set up repositories, install alternatives, and otherwise finish the job. Those scripts are written for apt or rpm. They do not belong on Arch, and converting them by hand is miserable: read a shell script you did not write, decide which parts are Debian-specific, which parts Arch already handles with hooks, and which parts still need an `.install` file.
+
+PacSmith already does the mechanical conversion: metadata, payload layout, desktop entries, icons, a generated PKGBUILD. The remaining pain is those lifecycle scripts. If every one had to be rewritten by hand, PacSmith would not be worth building. The AI helper exists so you do not have to.
+
+Point it at a `.deb` or RPM and it can:
+
+- Translate foreign install and remove scripts into Arch-appropriate lifecycle handling
+- Map Debian/RPM dependencies onto pacman packages
+- Propose GitHub release asset-matching rules
+- Flag leftover work that still needs a human look
+
+For most packages, that is enough to go from import to a buildable recipe with little more than review and confirm.
+
+The AI is a helper, not a requirement. Every step still works fully manually. Deterministic inspection always runs first, with no model involved. If you turn the helper on, it proposes; you accept, edit, or ignore. It cannot invent signing keys, elevate privileges, run a package manager, or silently overwrite your edits. You can use a ChatGPT subscription through PacSmith's own sign-in, or OpenAI / xAI API keys.
+
+## How the trust chain works
 
 ```text
-official vendor → official binary artifact → persistent local project
+developer → developer's own package → persistent local project
                 → editable PKGBUILD → unprivileged makepkg
                 → explicit privileged pacman -U
 ```
 
-## Current prototype
+Imported packages are untrusted data, even when they come from a known developer. PacSmith never executes an imported binary, shared object, or Debian/RPM maintainer script during analysis. `makepkg` runs as your user. Only an explicit Install action elevates, and it runs one command: `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
 
-The first vertical slice is usable today:
+Signed APT and RPM checks do not trust HTTPS alone. A project-local public key and a pinned signer fingerprint are required. GitHub tracking records a publisher `sha256:` digest when GitHub provides one, always hashes the downloaded bytes, and marks releases without a publisher digest as unsigned.
 
-- `pacsmith` and `pacsmith-gui` share one C++ core; the CLI does not initialize Qt Widgets.
-- Artifact type is detected from content rather than the filename. DEBs, RPMs, Arch `.pkg.tar.*` files, libarchive-supported tar/zip archives, Type 2 SquashFS AppImages, and ELF executables are inspected without executing package content.
-- Acquisition and artifact type are separate persisted concepts: one GitHub release may supply a DEB, RPM, Arch package, archive, or raw executable. Direct HTTPS imports are also supported and clearly marked when no publisher checksum exists.
-- The project sidebar keeps its actions compact with **New ▾**, **Delete**, and **Settings**. New offers source-specific **GitHub Link…**, **Package File…**, **Direct Download URL…**, **APT Repository…**, and **RPM Repository…** flows; supported files and links can also be dropped onto the window.
-- Debian control fields, multiline fields, dependency alternatives and constraints, maintainer scripts, payload paths, suspicious configuration, and update-source candidates are persisted in JSON.
-- A small, reviewed dependency mapping resource is applied automatically. Unresolved mappings remain visible and user mappings are saved per project.
-- The package workbench changes with the artifact type. DEB/RPM recipes expose package metadata, dependencies, foreign scripts, payload, commands, desktop entries, icon, updates, PKGBUILD, and build. Generic archives expose bundle layout and selectable commands. AppImages use a deliberately smaller workflow: a read-only installation plan and AppDir contents, editable application desktop entries and icon, updates, PKGBUILD, and build. Standalone ELF imports show only the applicable package and integration steps.
-- Commands, desktop entries, and icons are first-class versioned recipe data for every format. Archives may strip one detected top-level directory before installing under `/opt`; users can expose multiple inspected executables. Multiple `.desktop` entries can be detected, created, duplicated, disabled, syntax-highlighted, and edited. Icons can come from inspected payload bytes, a local file, or a reviewed HTTPS download.
-- Source-specific PKGBUILDs unpack DEBs and RPM cpio payloads through libarchive, minimally repackage existing Arch packages, preserve recognized archive roots or install application bundles under `/opt`, and install standalone ELF files under `/usr/bin`. Type 2 AppImages are statically decomposed with `unsquashfs` into an intact AppDir below `/opt`; one generated host wrapper recreates the required AppDir environment and invokes the vendor's `AppRun`, while the original AppImage runtime and updater are not installed.
-- Same-format updates carry stable user choices such as an `/opt` directory or command destination forward, while archive-internal executable paths are re-detected when versioned directory names change. A GitHub release that changes artifact format is analyzed from scratch.
-- Generated packages include pacman xdata linking the installed package to its PacSmith project, immutable release, acquisition identity, artifact type, and source SHA256. PacSmith can therefore identify managed packages whose local project files are missing.
-- Selecting an application opens a project dashboard with separate **Project Info**, **Version History**, and **Update Configuration** pages. Every discovered/imported vendor version has its own immutable acquisition record, editable update configuration, review state, PKGBUILD, build records, and retained Arch artifacts. The installed known release owns the active update configuration; before installation, the newest fully analyzed release owns it. **Edit / Set Up Release** opens a separate full-width, numbered workbench that ends with PKGBUILD and Build; **Back to Project** returns to the dashboard.
-- Each package-list row uses a large application icon and two text lines: application name plus a muted **Not installed**, green installed-version/current status, amber **Update available**, or animated preparation status. Update rows also receive a persistent amber background. Manual update checks offer **Download & Inspect** or **Later**; automatic preparation skips that prompt. Download/import progress can be hidden without canceling the operation, remains visible in Version History, and a completed update opens the first package-setup page that still needs attention.
-- PacSmith reconciles the installed version against static `.PKGINFO` metadata from retained artifacts. It distinguishes uninstalled, known PacSmith releases, and externally installed versions, and supports GUI-confirmed install, rollback, and uninstall operations through pacman.
-- GUI imports run on a worker thread with a responsive staged progress dialog and live payload-entry counts.
-- Standard application icons referenced by imported desktop entries are safely selected from the DEB payload, cached as an inspectable project file, and shown in the project list and Overview page.
-- Maintainer scripts are split into visible responsibilities. Deterministic rules identify APT setup and operations handled by Arch hooks; unresolved responsibilities may be acknowledged as reviewed or resolved through the optional AI packaging advisor. Original Debian scripts are never executed.
-- Script and generated Arch lifecycle acknowledgments are bound to the exact content. Changed upstream content therefore restores review automatically.
-- Highlighted payload files have an actionable review panel with the file contents, an Arch-specific explanation, and explicit **Keep and acknowledge** or **Exclude** decisions. Decisions are fingerprinted; changed payload content warns again and exclusions become visible PKGBUILD removal rules.
-- PKGBUILDs are editable and are never silently regenerated over manual work.
-- Builds are asynchronous in the GUI and synchronous/script-friendly in the CLI. Resulting `.pkg.tar.*` files are detected and recorded.
-- Installation state is read from pacman. Uninstalled projects can be permanently deleted after confirmation; installed projects must first be uninstalled through pacman.
-- APT `.list`/deb822 `.sources` definitions and RPM/Yum repository bootstrap evidence are detected in bounded payload files and package-script text. This includes repository setup deferred to files such as `/etc/cron.daily/*`; PacSmith inspects those files but never runs them. Embedded OpenPGP public keys are copied to project-local keyrings with their fingerprints. APT checks verify `InRelease` or `Release.gpg`, the selected Packages index, and the DEB SHA256. RPM checks verify the detached `repomd.xml.asc` signature, the primary-metadata checksum recorded in `repomd.xml`, and the selected RPM SHA256. Both require `gpgv`, a trusted project-local key, and a pinned signer fingerprint.
-- Optional AI resolution supports a ChatGPT subscription through PacSmith-owned browser OAuth, or OpenAI/xAI through API credentials. It receives a bounded evidence bundle only after deterministic analysis, can request narrowly typed local facts with approval for every request, and records applied-field provenance instead of a transcript. The compact progress window keeps request/response details hidden by default; **Show Details** reveals activity, the exact redacted request, and the live streamed response, with copy controls and hard transport/output/deadline limits.
-- AI settings expose verified reasoning-effort levels for recognized models and standard or fast priority execution. Fast API processing can carry provider premium pricing and is labeled accordingly in the GUI.
-- ChatGPT sign-in uses PKCE and a loopback callback. PacSmith never receives the user's password, stores the resulting session only in PacSmith's selected keyring or age-encrypted credential store, refreshes it there, and queries the signed-in account's model catalog for the model dropdown. It does not require Codex or OpenClaw and never reads another application's data directory.
-- AI-generated Arch `.install` lifecycle files are syntax/policy validated, visibly marked, and blocked from installation until the user acknowledges the exact privileged content. They can also be discarded.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries, the project format, artifact analysis, and update trust flows.
 
-Signed APT, signed RPM repository, and GitHub Releases update checking are implemented. APT and RPM repositories can also be the initial source: PacSmith asks for the repository coordinates, exact package name, architecture, and a signing key supplied by vendor HTTPS URL, local file, pasted public-key text, or an existing trusted PacSmith key. It displays the selected fingerprint for explicit approval, copies reused keys into the new release rather than linking projects, verifies signed repository metadata and the published artifact checksum, and only then downloads and imports the package. GitHub tracking ignores drafts, defaults to stable releases, optionally includes prereleases, and requires a user-visible regular expression that matches exactly one asset per release. The import dialog suggests an architecture-specific expression with the version generalized for future releases. PacSmith records a GitHub-provided `sha256:` digest when present and always computes the downloaded bytes' local SHA256; releases without publisher digests remain visibly unsigned. A verified or explicitly unsigned result creates a visible, not-yet-inspected release that is downloaded and re-inspected through the same generic importer. Direct-URL version discovery is not yet implemented.
+## Using PacSmith
 
-After import, the original acquisition location is provenance rather than an editable source. Future retrieval is controlled exclusively by that release's update configuration, which can be switched among Manual, Direct URL, signed APT, signed RPM repository, and GitHub Releases. The GitHub asset rule therefore belongs to Update Configuration; its AI assist receives only repository identity and release asset names, proposes one exact-match rule, and leaves saving to the user.
+The GUI is the main workbench. New projects can start from **GitHub Link…**, **Package File…**, **Direct Download URL…**, **APT Repository…**, or **RPM Repository…**. Supported files and links can also be dropped onto the window.
 
-First launch can set the current user's DEB and RPM MIME defaults and offer PacSmith's own official GitHub x86_64 package as the first tracked project. It never fabricates installation state: the project remains **Not installed** until its generated package is actually installed through pacman. A tag-driven GitHub Actions workflow builds, tests, packages, and publishes the official x86_64 `.pkg.tar.zst` asset consumed by that tracker.
-
-Settings include a systemd user-timer schedule, optional automatic preparation, and cleanup retention for old artifacts and complete releases. Cleanup runs after checks and is anchored to the currently installed known release. The optional user tray helper shows check activity and badges available updates; it is enabled only with the user update service.
-
-Type 2 AppImage import is implemented as static decomposition, not as an AppImage manager. Type 1 images are rejected. PacSmith does not run the AppImage, preserve its embedded updater, mount it with FUSE, or install the original executable as the application artifact. Prefer an official DEB, RPM, or Arch artifact when the vendor offers one because those formats generally carry more useful dependencies and integration metadata.
-
-## Security model
-
-Imported packages are untrusted data, even when obtained from a known vendor.
-
-- PacSmith never executes an imported binary, shared object, or maintainer script during analysis.
-- Original maintainer scripts remain untrusted evidence. Acknowledgment records only a content fingerprint, never permission to execute the Debian script.
-- Archive member paths are normalized; traversal, absolute paths, duplicate members, special device entries, unsafe hard links, and escaping symlinks are rejected.
-- External processes use `QProcess` with explicit argument lists—never `/bin/sh -c` with imported values.
-- `makepkg` is run in the project directory as the current user. PacSmith refuses to start it as root.
-- Only an explicit Install action runs `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`. The GUI displays its own transaction confirmation first, polkit handles authorization, and PacSmith captures pacman's output directly. CLI operations remain interactive unless their caller explicitly chooses otherwise.
-- APT source files and repository keyrings are flagged and excluded from generated packages unless explicitly retained. Repository checks do not trust transport alone: a project-local vendor-embedded or user-imported public key and pinned fingerprint are mandatory.
-- AI cannot invent a signing key, elevate privileges, run a package manager, or silently overwrite a user-owned field. It may select only an evidenced trusted key. Every proposed replacement of a manually edited value requires confirmation.
-- API keys come from `OPENAI_API_KEY`/`XAI_API_KEY`, a desktop Secret Service when available, or a password-encrypted `age` file. An optional GitHub PAT similarly comes from `PACSMITH_GITHUB_TOKEN`, PacSmith's keyring entry, or PacSmith's age file. ChatGPT OAuth access and refresh tokens are accepted only from PacSmith's own sign-in flow and stored in the keyring or age file. The age password is sent through a private PTY rather than command-line arguments or environment variables.
-- PKGBUILD validation is intentionally static and does not source or execute the file.
+Each application becomes a local project with a dashboard (project info, version history, update configuration) and a numbered setup workbench that ends at PKGBUILD and Build. The package list shows install state: not installed, current, or update available. Use the [AI helper](#the-ai-helper-is-what-makes-this-practical) on any workbench step that still needs script or dependency conversion.
 
 ## Build on Arch Linux
 
@@ -125,11 +180,7 @@ Run directly from the build tree:
 ./build/pacsmith list
 ./build/pacsmith versions <project-id>
 ./build/pacsmith info <project-id>
-./build/pacsmith scripts <project-id> --acknowledge postinst
-./build/pacsmith lifecycle <project-id>
 ./build/pacsmith check <project-id>
-./build/pacsmith ai status
-./build/pacsmith ai resolve <project-id>
 ./build/pacsmith build <project-id>
 ./build/pacsmith rollback <project-id> <release-id-or-version>
 ./build/pacsmith uninstall <project-id>
@@ -137,10 +188,24 @@ Run directly from the build tree:
 ./build/pacsmith-gui --import https://github.com/owner/project/releases/latest
 ```
 
-Direct CMake builds also default to the current user's `~/.local` prefix. An explicit `-DCMAKE_INSTALL_PREFIX=...` remains available for packagers and staging builds. No license has been added because the repository did not specify one.
+Direct CMake builds also default to the current user's `~/.local` prefix. An explicit `-DCMAKE_INSTALL_PREFIX=...` remains available for packagers and staging builds.
+
+## Security model
+
+- PacSmith never executes an imported binary, shared object, or maintainer script during analysis.
+- Original maintainer scripts remain untrusted evidence. Acknowledgment records a content fingerprint, never permission to execute the Debian or RPM script.
+- Archive member paths are normalized; traversal, absolute paths, duplicate members, special device entries, unsafe hard links, and escaping symlinks are rejected.
+- External processes use `QProcess` with explicit argument lists — never `/bin/sh -c` with imported values.
+- `makepkg` is run in the project directory as the current user. PacSmith refuses to start it as root.
+- Only an explicit Install action runs `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
+- APT source files and repository keyrings are flagged and excluded from generated packages unless explicitly retained. Repository checks require a trusted project-local key and a pinned signer fingerprint.
+- AI cannot invent a signing key, elevate privileges, run a package manager, or silently overwrite a user-owned field.
+- PKGBUILD validation is intentionally static and does not source or execute the file.
+
+AppImage import is static decomposition: PacSmith unpacks the SquashFS payload, installs an intact AppDir under `/opt`, and generates a host wrapper that runs the developer's `AppRun`. It does not execute the AppImage, preserve its embedded updater, or mount it with FUSE. Prefer a `.deb`, RPM, or Arch package when the developer offers one; those formats generally carry more useful dependencies and integration metadata.
 
 ## Persistent projects
 
-Projects use `$XDG_DATA_HOME/pacsmith/projects`, falling back to `~/.local/share/pacsmith/projects`. Each application has `project.json` plus `releases/<version-hash>/`. A release directory contains `release.json`, `PKGBUILD`, `sources/`, `files/`, `patches/`, `build/`, and `history/`. Acquisition identity, source kind, trusted keys, install mapping, and lifecycle files are release-specific. A relative source link keeps normal `makepkg` use working from the release directory. Older single-release projects migrate into the current format with a JSON backup retained.
+Projects use `$XDG_DATA_HOME/pacsmith/projects`, falling back to `~/.local/share/pacsmith/projects`. Each application has `project.json` plus `releases/<version-hash>/`. A release directory contains `release.json`, `PKGBUILD`, `sources/`, `files/`, `patches/`, `build/`, and `history/`. Acquisition identity, source kind, trusted keys, install mapping, and lifecycle files are release-specific.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries, the project format, artifact analysis, and update trust flows.
+Generated packages include pacman xdata linking the installed package to its PacSmith project, immutable release, acquisition identity, artifact type, and source SHA256. PacSmith can therefore identify managed packages even if the local project files are later missing.

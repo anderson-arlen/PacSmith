@@ -1542,10 +1542,9 @@ void CoreTests::buildsNonInteractivePacmanArgumentsSafely() {
 
 void CoreTests::buildsRebuildableMakepkgArguments() {
     const auto arguments = pacsmith::BuildService::makepkgArguments();
-    QCOMPARE(arguments, QStringList{QStringLiteral("--force")});
+    QCOMPARE(arguments, QStringList({QStringLiteral("--force"), QStringLiteral("--nodeps")}));
     QVERIFY(!arguments.contains(QStringLiteral("--skipchecksums")));
     QVERIFY(!arguments.contains(QStringLiteral("--skippgpcheck")));
-    QVERIFY(!arguments.contains(QStringLiteral("--nodeps")));
 }
 
 void CoreTests::validatesInstallSessionProtocol() {
@@ -2153,6 +2152,7 @@ void CoreTests::generatesPkgbuild() {
     QVERIFY(pkgbuild.contains(QStringLiteral("pkgver='1.2.3'")));
     QVERIFY(pkgbuild.contains(QStringLiteral("arch=('x86_64')")));
     QVERIFY(pkgbuild.contains(QStringLiteral("depends=('gtk3')")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("options=('!strip' '!debug')")));
     QVERIFY(pkgbuild.contains(QStringLiteral(
         "source=('vendor app_1.2_amd64.deb') # primary source -> sources/vendor app_1.2_amd64.deb")));
     QVERIFY(pkgbuild.contains(QStringLiteral("data.tar|data.tar.*")));
@@ -2201,6 +2201,7 @@ void CoreTests::generatesMultiSourcePkgbuilds() {
     release.installMapping.icon.format = QStringLiteral("svg");
     release.installMapping.icon.iconName = QStringLiteral("vendor-tool");
     const auto archive = pacsmith::PkgbuildGenerator::generate(release);
+    QVERIFY(archive.contains(QStringLiteral("options=('!strip' '!debug')")));
     QVERIFY(archive.contains(QStringLiteral("pacsmith.schema=1")));
     QVERIFY(archive.contains(QStringLiteral("pacsmith.source=github%3Avendor%2Ftool")));
     QVERIFY(archive.contains(QStringLiteral("$pkgdir/opt/vendor-tool")));
