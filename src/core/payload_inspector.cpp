@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <memory>
 
 namespace pacsmith {
@@ -175,6 +176,68 @@ std::optional<qint64> squashfsOffset(QFile &file) {
     return std::nullopt;
 }
 
+bool isDebMagic(const QByteArray &magic) {
+    return magic.startsWith(QByteArrayLiteral("!<arch>\n"));
+}
+
+bool isAppImageMagic(const QByteArray &magic) {
+    return magic.size() >= 11 &&
+           magic.startsWith(QByteArrayView{"\x7f" "ELF", 4}) &&
+           magic.at(8) == 'A' && magic.at(9) == 'I' && magic.at(10) == '\x02';
+}
+
+bool streamAppImageMember(const QString &sourceName, const qint64 offset, const QString &member,
+                          const std::function<bool(QByteArrayView, QString *)> &consume,
+                          QString *error) {
+    const auto executable = QStandardPaths::findExecutable(QStringLiteral("unsquashfs"));
+    if (executable.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("Static AppImage payload reading requires squashfs-tools");
+        }
+        return false;
+    }
+    QProcess process;
+    process.setProgram(executable);
+    process.setArguments({QStringLiteral("-cat"), QStringLiteral("-o"), QString::number(offset),
+                          sourceName, member});
+    process.start();
+    if (!process.waitForStarted(5000)) {
+        if (error != nullptr) *error = process.errorString();
+        return false;
+    }
+    QElapsedTimer deadline;
+    deadline.start();
+    while (process.state() != QProcess::NotRunning) {
+        process.waitForReadyRead(1000);
+        const auto chunk = process.readAllStandardOutput();
+        if (!chunk.isEmpty() && !consume(QByteArrayView(chunk), error)) {
+            process.kill();
+            process.waitForFinished(5000);
+            return false;
+        }
+        if (deadline.hasExpired(30000)) {
+            process.kill();
+            process.waitForFinished(5000);
+            if (error != nullptr) {
+                *error = QStringLiteral("Static AppImage payload reading exceeded 30 seconds");
+            }
+            return false;
+        }
+    }
+    const auto trailing = process.readAllStandardOutput();
+    if (!trailing.isEmpty() && !consume(QByteArrayView(trailing), error)) return false;
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (error != nullptr) {
+            const auto stderrText = QString::fromUtf8(process.readAllStandardError()).trimmed();
+            *error = stderrText.isEmpty()
+                         ? QStringLiteral("Could not read AppImage payload file")
+                         : stderrText;
+        }
+        return false;
+    }
+    return true;
+}
+
 std::optional<PayloadInspection> inspectRawFile(QFile &file, QString *error) {
     if (!file.seek(0)) {
         if (error != nullptr) *error = file.errorString();
@@ -214,7 +277,36 @@ std::optional<PayloadInspection> PayloadInspector::inspectFile(
         if (error != nullptr) *error = rawSource.errorString();
         return std::nullopt;
     }
-    const auto magic = rawSource.peek(8);
+    const auto magic = rawSource.peek(12);
+    if (isAppImageMagic(magic)) {
+        const auto offset = squashfsOffset(rawSource);
+        if (!offset) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Static AppImage payload reading requires squashfs-tools");
+            }
+            return std::nullopt;
+        }
+        rawSource.close();
+        constexpr qsizetype previewLimit = 1024 * 1024;
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        QByteArray captured;
+        bool truncated = false;
+        if (!streamAppImageMember(sourceName, *offset, *safeTarget,
+                                  [&](const QByteArrayView chunk, QString *) {
+                                      hash.addData(chunk);
+                                      const auto available = previewLimit - captured.size();
+                                      if (available > 0) {
+                                          captured.append(chunk.data(),
+                                                          std::min(available, chunk.size()));
+                                      }
+                                      if (chunk.size() > available) truncated = true;
+                                      return true;
+                                  },
+                                  error)) {
+            return std::nullopt;
+        }
+        return finishInspection(hash, captured, truncated);
+    }
     if (magic.startsWith(QByteArrayView{"\x7f" "ELF", 4})) {
         if (*safeTarget != QFileInfo(rawSource).fileName()) {
             if (error != nullptr) *error = QStringLiteral("Payload path does not name the ELF source file");
@@ -225,7 +317,7 @@ std::optional<PayloadInspection> PayloadInspector::inspectFile(
     rawSource.close();
 
     const auto encoded = QFile::encodeName(sourceName);
-    if (!magic.startsWith(QByteArrayLiteral("!<arch>\n"))) {
+    if (!isDebMagic(magic)) {
         ArchivePointer artifact(archive_read_new());
         archive_read_support_filter_all(artifact.get());
         archive_read_support_format_all(artifact.get());
@@ -298,49 +390,28 @@ std::optional<QByteArray> PayloadInspector::readFileBytes(
         return std::nullopt;
     }
     const auto magic = raw.peek(12);
-    const bool appImage = magic.size() >= 11 &&
-        magic.startsWith(QByteArrayView{"\x7f" "ELF", 4}) &&
-        magic.at(8) == 'A' && magic.at(9) == 'I' && magic.at(10) == '\x02';
-    if (appImage) {
+    if (isAppImageMagic(magic)) {
         const auto offset = squashfsOffset(raw);
-        const auto executable = QStandardPaths::findExecutable(QStringLiteral("unsquashfs"));
-        if (!offset || executable.isEmpty()) {
-            if (error != nullptr) *error = QStringLiteral("Static AppImage payload reading requires squashfs-tools");
-            return std::nullopt;
-        }
-        QProcess process;
-        process.setProgram(executable);
-        process.setArguments({QStringLiteral("-cat"), QStringLiteral("-o"),
-                              QString::number(*offset), sourceName, *safeTarget});
-        process.start();
-        if (!process.waitForStarted(5000)) {
-            if (error != nullptr) *error = process.errorString();
+        if (!offset) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Static AppImage payload reading requires squashfs-tools");
+            }
             return std::nullopt;
         }
         QByteArray result;
-        QElapsedTimer deadline;
-        deadline.start();
-        while (process.state() != QProcess::NotRunning) {
-            process.waitForReadyRead(1000);
-            result += process.readAllStandardOutput();
-            if (result.size() > maximumBytes) {
-                process.kill();
-                process.waitForFinished(5000);
-                if (error != nullptr) *error = QStringLiteral("Payload file exceeds the selection byte limit");
-                return std::nullopt;
-            }
-            if (deadline.hasExpired(30000)) {
-                process.kill();
-                process.waitForFinished(5000);
-                if (error != nullptr) {
-                    *error = QStringLiteral("Static AppImage payload reading exceeded 30 seconds");
-                }
-                return std::nullopt;
-            }
-        }
-        result += process.readAllStandardOutput();
-        if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-            if (error != nullptr) *error = QString::fromUtf8(process.readAllStandardError()).trimmed();
+        if (!streamAppImageMember(sourceName, *offset, *safeTarget,
+                                  [&](const QByteArrayView chunk, QString *consumeError) {
+                                      if (result.size() + chunk.size() > maximumBytes) {
+                                          if (consumeError != nullptr) {
+                                              *consumeError = QStringLiteral(
+                                                  "Payload file exceeds the selection byte limit");
+                                          }
+                                          return false;
+                                      }
+                                      result.append(chunk);
+                                      return true;
+                                  },
+                                  error)) {
             return std::nullopt;
         }
         return result;
@@ -355,7 +426,7 @@ std::optional<QByteArray> PayloadInspector::readFileBytes(
     raw.close();
 
     const auto encoded = QFile::encodeName(sourceName);
-    if (magic != QByteArrayLiteral("!<arch>\n")) {
+    if (!isDebMagic(magic)) {
         ArchivePointer artifact(archive_read_new());
         archive_read_support_filter_all(artifact.get());
         archive_read_support_format_all(artifact.get());

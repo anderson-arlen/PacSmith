@@ -8,6 +8,21 @@
 #include <algorithm>
 
 namespace pacsmith {
+namespace {
+
+bool absoluteTargetInRoots(const QString &target, const QStringList &roots) {
+    if (target.isEmpty() || !target.startsWith(QLatin1Char('/')) ||
+        target.contains(QChar::Null)) {
+        return false;
+    }
+    const auto normalized = QDir::cleanPath(QDir::fromNativeSeparators(target));
+    if (!normalized.startsWith(QLatin1Char('/'))) return false;
+    return std::any_of(roots.cbegin(), roots.cend(), [&normalized](const QString &root) {
+        return normalized == root || normalized.startsWith(root + QLatin1Char('/'));
+    });
+}
+
+} // namespace
 
 std::optional<QString> PathSafety::normalizedArchivePath(const QString &path) {
     if (path.contains(QChar::Null) || path.startsWith(QLatin1Char('/')) ||
@@ -52,31 +67,34 @@ bool PathSafety::safeSymlinkTarget(const QString &entryPath, const QString &targ
     return true;
 }
 
+bool PathSafety::safePackageSymlinkTarget(const QString &entryPath, const QString &target) {
+    if (safeSymlinkTarget(entryPath, target)) return true;
+    static const QStringList packageRoots{
+        QStringLiteral("/opt"), QStringLiteral("/usr"),
+        QStringLiteral("/bin"), QStringLiteral("/sbin"),
+        QStringLiteral("/lib"), QStringLiteral("/lib64")};
+    return absoluteTargetInRoots(target, packageRoots);
+}
+
 bool PathSafety::safeAppImageSymlinkTarget(const QString &entryPath,
                                            const QString &target) {
     if (safeSymlinkTarget(entryPath, target)) return true;
-    if (target.isEmpty() || !target.startsWith(QLatin1Char('/')) ||
-        target.contains(QChar::Null)) {
-        return false;
-    }
-
-    // AppDirs created by current AppImage tooling can contain compatibility
-    // links such as runtime/compat/usr/bin/env -> /usr/bin/env. These are
-    // runtime references, not archive member paths. Permit only conventional
-    // system executable/library trees; mutable and user-controlled locations
-    // remain forbidden. Cleaning first also rejects disguised traversal into a
-    // disallowed tree (for example /usr/bin/../../tmp/file).
-    const auto normalized = QDir::cleanPath(QDir::fromNativeSeparators(target));
     static const QStringList runtimeRoots{
         QStringLiteral("/bin"), QStringLiteral("/sbin"),
         QStringLiteral("/lib"), QStringLiteral("/lib64"),
         QStringLiteral("/usr/bin"), QStringLiteral("/usr/sbin"),
         QStringLiteral("/usr/lib"), QStringLiteral("/usr/lib64"),
         QStringLiteral("/usr/libexec")};
-    return std::any_of(runtimeRoots.cbegin(), runtimeRoots.cend(),
-                       [&normalized](const QString &root) {
-        return normalized == root || normalized.startsWith(root + QLatin1Char('/'));
-    });
+    return absoluteTargetInRoots(target, runtimeRoots);
+}
+
+QString PathSafety::symlinkReviewReason(const QString &entryPath, const QString &target) {
+    if (safePackageSymlinkTarget(entryPath, target)) return {};
+    return QStringLiteral(
+        "Symbolic link target '%1' leaves the package tree or points outside "
+        "conventional package install roots. It is excluded from the Arch package "
+        "until you keep it.")
+        .arg(target);
 }
 
 bool PathSafety::isDebianSpecificPath(const QString &path) {

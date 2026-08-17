@@ -90,6 +90,12 @@ public:
 
     [[nodiscard]] bool savePkgbuild(Project &project, PackageRelease &release,
                                     const QString &contents, QString *error = nullptr) const;
+    [[nodiscard]] bool activateGuidedPkgbuild(Project &project, PackageRelease &release,
+                                             QString *error = nullptr) const;
+    [[nodiscard]] bool activateCustomPkgbuild(Project &project, PackageRelease &release,
+                                             QString *error = nullptr) const;
+    [[nodiscard]] bool saveCustomPkgbuild(Project &project, PackageRelease &release,
+                                          const QString &contents, QString *error = nullptr) const;
     [[nodiscard]] bool saveLifecycle(Project &project, PackageRelease &release,
                                      QString *error = nullptr) const;
     [[nodiscard]] bool removeLifecycle(Project &project, PackageRelease &release,

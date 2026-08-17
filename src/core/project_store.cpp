@@ -290,9 +290,9 @@ bool materializeIntegrationIcon(const ProjectStore &store, Project &project,
     return true;
 }
 
-QString sourceDisplayName(const DebianMetadata &metadata) {
-    const auto first = metadata.description.section(QLatin1Char('\n'), 0, 0).trimmed();
-    return !first.isEmpty() && first.size() <= 80 ? first : metadata.package;
+QString sourceDisplayName(const DebianMetadata &metadata,
+                          const QList<DesktopEntryConfiguration> &desktops = {}) {
+    return preferredDisplayName(metadata, desktops);
 }
 
 QString sourceIdentity(const DebianMetadata &metadata) {
@@ -507,7 +507,15 @@ bool migratePayloadMetadata(PackageRelease &release) {
         return changed;
     }
     for (auto &entry : release.payload) {
-        const auto reason = PathSafety::reviewReason(entry.path);
+        auto reason = PathSafety::reviewReason(entry.path);
+        if (!entry.symlinkTarget.isEmpty()) {
+            const auto symlinkReason =
+                PathSafety::symlinkReviewReason(entry.path, entry.symlinkTarget);
+            if (!symlinkReason.isEmpty()) {
+                if (!reason.isEmpty()) reason += QStringLiteral("; ");
+                reason += symlinkReason;
+            }
+        }
         const bool review = !reason.isEmpty() && entry.type != QStringLiteral("directory");
         if (entry.reviewReason != reason || entry.requiresReview != review) {
             entry.reviewReason = reason;
@@ -519,9 +527,7 @@ bool migratePayloadMetadata(PackageRelease &release) {
 }
 
 QString desktopField(const QString &contents, const QString &name) {
-    const QRegularExpression expression(
-        QStringLiteral("(?m)^%1=(.*)$").arg(QRegularExpression::escape(name)));
-    return expression.match(contents).captured(1).trimmed();
+    return desktopEntryField(contents, name);
 }
 
 bool migrateAppImageIntegration(PackageRelease &release) {
@@ -643,6 +649,22 @@ const PackageRelease *newestPreparedRelease(const Project &project) {
         }
     }
     return result;
+}
+
+bool repairSloganDisplayName(Project &project) {
+    const auto *release = newestPreparedRelease(project);
+    if (release == nullptr && !project.releases.isEmpty()) release = &project.releases.first();
+    if (release == nullptr) return false;
+    const auto synopsis = release->debian.description.section(QLatin1Char('\n'), 0, 0).trimmed();
+    if (synopsis.isEmpty() || project.displayName != synopsis) return false;
+    const auto preferred = preferredDisplayName(release->debian,
+                                                release->installMapping.desktopEntries);
+    if (preferred.isEmpty() || preferred == project.displayName) return false;
+    project.displayName = preferred;
+    for (auto &item : project.releases) {
+        if (item.displayName == synopsis) item.displayName = preferred;
+    }
+    return true;
 }
 
 void carryForward(const PackageRelease &previous, PackageRelease &next,
@@ -798,11 +820,43 @@ void carryForward(const PackageRelease &previous, PackageRelease &next,
             next.installMapping.icon.missing = !payloadStillExists;
         }
     }
+    if (previous.installMapping.appRun.userModified) {
+        auto carried = previous.installMapping.appRun;
+        carried.originalContents = next.installMapping.appRun.originalContents;
+        carried.originalContentsSha256 = next.installMapping.appRun.originalContentsSha256;
+        carried.present = next.installMapping.appRun.present || carried.present;
+        next.installMapping.appRun = carried;
+    } else if (next.installMapping.appRun.present &&
+               previous.installMapping.appRun.acknowledgedFingerprint ==
+                   next.installMapping.appRun.contentFingerprint()) {
+        next.installMapping.appRun.acknowledgedFingerprint =
+            previous.installMapping.appRun.acknowledgedFingerprint;
+    }
     if (previous.pkgbuildManuallyModified) next.previousManualPkgbuild = previousPkgbuild;
 }
 
+bool archiveDesktopCommandUnmapped(const PackageRelease &release) {
+    if (release.sourceType != SourcePackageType::Archive) return false;
+    QSet<QString> exposed;
+    for (const auto &launcher : release.installMapping.launchers) {
+        if (!launcher.enabled || launcher.missing || launcher.commandName.isEmpty()) continue;
+        exposed.insert(launcher.commandName.toLower());
+        if (!launcher.destination.isEmpty()) {
+            exposed.insert(QFileInfo(launcher.destination).fileName().toLower());
+        }
+    }
+    for (const auto &desktop : release.installMapping.desktopEntries) {
+        if (!desktop.enabled) continue;
+        const auto command = desktopEntryCommand(desktop.contents);
+        if (command.isEmpty()) continue;
+        if (!exposed.contains(command.toLower())) return true;
+    }
+    return false;
+}
+
 bool releaseNeedsReview(const PackageRelease &release) {
-    if (release.installMapping.icon.missing ||
+    if (release.installMapping.appRun.requiresReview() ||
+        release.installMapping.icon.missing || archiveDesktopCommandUnmapped(release) ||
         std::any_of(release.installMapping.launchers.cbegin(),
                     release.installMapping.launchers.cend(),
                     [](const auto &launcher) { return launcher.enabled && launcher.missing; }) ||
@@ -1011,6 +1065,14 @@ std::optional<Project> ProjectStore::loadById(const QString &id, QString *error)
         changed = migrateSigningTrust(release, releasePath(release)) || changed;
         bool mappingsChanged = migrateAppImageIntegration(release);
         mappingsChanged = applyCurrentMappings(release) || mappingsChanged;
+        if (release.sourceType == SourcePackageType::Archive &&
+            release.installMapping.launchers.isEmpty()) {
+            mappingsChanged = SourceAnalyzer::inferArchiveLaunchers(
+                                  release.installMapping, release.payload,
+                                  release.debian.package.isEmpty() ? release.archPackageName
+                                                                   : release.debian.package) ||
+                              mappingsChanged;
+        }
         if (!release.iconPath.isEmpty() &&
             release.installMapping.icon.projectPath.isEmpty()) {
             release.installMapping.icon.sourceKind = release.iconSourcePath.isEmpty()
@@ -1029,8 +1091,13 @@ std::optional<Project> ProjectStore::loadById(const QString &id, QString *error)
         changed = mappingsChanged || changed;
         const auto pkgbuild = readPkgbuild(release, nullptr);
         if (pkgbuild) {
-            release.pkgbuildManuallyModified =
-                sha256Hex(pkgbuild->toUtf8()) != release.generatedPkgbuildSha256;
+            const auto diskHash = sha256Hex(pkgbuild->toUtf8());
+            if (diskHash != release.generatedPkgbuildSha256) {
+                release.pkgbuildManuallyModified = true;
+                if (release.customPkgbuild != *pkgbuild) release.customPkgbuild = *pkgbuild;
+            } else if (release.pkgbuildManuallyModified && release.customPkgbuild.isEmpty()) {
+                release.customPkgbuild = *pkgbuild;
+            }
         }
         const bool generatedRecipeNeedsMigration =
             !release.generatedPkgbuild.contains(QStringLiteral("xdata=(")) ||
@@ -1048,6 +1115,7 @@ std::optional<Project> ProjectStore::loadById(const QString &id, QString *error)
         project.releases.append(std::move(release));
     }
     changed = reconcileInstalled(project, nullptr) || changed;
+    changed = repairSloganDisplayName(project) || changed;
     if (changed && !save(project, error)) return std::nullopt;
     return project;
 }
@@ -1387,7 +1455,7 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
             candidate = project.id + QLatin1Char('-') + QString::number(suffix++);
         }
         project.id = candidate;
-        project.displayName = sourceDisplayName(analysis->metadata);
+        project.displayName = sourceDisplayName(analysis->metadata, analysis->installMapping.desktopEntries);
         project.vendorName = analysis->metadata.maintainer;
         project.sourceIdentity = identity;
         project.createdAt = QDateTime::currentDateTimeUtc();
@@ -1663,7 +1731,7 @@ std::optional<ImportResult> ProjectStore::importSource(
         project.id = candidate;
         project.displayName = !options.displayName.isEmpty()
             ? options.displayName
-            : analysis->metadata.description.section(QLatin1Char('\n'), 0, 0).trimmed();
+            : sourceDisplayName(analysis->metadata, analysis->installMapping.desktopEntries);
         if (project.displayName.isEmpty()) project.displayName = analysis->metadata.package;
         project.vendorName = analysis->metadata.maintainer;
         project.sourceIdentity = identity;
@@ -2046,9 +2114,32 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
 
 bool ProjectStore::savePkgbuild(Project &project, PackageRelease &release,
                                 const QString &contents, QString *error) const {
+    if (sha256Hex(contents.toUtf8()) == release.generatedPkgbuildSha256) {
+        return activateGuidedPkgbuild(project, release, error);
+    }
+    return saveCustomPkgbuild(project, release, contents, error);
+}
+
+bool ProjectStore::activateGuidedPkgbuild(Project &project, PackageRelease &release,
+                                         QString *error) const {
+    if (!writeBytes(pkgbuildPath(release), release.generatedPkgbuild.toUtf8(), error)) return false;
+    release.pkgbuildManuallyModified = false;
+    return save(project, error);
+}
+
+bool ProjectStore::activateCustomPkgbuild(Project &project, PackageRelease &release,
+                                         QString *error) const {
+    if (release.customPkgbuild.isEmpty()) release.customPkgbuild = release.generatedPkgbuild;
+    if (!writeBytes(pkgbuildPath(release), release.customPkgbuild.toUtf8(), error)) return false;
+    release.pkgbuildManuallyModified = true;
+    return save(project, error);
+}
+
+bool ProjectStore::saveCustomPkgbuild(Project &project, PackageRelease &release,
+                                      const QString &contents, QString *error) const {
+    release.customPkgbuild = contents;
+    release.pkgbuildManuallyModified = true;
     if (!writeBytes(pkgbuildPath(release), contents.toUtf8(), error)) return false;
-    release.pkgbuildManuallyModified =
-        sha256Hex(contents.toUtf8()) != release.generatedPkgbuildSha256;
     return save(project, error);
 }
 

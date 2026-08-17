@@ -39,23 +39,7 @@ void appendPayloadExclusions(QString &result, const PackageRelease &project) {
 }
 
 QString installedPayloadPath(const PackageRelease &project, QString path) {
-    if (project.sourceType == SourcePackageType::Archive &&
-        project.installMapping.archiveLayout == ArchiveLayout::OptBundle) {
-        if (project.installMapping.stripCommonPrefix &&
-            !project.installMapping.commonPrefix.isEmpty()) {
-            const auto prefix = project.installMapping.commonPrefix + QLatin1Char('/');
-            if (path.startsWith(prefix)) path.remove(0, prefix.size());
-        }
-        const auto opt = project.installMapping.optDirectory.isEmpty()
-            ? project.archPackageName : project.installMapping.optDirectory;
-        return QStringLiteral("/opt/%1/%2").arg(opt, path);
-    }
-    if (project.sourceType == SourcePackageType::AppImage) {
-        const auto opt = project.installMapping.optDirectory.isEmpty()
-            ? project.archPackageName : project.installMapping.optDirectory;
-        return QStringLiteral("/opt/%1/%2").arg(opt, path);
-    }
-    return QLatin1Char('/') + path;
+    return PkgbuildGenerator::installedPayloadPath(project, path);
 }
 
 void appendLaunchers(QString &result, const PackageRelease &project) {
@@ -85,11 +69,19 @@ void appendLaunchers(QString &result, const PackageRelease &project) {
             if (project.sourceType == SourcePackageType::AppImage) {
                 const auto opt = project.installMapping.optDirectory.isEmpty()
                     ? project.archPackageName : project.installMapping.optDirectory;
-                result += QStringLiteral("APPDIR='/opt/%1'\nexport APPDIR\nOWD=\"$PWD\"\nexport OWD\nARGV0=\"$0\"\nexport ARGV0\nunset APPIMAGE\n")
-                              .arg(doubleQuotedPath(opt));
+                // Keep APPIMAGE unset so the extracted AppDir cannot self-update
+                // or act as a FUSE-mounted AppImage. Vendor AppRun scripts that
+                // dispatch on $0/APPIMAGE belong in the editable AppRun recipe.
+                result += QStringLiteral(
+                    "APPDIR='/opt/%1'\nexport APPDIR\nOWD=\"$PWD\"\nexport OWD\n"
+                    "ARGV0=\"$0\"\nexport ARGV0\nunset APPIMAGE\n"
+                    "exec \"%2\" \"$@\"\n")
+                              .arg(doubleQuotedPath(opt), doubleQuotedPath(target));
+            } else {
+                result += QStringLiteral("exec \"%1\" \"$@\"\n")
+                              .arg(doubleQuotedPath(target));
             }
-            result += QStringLiteral("exec \"%1\" \"$@\"\nPACSMITH_LAUNCHER\n")
-                          .arg(doubleQuotedPath(target));
+            result += QStringLiteral("PACSMITH_LAUNCHER\n");
             result += QStringLiteral("  chmod 0755 \"$pkgdir%1\"\n")
                           .arg(doubleQuotedPath(destination));
         } else {
@@ -102,6 +94,23 @@ void appendLaunchers(QString &result, const PackageRelease &project) {
                                doubleQuotedPath(destination));
         }
     }
+}
+
+void appendAppRunOverlay(QString &result, const PackageRelease &project) {
+    if (project.sourceType != SourcePackageType::AppImage) return;
+    const auto &appRun = project.installMapping.appRun;
+    if (!appRun.script || !appRun.userModified || appRun.contents.isEmpty() ||
+        appRun.contents == appRun.originalContents) {
+        return;
+    }
+    const auto opt = project.installMapping.optDirectory.isEmpty()
+        ? project.archPackageName : project.installMapping.optDirectory;
+    result += QStringLiteral(
+        "\n  # Overlay the reviewed AppRun entry point onto the extracted AppDir.\n");
+    result += QStringLiteral("  printf '%s' %1 > \"$pkgdir/opt/%2/AppRun\"\n")
+                  .arg(PkgbuildGenerator::shellQuote(appRun.contents), doubleQuotedPath(opt));
+    result += QStringLiteral("  chmod 0755 \"$pkgdir/opt/%1/AppRun\"\n")
+                  .arg(doubleQuotedPath(opt));
 }
 
 void appendDesktopEntries(QString &result, const PackageRelease &project) {
@@ -353,10 +362,40 @@ QString PkgbuildGenerator::generate(const PackageRelease &project) {
     }
     appendPayloadExclusions(result, project);
     appendLaunchers(result, project);
+    appendAppRunOverlay(result, project);
     appendDesktopEntries(result, project);
     appendSelectedIcon(result, project);
     result += QStringLiteral("}\n");
     return result;
+}
+
+QString PkgbuildGenerator::installedPayloadPath(const PackageRelease &project,
+                                                const QString &payloadPath) {
+    QString path = payloadPath;
+    if (project.sourceType == SourcePackageType::Archive &&
+        project.installMapping.archiveLayout == ArchiveLayout::OptBundle) {
+        if (project.installMapping.stripCommonPrefix &&
+            !project.installMapping.commonPrefix.isEmpty()) {
+            const auto prefix = project.installMapping.commonPrefix + QLatin1Char('/');
+            if (path.startsWith(prefix)) path.remove(0, prefix.size());
+        }
+        const auto opt = project.installMapping.optDirectory.isEmpty()
+            ? project.archPackageName : project.installMapping.optDirectory;
+        return QStringLiteral("/opt/%1/%2").arg(opt, path);
+    }
+    if (project.sourceType == SourcePackageType::AppImage) {
+        const auto opt = project.installMapping.optDirectory.isEmpty()
+            ? project.archPackageName : project.installMapping.optDirectory;
+        return QStringLiteral("/opt/%1/%2").arg(opt, path);
+    }
+    if (project.sourceType == SourcePackageType::ElfBinary) {
+        const auto destination = project.installMapping.binaryDestination.isEmpty()
+            ? QStringLiteral("/usr/bin/%1").arg(project.archPackageName)
+            : project.installMapping.binaryDestination;
+        return destination;
+    }
+    if (path.startsWith(QLatin1Char('/'))) return path;
+    return QLatin1Char('/') + path;
 }
 
 QString PkgbuildGenerator::validate(const QString &contents) {

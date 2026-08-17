@@ -131,12 +131,6 @@ bool isDesktopEntry(const QString &path, const qint64 size) {
            path.endsWith(QStringLiteral(".desktop"));
 }
 
-QString desktopEntryValue(const QString &contents, const QString &key) {
-    const QRegularExpression expression(
-        QStringLiteral("(?m)^%1=(.*)$").arg(QRegularExpression::escape(key)));
-    return expression.match(contents).captured(1).trimmed();
-}
-
 bool appImageDesktopCandidatePath(const QString &path, const qint64 size) {
     if (!isDesktopEntry(path, size)) return false;
     if (!path.contains(QLatin1Char('/'))) return true;
@@ -145,43 +139,53 @@ bool appImageDesktopCandidatePath(const QString &path, const qint64 size) {
 }
 
 bool appImageApplicationDesktopEntry(const QString &contents) {
-    return desktopEntryValue(contents, QStringLiteral("Type")) == QStringLiteral("Application") &&
-           !desktopEntryValue(contents, QStringLiteral("Exec")).isEmpty();
+    return desktopEntryField(contents, QStringLiteral("Type")) == QStringLiteral("Application") &&
+           !desktopEntryField(contents, QStringLiteral("Exec")).isEmpty();
 }
 
-QString desktopEntryCommand(const QString &contents) {
-    auto exec = desktopEntryValue(contents, QStringLiteral("Exec"));
-    if (exec.isEmpty()) return {};
-    QString executable;
-    if (exec.startsWith(QLatin1Char('"'))) {
-        const auto closing = exec.indexOf(QLatin1Char('"'), 1);
-        if (closing <= 1) return {};
-        executable = exec.sliced(1, closing - 1);
-    } else {
-        const auto whitespace = exec.indexOf(QRegularExpression(QStringLiteral("\\s")));
-        executable = whitespace < 0 ? exec : exec.first(whitespace);
+bool appRunLooksLikeScript(const QByteArray &contents) {
+    return !contents.isEmpty() && contents.size() <= 256 * 1024 &&
+           !contents.contains('\0') && contents.startsWith("#!");
+}
+
+bool appRunDispatchesOnLaunchName(const QString &contents) {
+    static const QRegularExpression basenameZero(
+        QStringLiteral(R"(basename\s+(?:--\s+)?["']?\$\{?0\}?)"));
+    static const QRegularExpression hereBinary(
+        QStringLiteral(R"(\$(?:HERE|APPDIR)/\$\{?BINARY_NAME)"));
+    return contents.contains(QStringLiteral("BINARY_NAME")) ||
+           basenameZero.match(contents).hasMatch() ||
+           hereBinary.match(contents).hasMatch() ||
+           (contents.contains(QStringLiteral("APPIMAGE")) &&
+            contents.contains(QStringLiteral("basename"), Qt::CaseInsensitive));
+}
+
+void captureAppRun(AppRunConfiguration &appRun, const QByteArray &contents) {
+    appRun.present = true;
+    if (!appRunLooksLikeScript(contents)) {
+        appRun.script = false;
+        return;
     }
-    auto command = QFileInfo(executable).fileName();
-    static const QRegularExpression safeName(QStringLiteral("^[A-Za-z0-9@._+\\-]+$"));
-    if (!safeName.match(command).hasMatch()) return {};
-    const auto lower = command.toLower();
-    if (lower == QStringLiteral("env") || lower == QStringLiteral("sh") ||
-        lower == QStringLiteral("bash") || lower == QStringLiteral("gio") ||
-        lower == QStringLiteral("gapplication") || lower.startsWith(QStringLiteral("dbus-")) ||
-        lower.startsWith(QStringLiteral("python"))) {
-        return {};
-    }
-    return command;
+    appRun.script = true;
+    appRun.contents = QString::fromUtf8(contents);
+    appRun.originalContents = appRun.contents;
+    appRun.originalContentsSha256 = sha256Hex(contents);
+    appRun.provenance.origin = ValueOrigin::Deterministic;
+    appRun.provenance.rationale = QStringLiteral(
+        "Vendor AppRun script captured from the extracted AppDir");
+    appRun.reviewReason = appRunDispatchesOnLaunchName(appRun.contents)
+        ? QStringLiteral("Selects a binary from APPIMAGE or basename($0)")
+        : QStringLiteral("AppDir entry point");
 }
 
 int appImageDesktopScore(const DesktopEntryConfiguration &desktop,
                          const QString &packageName) {
     const bool topLevel = !desktop.sourcePath.contains(QLatin1Char('/'));
-    const auto noDisplay = desktopEntryValue(desktop.contents, QStringLiteral("NoDisplay"))
+    const auto noDisplay = desktopEntryField(desktop.contents, QStringLiteral("NoDisplay"))
                                .compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
     const auto command = desktopEntryCommand(desktop.contents);
-    const auto icon = desktopEntryValue(desktop.contents, QStringLiteral("Icon"));
-    const auto name = desktopEntryValue(desktop.contents, QStringLiteral("Name"));
+    const auto icon = desktopEntryField(desktop.contents, QStringLiteral("Icon"));
+    const auto name = desktopEntryField(desktop.contents, QStringLiteral("Name"));
     int score = topLevel ? 10000 : 100;
     score += noDisplay ? -5000 : 1000;
     for (const auto &value : {desktop.id, command, icon, name}) {
@@ -206,12 +210,32 @@ bool isDirectOptApplication(const QString &path) {
     return components.size() == 3 && components.first() == QStringLiteral("opt");
 }
 
+bool looksLikeLibrary(const QString &path) {
+    const auto name = QFileInfo(path).fileName().toLower();
+    return name.endsWith(QStringLiteral(".so")) || name.contains(QStringLiteral(".so.")) ||
+           name.endsWith(QStringLiteral(".dll")) || name.endsWith(QStringLiteral(".dylib"));
+}
+
+bool ignoredCommandDirectory(const QString &path) {
+    static const QSet<QString> ignored{
+        QStringLiteral("lib"), QStringLiteral("lib64"), QStringLiteral("libexec"),
+        QStringLiteral("plugins"), QStringLiteral("imageformats"), QStringLiteral("iconengines"),
+        QStringLiteral("platforms"), QStringLiteral("platformthemes"), QStringLiteral("generic"),
+        QStringLiteral("tls"), QStringLiteral("qml"), QStringLiteral("translations"),
+        QStringLiteral("resources"), QStringLiteral("multimedia"), QStringLiteral("audio"),
+        QStringLiteral("bearer"), QStringLiteral("printsupport"), QStringLiteral("sqldrivers"),
+        QStringLiteral("styles"), QStringLiteral("xcbglintegrations")};
+    const auto parts = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    for (int index = 0; index + 1 < parts.size(); ++index) {
+        if (ignored.contains(parts.at(index).toLower())) return true;
+    }
+    return false;
+}
+
 bool likelyUserCommand(const QString &path) {
     const auto info = QFileInfo(path);
     const auto name = info.fileName().toLower();
-    if (name.isEmpty() || name.endsWith(QStringLiteral(".so")) ||
-        name.contains(QStringLiteral(".so.")) || name.endsWith(QStringLiteral(".dll")) ||
-        name.endsWith(QStringLiteral(".dylib")) || name.contains(QStringLiteral("debug")) ||
+    if (name.isEmpty() || looksLikeLibrary(path) || name.contains(QStringLiteral("debug")) ||
         name.contains(QStringLiteral("crashpad")) || name.contains(QStringLiteral("sandbox")) ||
         name == QStringLiteral("apprun")) {
         return false;
@@ -220,6 +244,211 @@ bool likelyUserCommand(const QString &path) {
            path.startsWith(QStringLiteral("usr/bin/")) ||
            path.startsWith(QStringLiteral("usr/local/bin/")) ||
            !path.contains(QLatin1Char('/'));
+}
+
+bool looksLikeExecutableMagic(const QByteArray &header) {
+    return header.startsWith(QByteArrayView{"\x7f" "ELF", 4}) || header.startsWith("#!");
+}
+
+bool shouldPeekExecutable(const PayloadEntry &payload) {
+    if (payload.type != QStringLiteral("file") || payload.size < 4 ||
+        payload.size > 64LL * 1024 * 1024) {
+        return false;
+    }
+    if (isDesktopEntry(payload.path, payload.size) ||
+        isIconCandidate(payload.path, payload.size) || looksLikeLibrary(payload.path)) {
+        return false;
+    }
+    const auto suffix = QFileInfo(payload.path).suffix().toLower();
+    static const QSet<QString> skipped{
+        QStringLiteral("png"), QStringLiteral("svg"), QStringLiteral("xpm"),
+        QStringLiteral("jpg"), QStringLiteral("jpeg"), QStringLiteral("gif"),
+        QStringLiteral("ico"), QStringLiteral("bmp"), QStringLiteral("webp"),
+        QStringLiteral("xml"), QStringLiteral("json"), QStringLiteral("txt"),
+        QStringLiteral("md"), QStringLiteral("html"), QStringLiteral("css"),
+        QStringLiteral("qml"), QStringLiteral("ts"), QStringLiteral("qm"),
+        QStringLiteral("rcc"), QStringLiteral("pak"), QStringLiteral("dat"),
+        QStringLiteral("desktop"), QStringLiteral("so"), QStringLiteral("a"),
+        QStringLiteral("o")};
+    return !skipped.contains(suffix);
+}
+
+QByteArray readPrefix(archive *reader, const qsizetype maximum, QString *error) {
+    QByteArray result;
+    std::array<char, 256> buffer{};
+    while (result.size() < maximum) {
+        const auto want = std::min<qsizetype>(buffer.size(), maximum - result.size());
+        const auto count = archive_read_data(reader, buffer.data(), static_cast<size_t>(want));
+        if (count == 0) break;
+        if (count < 0) {
+            if (error != nullptr) *error = QString::fromUtf8(archive_error_string(reader));
+            return {};
+        }
+        result.append(buffer.data(), static_cast<qsizetype>(count));
+    }
+    archive_read_data_skip(reader);
+    return result;
+}
+
+QString strippedPayloadPath(const QString &path, const QString &prefix) {
+    if (prefix.isEmpty()) return path;
+    const auto rooted = prefix + QLatin1Char('/');
+    return path.startsWith(rooted) ? path.sliced(rooted.size()) : path;
+}
+
+int archiveCommandCandidateScore(const PayloadEntry &entry, const QString &command,
+                                 const QString &prefix) {
+    if (entry.type != QStringLiteral("file")) return -1;
+    if (QFileInfo(entry.path).fileName().compare(command, Qt::CaseInsensitive) != 0) {
+        return -1;
+    }
+    if (looksLikeLibrary(entry.path)) return -1;
+    int score = 100;
+    if (entry.executable) score += 1000;
+    if (likelyUserCommand(entry.path)) score += 500;
+    if (ignoredCommandDirectory(entry.path)) score -= 400;
+    else score += 200;
+    score -= static_cast<int>(
+        strippedPayloadPath(entry.path, prefix).count(QLatin1Char('/')) * 50);
+    return score;
+}
+
+LauncherMapping makeArchiveLauncher(const QString &sourcePath, const QString &command,
+                                    const bool enabled, const bool missing,
+                                    const QString &rationale) {
+    LauncherMapping launcher;
+    launcher.enabled = enabled;
+    launcher.sourcePath = sourcePath;
+    launcher.commandName = command.toLower();
+    launcher.destination = QStringLiteral("/usr/bin/%1").arg(launcher.commandName);
+    launcher.missing = missing;
+    launcher.provenance.origin = ValueOrigin::Deterministic;
+    launcher.provenance.rationale = rationale;
+    return launcher;
+}
+
+void syncLauncherBinaryFields(InstallMapping &mapping) {
+    mapping.binarySourcePath.clear();
+    mapping.binaryDestination.clear();
+    mapping.executableLinks.clear();
+    for (const auto &launcher : mapping.launchers) {
+        if (!launcher.enabled || launcher.missing || launcher.sourcePath.isEmpty() ||
+            launcher.commandName.isEmpty()) {
+            continue;
+        }
+        mapping.binarySourcePath = launcher.sourcePath;
+        mapping.binaryDestination = launcher.destination;
+        mapping.executableLinks.append(launcher.commandName);
+        break;
+    }
+}
+
+bool launchersDiffer(const QList<LauncherMapping> &left, const QList<LauncherMapping> &right) {
+    if (left.size() != right.size()) return true;
+    for (qsizetype index = 0; index < left.size(); ++index) {
+        const auto &first = left.at(index);
+        const auto &second = right.at(index);
+        if (first.enabled != second.enabled || first.missing != second.missing ||
+            first.sourcePath != second.sourcePath || first.commandName != second.commandName ||
+            first.destination != second.destination || first.kind != second.kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool inferArchiveLaunchersImpl(InstallMapping &mapping, const QList<PayloadEntry> &payload,
+                               [[maybe_unused]] const QString &packageName) {
+    const auto previous = mapping.launchers;
+    const auto previousSource = mapping.binarySourcePath;
+    const auto previousDestination = mapping.binaryDestination;
+    QList<LauncherMapping> launchers;
+    QSet<QString> usedPaths;
+    QSet<QString> usedCommands;
+    const auto addLauncher = [&](LauncherMapping launcher) {
+        if (!launcher.commandName.isEmpty()) usedCommands.insert(launcher.commandName);
+        if (!launcher.sourcePath.isEmpty()) usedPaths.insert(launcher.sourcePath);
+        launchers.append(std::move(launcher));
+    };
+
+    for (const auto &desktop : mapping.desktopEntries) {
+        if (!desktop.enabled) continue;
+        const auto command = desktopEntryCommand(desktop.contents);
+        if (command.isEmpty()) continue;
+        const auto commandName = command.toLower();
+        if (usedCommands.contains(commandName)) continue;
+        const PayloadEntry *best = nullptr;
+        int bestScore = -1;
+        for (const auto &entry : payload) {
+            if (usedPaths.contains(entry.path)) continue;
+            const auto score =
+                archiveCommandCandidateScore(entry, command, mapping.commonPrefix);
+            if (score > bestScore) {
+                bestScore = score;
+                best = &entry;
+            }
+        }
+        if (best != nullptr && bestScore >= 0) {
+            addLauncher(makeArchiveLauncher(
+                best->path, commandName, true, false,
+                QStringLiteral("Desktop Exec=%1 matched inspected payload file %2")
+                    .arg(command, best->path)));
+        } else {
+            addLauncher(makeArchiveLauncher(
+                {}, commandName, true, true,
+                QStringLiteral("Desktop Exec=%1 has no matching payload file; review the PATH command")
+                    .arg(command)));
+        }
+    }
+
+    const bool desktopMapped = std::any_of(
+        launchers.cbegin(), launchers.cend(),
+        [](const auto &launcher) { return launcher.enabled && !launcher.missing; });
+
+    for (const auto &entry : payload) {
+        if (entry.type != QStringLiteral("file") || usedPaths.contains(entry.path) ||
+            looksLikeLibrary(entry.path) || ignoredCommandDirectory(entry.path)) {
+            continue;
+        }
+        if (!likelyUserCommand(entry.path)) continue;
+        auto command = QFileInfo(entry.path).fileName().toLower();
+        if (command.isEmpty() || usedCommands.contains(command)) continue;
+        addLauncher(makeArchiveLauncher(
+            entry.path, command, !isDirectOptApplication(entry.path), false,
+            QStringLiteral("Executable command detected in the inspected payload")));
+    }
+
+    QList<const PayloadEntry *> extras;
+    for (const auto &entry : payload) {
+        if (entry.type != QStringLiteral("file") || usedPaths.contains(entry.path) ||
+            looksLikeLibrary(entry.path) || ignoredCommandDirectory(entry.path) ||
+            !entry.executable) {
+            continue;
+        }
+        extras.append(&entry);
+    }
+    QList<const PayloadEntry *> shallow;
+    for (const auto *entry : extras) {
+        if (!strippedPayloadPath(entry->path, mapping.commonPrefix).contains(QLatin1Char('/'))) {
+            shallow.append(entry);
+        }
+    }
+    const bool enableLoneShallow = !desktopMapped && launchers.isEmpty() && shallow.size() == 1;
+    for (const auto *entry : extras) {
+        auto command = QFileInfo(entry->path).fileName().toLower();
+        if (command.isEmpty() || usedCommands.contains(command)) continue;
+        const bool enable = enableLoneShallow && entry == shallow.first();
+        addLauncher(makeArchiveLauncher(
+            entry->path, command, enable, false,
+            enable ? QStringLiteral("Single inspected executable selected as the package command")
+                   : QStringLiteral("Inspected executable available for explicit command exposure")));
+    }
+
+    mapping.launchers = launchers;
+    syncLauncherBinaryFields(mapping);
+    return launchersDiffer(previous, mapping.launchers) ||
+           previousSource != mapping.binarySourcePath ||
+           previousDestination != mapping.binaryDestination;
 }
 
 quint32 bigEndian32(const QByteArray &data, const qsizetype offset) {
@@ -336,7 +565,9 @@ QString exclusionRoot(const QString &path) {
 void appendReviewRule(SourceAnalysis &result, const PayloadEntry &entry,
                       QSet<QString> &rulePaths) {
     if (!entry.requiresReview) return;
-    const bool excluded = PathSafety::isForeignPackageManagerPath(entry.path);
+    const bool excluded = PathSafety::isForeignPackageManagerPath(entry.path) ||
+                          (!entry.symlinkTarget.isEmpty() &&
+                           !PathSafety::safePackageSymlinkTarget(entry.path, entry.symlinkTarget));
     const auto path = excluded ? exclusionRoot(entry.path) : entry.path;
     if (rulePaths.contains(path)) return;
     PayloadRule rule;
@@ -475,13 +706,6 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
             if (error != nullptr) *error = QStringLiteral("Special device entry is not permitted: %1").arg(*normalized);
             return std::nullopt;
         }
-        if (fileType == AE_IFLNK) {
-            const auto target = QString::fromUtf8(archive_entry_symlink(entry));
-            if (!PathSafety::safeSymlinkTarget(*normalized, target)) {
-                if (error != nullptr) *error = QStringLiteral("Unsafe symlink %1 -> %2").arg(*normalized, target);
-                return std::nullopt;
-            }
-        }
         const auto hardlink = archive_entry_hardlink(entry);
         if (hardlink != nullptr && !PathSafety::normalizedArchivePath(QString::fromUtf8(hardlink))) {
             if (error != nullptr) *error = QStringLiteral("Unsafe hard link in %1").arg(*normalized);
@@ -508,6 +732,14 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
                      : fileType == AE_IFLNK ? QStringLiteral("symlink") : QStringLiteral("file");
         if (fileType == AE_IFLNK) payload.symlinkTarget = QString::fromUtf8(archive_entry_symlink(entry));
         payload.reviewReason = PathSafety::reviewReason(payload.path);
+        if (!payload.symlinkTarget.isEmpty()) {
+            const auto symlinkReason =
+                PathSafety::symlinkReviewReason(payload.path, payload.symlinkTarget);
+            if (!symlinkReason.isEmpty()) {
+                if (!payload.reviewReason.isEmpty()) payload.reviewReason += QStringLiteral("; ");
+                payload.reviewReason += symlinkReason;
+            }
+        }
         payload.requiresReview = !payload.reviewReason.isEmpty() && payload.type != QStringLiteral("directory");
         const auto permissions = archive_entry_perm(entry);
         if ((permissions & 06000) != 0) {
@@ -515,23 +747,8 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
             payload.reviewReason += QStringLiteral("Set-user-ID or set-group-ID permission requires review");
             payload.requiresReview = true;
         }
-        if (payload.type == QStringLiteral("file") &&
-            (archive_entry_perm(entry) & 0111) != 0 && likelyUserCommand(payload.path)) {
-            if (result.installMapping.binarySourcePath.isEmpty()) {
-                result.installMapping.binarySourcePath = payload.path;
-            }
-            LauncherMapping launcher;
-            launcher.enabled = !isDirectOptApplication(payload.path);
-            launcher.sourcePath = payload.path;
-            launcher.commandName = QFileInfo(payload.path).fileName();
-            launcher.destination = QStringLiteral("/usr/bin/%1").arg(launcher.commandName);
-            launcher.provenance.origin = ValueOrigin::Deterministic;
-            launcher.provenance.rationale = launcher.enabled
-                ? QStringLiteral("Executable command detected in the inspected payload")
-                : QStringLiteral(
-                      "Direct /opt application executable detected; it is available for explicit command exposure");
-            result.installMapping.launchers.append(launcher);
-        }
+        payload.executable = payload.type == QStringLiteral("file") &&
+                             (permissions & 0111) != 0 && !looksLikeLibrary(payload.path);
         result.payload.append(payload);
         appendReviewRule(result, payload, rulePaths);
         if (payload.requiresReview && payload.type == QStringLiteral("file")) {
@@ -539,6 +756,7 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
             if (!inspectReviewEntry(reader.get(), result.payload.last(), &captured, error)) {
                 return std::nullopt;
             }
+            if (looksLikeExecutableMagic(captured)) result.payload.last().executable = true;
             const auto &reviewed = result.payload.last();
             if (!reviewed.textPreview.isEmpty() && !reviewed.previewTruncated) {
                 const auto evidence = ScriptEvidenceAnalyzer::analyze(
@@ -585,6 +803,12 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
                 capturedIconBytes += contents.size();
                 iconCandidates.append({payload.path, contents});
             }
+        } else if (shouldPeekExecutable(payload)) {
+            const auto header = readPrefix(reader.get(), 64, error);
+            if (header.isEmpty() && payload.size > 0 && error != nullptr && !error->isEmpty()) {
+                return std::nullopt;
+            }
+            if (looksLikeExecutableMagic(header)) result.payload.last().executable = true;
         } else {
             archive_read_data_skip(reader.get());
         }
@@ -645,11 +869,6 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
         result.installMapping.archiveLayout = recognizedRoot ? ArchiveLayout::PreserveRoot
                                                              : ArchiveLayout::OptBundle;
         result.installMapping.optDirectory = result.metadata.package;
-        if (!result.installMapping.binarySourcePath.isEmpty()) {
-            const auto name = QFileInfo(result.installMapping.binarySourcePath).fileName();
-            result.installMapping.binaryDestination = QStringLiteral("/usr/bin/%1").arg(name);
-            result.installMapping.executableLinks.append(name);
-        }
         QString commonPrefix;
         bool sharedPrefix = !result.payload.isEmpty();
         for (const auto &payload : std::as_const(result.payload)) {
@@ -666,6 +885,7 @@ std::optional<SourceAnalysis> analyzeArchive(const std::filesystem::path &path,
             result.installMapping.stripCommonPrefix =
                 result.installMapping.archiveLayout == ArchiveLayout::OptBundle;
         }
+        inferArchiveLaunchersImpl(result.installMapping, result.payload, result.metadata.package);
     }
     if (!iconCandidates.isEmpty()) {
         const auto selected = std::max_element(
@@ -855,6 +1075,9 @@ std::optional<SourceAnalysis> analyzeAppImage(const std::filesystem::path &path,
             const auto targetText = QString::fromUtf8(target);
             if (filesystemError ||
                 !PathSafety::safeAppImageSymlinkTarget(payload.path, targetText)) {
+                // AppDirs are installed intact, so per-file keep/exclude is not
+                // available. Reject links that would point the extracted bundle
+                // at host paths outside the AppImage runtime contract.
                 if (error != nullptr) {
                     *error = QStringLiteral("Unsafe AppImage symlink: %1 -> %2")
                                  .arg(payload.path, targetText);
@@ -877,11 +1100,22 @@ std::optional<SourceAnalysis> analyzeAppImage(const std::filesystem::path &path,
         }
         result.payload.append(payload);
 
+        if (payload.path == QStringLiteral("AppRun")) {
+            result.installMapping.appRun.present = true;
+        }
         if (payload.type == QStringLiteral("file")) {
             const QFileInfo info(qPath(iterator->path()));
             const bool executable = info.permissions().testAnyFlags(
                 QFileDevice::ExeOwner | QFileDevice::ExeGroup | QFileDevice::ExeOther);
-            if (payload.path == QStringLiteral("AppRun") && executable) hasAppRun = true;
+            if (payload.path == QStringLiteral("AppRun")) {
+                if (executable) hasAppRun = true;
+                if (payload.size <= 256 * 1024) {
+                    QFile file(info.absoluteFilePath());
+                    if (file.open(QIODevice::ReadOnly)) {
+                        captureAppRun(result.installMapping.appRun, file.readAll());
+                    }
+                }
+            }
             if (appImageDesktopCandidatePath(payload.path, payload.size) ||
                 isIconCandidate(payload.path, payload.size)) {
                 QFile file(info.absoluteFilePath());
@@ -894,7 +1128,7 @@ std::optional<SourceAnalysis> analyzeAppImage(const std::filesystem::path &path,
                         DesktopEntryConfiguration desktop;
                         desktop.id = QFileInfo(payload.path).completeBaseName();
                         desktop.enabled = !payload.path.contains(QLatin1Char('/')) &&
-                            desktopEntryValue(QString::fromUtf8(contents), QStringLiteral("NoDisplay"))
+                            desktopEntryField(QString::fromUtf8(contents), QStringLiteral("NoDisplay"))
                                 .compare(QStringLiteral("true"), Qt::CaseInsensitive) != 0;
                         desktop.sourcePath = payload.path;
                         desktop.destination = QStringLiteral("/usr/share/applications/%1")
@@ -996,12 +1230,13 @@ std::optional<SourceAnalysis> analyzeAppImage(const std::filesystem::path &path,
     if (commandDesktop != result.installMapping.desktopEntries.cend()) {
         command = desktopEntryCommand(commandDesktop->contents);
     }
+    if (!command.isEmpty()) command = command.toLower();
     if (command.isEmpty()) command = result.metadata.package;
     result.installMapping.desktopEntries.removeIf(
         [&command, &primaryDesktopPath](const auto &desktop) {
         if (desktop.sourcePath == primaryDesktopPath) return false;
         const auto candidateCommand = desktopEntryCommand(desktop.contents);
-        return candidateCommand.isEmpty() || candidateCommand != command;
+        return candidateCommand.isEmpty() || candidateCommand.toLower() != command;
     });
     LauncherMapping launcher;
     launcher.enabled = true;
@@ -1126,6 +1361,12 @@ std::optional<SourceAnalysis> SourceAnalyzer::analyze(const std::filesystem::pat
     result->updateCandidates.sort();
     deduplicateEvidence(*result);
     return result;
+}
+
+bool SourceAnalyzer::inferArchiveLaunchers(InstallMapping &mapping,
+                                           const QList<PayloadEntry> &payload,
+                                           const QString &packageName) {
+    return inferArchiveLaunchersImpl(mapping, payload, packageName);
 }
 
 } // namespace pacsmith

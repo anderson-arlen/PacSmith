@@ -38,6 +38,11 @@ public:
     [[nodiscard]] static std::optional<SourceAnalysis> analyze(
         const std::filesystem::path &path, QString *error = nullptr,
         const ImportProgressCallback &progress = {});
+    // Fills PATH launchers for vendor archives from desktop Exec= names and
+    // inspected payload files. Returns true when mapping.launchers changed.
+    static bool inferArchiveLaunchers(InstallMapping &mapping,
+                                      const QList<PayloadEntry> &payload,
+                                      const QString &packageName);
 };
 
 } // namespace pacsmith

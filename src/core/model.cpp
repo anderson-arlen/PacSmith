@@ -6,6 +6,7 @@
 #include <QCryptographicHash>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QRegularExpression>
 
 #include <algorithm>
 
@@ -240,6 +241,57 @@ DesktopEntryConfiguration DesktopEntryConfiguration::fromJson(const QJsonObject 
     return result;
 }
 
+QString desktopEntryField(const QString &contents, const QString &key) {
+    const QRegularExpression expression(
+        QStringLiteral("(?m)^%1=(.*)$").arg(QRegularExpression::escape(key)));
+    return expression.match(contents).captured(1).trimmed();
+}
+
+QString desktopEntryCommand(const QString &contents) {
+    auto exec = desktopEntryField(contents, QStringLiteral("Exec"));
+    if (exec.isEmpty()) return {};
+    QString executable;
+    if (exec.startsWith(QLatin1Char('"'))) {
+        const auto closing = exec.indexOf(QLatin1Char('"'), 1);
+        if (closing <= 1) return {};
+        executable = exec.sliced(1, closing - 1);
+    } else {
+        const auto whitespace = exec.indexOf(QRegularExpression(QStringLiteral("\\s")));
+        executable = whitespace < 0 ? exec : exec.first(whitespace);
+    }
+    auto command = QFileInfo(executable).fileName();
+    static const QRegularExpression safeName(QStringLiteral("^[A-Za-z0-9@._+\\-]+$"));
+    if (!safeName.match(command).hasMatch()) return {};
+    const auto lower = command.toLower();
+    if (lower == QStringLiteral("env") || lower == QStringLiteral("sh") ||
+        lower == QStringLiteral("bash") || lower == QStringLiteral("gio") ||
+        lower == QStringLiteral("gapplication") || lower.startsWith(QStringLiteral("dbus-")) ||
+        lower.startsWith(QStringLiteral("python"))) {
+        return {};
+    }
+    return command;
+}
+
+QString preferredDisplayName(const DebianMetadata &metadata,
+                             const QList<DesktopEntryConfiguration> &desktopEntries) {
+    QString fallbackDesktop;
+    for (const auto &desktop : desktopEntries) {
+        if (!desktop.enabled) continue;
+        const auto name = desktopEntryField(desktop.contents, QStringLiteral("Name"));
+        if (name.isEmpty() || name.size() > 80) continue;
+        if (fallbackDesktop.isEmpty()) fallbackDesktop = name;
+        if (!metadata.package.isEmpty() &&
+            (name.contains(metadata.package, Qt::CaseInsensitive) ||
+             desktop.id.contains(metadata.package, Qt::CaseInsensitive) ||
+             desktop.sourcePath.contains(metadata.package, Qt::CaseInsensitive))) {
+            return name;
+        }
+    }
+    if (!fallbackDesktop.isEmpty()) return fallbackDesktop;
+    if (!metadata.package.isEmpty()) return metadata.package;
+    return metadata.description.section(QLatin1Char('\n'), 0, 0).trimmed();
+}
+
 QJsonObject IconConfiguration::toJson() const {
     QString kind;
     switch (sourceKind) {
@@ -281,6 +333,50 @@ IconConfiguration IconConfiguration::fromJson(const QJsonObject &object) {
     return result;
 }
 
+QString AppRunConfiguration::contentFingerprint() const {
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(contents.toUtf8());
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+bool AppRunConfiguration::requiresReview() const {
+    if (!present || !script || userModified) return false;
+    return acknowledgedFingerprint != contentFingerprint();
+}
+
+void AppRunConfiguration::acknowledge() {
+    acknowledgedFingerprint = contentFingerprint();
+}
+
+QJsonObject AppRunConfiguration::toJson() const {
+    return {{QStringLiteral("present"), present},
+            {QStringLiteral("script"), script},
+            {QStringLiteral("contents"), contents},
+            {QStringLiteral("originalContents"), originalContents},
+            {QStringLiteral("originalContentsSha256"), originalContentsSha256},
+            {QStringLiteral("acknowledgedFingerprint"), acknowledgedFingerprint},
+            {QStringLiteral("userModified"), userModified},
+            {QStringLiteral("reviewReason"), reviewReason},
+            {QStringLiteral("provenance"), provenance.toJson()}};
+}
+
+AppRunConfiguration AppRunConfiguration::fromJson(const QJsonObject &object) {
+    AppRunConfiguration result;
+    result.present = object.value(QStringLiteral("present")).toBool();
+    result.script = object.value(QStringLiteral("script")).toBool();
+    result.contents = object.value(QStringLiteral("contents")).toString();
+    result.originalContents = object.value(QStringLiteral("originalContents")).toString();
+    result.originalContentsSha256 =
+        object.value(QStringLiteral("originalContentsSha256")).toString();
+    result.acknowledgedFingerprint =
+        object.value(QStringLiteral("acknowledgedFingerprint")).toString();
+    result.userModified = object.value(QStringLiteral("userModified")).toBool();
+    result.reviewReason = object.value(QStringLiteral("reviewReason")).toString();
+    result.provenance = FieldProvenance::fromJson(
+        object.value(QStringLiteral("provenance")).toObject());
+    return result;
+}
+
 QJsonObject InstallMapping::toJson() const {
     return {{QStringLiteral("archiveLayout"),
              archiveLayout == ArchiveLayout::PreserveRoot ? QStringLiteral("preserve-root")
@@ -294,7 +390,8 @@ QJsonObject InstallMapping::toJson() const {
             {QStringLiteral("executableLinks"), stringsToJson(executableLinks)},
             {QStringLiteral("launchers"), valueListToJson(launchers)},
             {QStringLiteral("desktopEntries"), valueListToJson(desktopEntries)},
-            {QStringLiteral("icon"), icon.toJson()}};
+            {QStringLiteral("icon"), icon.toJson()},
+            {QStringLiteral("appRun"), appRun.toJson()}};
 }
 
 InstallMapping InstallMapping::fromJson(const QJsonObject &object) {
@@ -314,6 +411,7 @@ InstallMapping InstallMapping::fromJson(const QJsonObject &object) {
     result.desktopEntries = valueListFromJson<DesktopEntryConfiguration>(
         object.value(QStringLiteral("desktopEntries")));
     result.icon = IconConfiguration::fromJson(object.value(QStringLiteral("icon")).toObject());
+    result.appRun = AppRunConfiguration::fromJson(object.value(QStringLiteral("appRun")).toObject());
     // Migrate the original single-launcher representation without changing
     // older, user-readable project files in place until the next save.
     if (result.launchers.isEmpty() && !result.binarySourcePath.isEmpty() &&
@@ -432,7 +530,8 @@ QJsonObject PayloadEntry::toJson() const {
             {QStringLiteral("reviewReason"), reviewReason},
             {QStringLiteral("contentSha256"), contentSha256},
             {QStringLiteral("textPreview"), textPreview},
-            {QStringLiteral("previewTruncated"), previewTruncated}};
+            {QStringLiteral("previewTruncated"), previewTruncated},
+            {QStringLiteral("executable"), executable}};
 }
 
 PayloadEntry PayloadEntry::fromJson(const QJsonObject &object) {
@@ -447,6 +546,7 @@ PayloadEntry PayloadEntry::fromJson(const QJsonObject &object) {
     result.contentSha256 = object.value(QStringLiteral("contentSha256")).toString();
     result.textPreview = object.value(QStringLiteral("textPreview")).toString();
     result.previewTruncated = object.value(QStringLiteral("previewTruncated")).toBool();
+    result.executable = object.value(QStringLiteral("executable")).toBool();
     return result;
 }
 
@@ -743,6 +843,7 @@ QJsonObject PackageRelease::toJson() const {
             {QStringLiteral("generatedPkgbuild"), generatedPkgbuild},
             {QStringLiteral("generatedPkgbuildSha256"), generatedPkgbuildSha256},
             {QStringLiteral("pkgbuildManuallyModified"), pkgbuildManuallyModified},
+            {QStringLiteral("customPkgbuild"), customPkgbuild},
             {QStringLiteral("previousManualPkgbuild"), previousManualPkgbuild},
             {QStringLiteral("lifecycleScript"), lifecycleScript.toJson()},
             {QStringLiteral("fieldProvenance"), provenanceMapToJson(fieldProvenance)},
@@ -786,6 +887,7 @@ PackageRelease PackageRelease::fromJson(const QJsonObject &object) {
     result.generatedPkgbuild = object.value(QStringLiteral("generatedPkgbuild")).toString();
     result.generatedPkgbuildSha256 = object.value(QStringLiteral("generatedPkgbuildSha256")).toString();
     result.pkgbuildManuallyModified = object.value(QStringLiteral("pkgbuildManuallyModified")).toBool();
+    result.customPkgbuild = object.value(QStringLiteral("customPkgbuild")).toString();
     result.previousManualPkgbuild = object.value(QStringLiteral("previousManualPkgbuild")).toString();
     result.lifecycleScript = ArchLifecycleScript::fromJson(object.value(QStringLiteral("lifecycleScript")).toObject());
     result.fieldProvenance = provenanceMapFromJson(object.value(QStringLiteral("fieldProvenance")).toObject());

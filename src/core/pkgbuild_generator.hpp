@@ -10,6 +10,8 @@ namespace pacsmith {
 class PkgbuildGenerator final {
 public:
     [[nodiscard]] static QString generate(const PackageRelease &release);
+    [[nodiscard]] static QString installedPayloadPath(const PackageRelease &release,
+                                                      const QString &payloadPath);
     [[nodiscard]] static QString sanitizePackageName(const QString &name);
     [[nodiscard]] static QString translateVersion(const QString &debianVersion);
     [[nodiscard]] static std::pair<QString, QString> splitEpochAndVersion(const QString &debianVersion);

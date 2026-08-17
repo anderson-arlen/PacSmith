@@ -1,6 +1,7 @@
 #include "gui/main_window.hpp"
 
 #include "core/pkgbuild_generator.hpp"
+#include "core/pkgbuild_install_plan.hpp"
 #include "core/lifecycle_validator.hpp"
 #include "core/repository_trust.hpp"
 #include "core/payload_inspector.hpp"
@@ -11,18 +12,22 @@
 #include "core/path_safety.hpp"
 #include "core/managed_package.hpp"
 #include "gui/ai_progress_dialog.hpp"
+#include "gui/command_progress_dialog.hpp"
 #include "gui/desktop_entry_highlighter.hpp"
 #include "gui/import_worker.hpp"
 #include "gui/pkgbuild_highlighter.hpp"
 #include "gui/reanalyze_worker.hpp"
+#include "gui/shell_highlighter.hpp"
 
 #include <QAbstractItemView>
 #include <QAbstractButton>
 #include <QAction>
+#include <QButtonGroup>
 #include <QApplication>
 #include <QColor>
 #include <QComboBox>
 #include <QCompleter>
+#include <QCursor>
 #include <QCloseEvent>
 #include <QCheckBox>
 #include <QClipboard>
@@ -49,6 +54,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QListWidgetItem>
+#include <QLocale>
+#include <QMap>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
@@ -59,7 +67,6 @@
 #include <QPlainTextEdit>
 #include <QPainter>
 #include <QProgressDialog>
-#include <QProgressBar>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QPixmap>
@@ -75,6 +82,7 @@
 #include <QStyleOptionViewItem>
 #include <QSysInfo>
 #include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QTimeEdit>
 #include <QSpinBox>
@@ -102,6 +110,7 @@ QLabel *pageIntroduction(const QString &text, QWidget *parent);
 
 constexpr int projectSubtitleRole = Qt::UserRole + 1;
 constexpr int projectVisualStateRole = Qt::UserRole + 2;
+constexpr int sectionBaseLabelRole = Qt::UserRole + 1;
 
 enum class ProjectVisualState { NotInstalled, Current, UpdateAvailable, Attention, Preparing };
 
@@ -748,6 +757,58 @@ QLabel *pageIntroduction(const QString &text, QWidget *parent) {
     return label;
 }
 
+QWidget *emptyPageHost(QWidget *parent) {
+    auto *host = new QWidget(parent);
+    auto *layout = new QVBoxLayout(host);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    return host;
+}
+
+QString sourcePackageTypeTitle(const SourcePackageType type) {
+    switch (type) {
+    case SourcePackageType::Debian: return QStringLiteral("Deb Package");
+    case SourcePackageType::Rpm: return QStringLiteral("Rpm Package");
+    case SourcePackageType::ArchPackage: return QStringLiteral("Arch Package");
+    case SourcePackageType::Archive: return QStringLiteral("Archive");
+    case SourcePackageType::AppImage: return QStringLiteral("AppImage");
+    case SourcePackageType::ElfBinary: return QStringLiteral("Executable");
+    case SourcePackageType::Unknown: return QStringLiteral("Not yet inspected");
+    }
+    return QStringLiteral("Not yet inspected");
+}
+
+QString sourcePackageTypeExplanation(const SourcePackageType type) {
+    switch (type) {
+    case SourcePackageType::Debian:
+        return QStringLiteral("Official Debian/Ubuntu binary package. PacSmith inspects control metadata, maintainer scripts, and the data archive without executing anything.");
+    case SourcePackageType::Rpm:
+        return QStringLiteral("Official RPM binary package. PacSmith reads the header and cpio payload statically and never runs RPM scriptlets.");
+    case SourcePackageType::ArchPackage:
+        return QStringLiteral("Existing Arch package. PacSmith reads .PKGINFO and the payload, then rebuilds a new package with PacSmith identity metadata.");
+    case SourcePackageType::Archive:
+        return QStringLiteral("tar, zip, or 7z application bundle. PacSmith maps the inspected layout into an Arch package, usually under /opt.");
+    case SourcePackageType::AppImage:
+        return QStringLiteral("Type 2 AppImage. PacSmith decomposes the AppDir with unsquashfs; it does not run the image, FUSE-mount it, or keep the embedded updater.");
+    case SourcePackageType::ElfBinary:
+        return QStringLiteral("Standalone Linux executable identified from its ELF header. PacSmith installs it to an explicit /usr/bin path and never runs it during analysis.");
+    case SourcePackageType::Unknown:
+        return QStringLiteral("This release has been recorded but its artifact has not been downloaded and inspected yet.");
+    }
+    return {};
+}
+
+QString acquisitionKindTitle(const AcquisitionKind kind) {
+    switch (kind) {
+    case AcquisitionKind::LocalFile: return QStringLiteral("Local file");
+    case AcquisitionKind::DirectUrl: return QStringLiteral("Direct HTTPS download");
+    case AcquisitionKind::AptRepository: return QStringLiteral("Signed APT repository");
+    case AcquisitionKind::RpmRepository: return QStringLiteral("Signed RPM repository");
+    case AcquisitionKind::GitHubRelease: return QStringLiteral("GitHub release");
+    }
+    return QStringLiteral("Local file");
+}
+
 QString reasoningEffortLabel(const AiReasoningEffort effort) {
     switch (effort) {
     case AiReasoningEffort::ProviderDefault: return QStringLiteral("Provider default");
@@ -799,6 +860,58 @@ void makeReadOnlyCodeEditor(QPlainTextEdit *editor) {
     editor->setReadOnly(true);
     editor->setLineWrapMode(QPlainTextEdit::NoWrap);
     editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+}
+
+QTreeWidgetItem *ensureInstallPlanNode(QTreeWidget *tree, QHash<QString, QTreeWidgetItem *> *nodes,
+                                       const QString &absolutePath) {
+    QString path = absolutePath;
+    while (path.startsWith(QLatin1Char('/'))) path.remove(0, 1);
+    while (path.endsWith(QLatin1Char('/'))) path.chop(1);
+    if (path.isEmpty()) return tree->invisibleRootItem();
+    const auto parts = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    QString current;
+    QTreeWidgetItem *parent = tree->invisibleRootItem();
+    for (const auto &part : parts) {
+        current += QLatin1Char('/') + part;
+        auto *item = nodes->value(current, nullptr);
+        if (item == nullptr) {
+            const auto label = current.count(QLatin1Char('/')) == 1 ? current : part;
+            item = new QTreeWidgetItem(parent, QStringList{label});
+            item->setToolTip(0, current);
+            item->setData(0, Qt::UserRole, current);
+            nodes->insert(current, item);
+        }
+        parent = item;
+    }
+    return parent;
+}
+
+void addInstallPlanEntry(QTreeWidget *tree, QHash<QString, QTreeWidgetItem *> *nodes,
+                         const QString &path, const QString &source, const QString &purpose,
+                         const QColor &foreground = {}) {
+    auto *item = ensureInstallPlanNode(tree, nodes, path);
+    if (item == nullptr || item == tree->invisibleRootItem()) return;
+    item->setText(1, source);
+    item->setText(2, purpose);
+    item->setToolTip(1, source);
+    item->setToolTip(2, purpose);
+    if (foreground.isValid()) {
+        for (int column = 0; column < 3; ++column) item->setForeground(column, foreground);
+    }
+}
+
+int decorateInstallPlanTree(QTreeWidgetItem *item) {
+    if (item->childCount() == 0) return item->text(1).isEmpty() ? 0 : 1;
+    int files = 0;
+    for (int row = 0; row < item->childCount(); ++row) {
+        files += decorateInstallPlanTree(item->child(row));
+    }
+    if (item->text(2).isEmpty()) {
+        item->setText(2, files == 1 ? QStringLiteral("1 file")
+                                    : QStringLiteral("%1 files").arg(files));
+    }
+    item->sortChildren(0, Qt::AscendingOrder);
+    return files;
 }
 
 void showDetailedMessageDialog(QWidget *parent, const QString &title, const QString &message,
@@ -901,12 +1014,102 @@ QString retainedPackagePath(const ProjectStore &store, const PackageRelease &rel
     return {};
 }
 
+const BuildRecord *latestSuccessfulBuild(const PackageRelease &release) {
+    for (auto build = release.builds.crbegin(); build != release.builds.crend(); ++build) {
+        if (build->status == BuildStatus::Succeeded) return &*build;
+    }
+    return nullptr;
+}
+
+bool releaseHasExistingBuild(const PackageRelease &release) {
+    if (release.buildStatus == BuildStatus::Succeeded) return true;
+    return std::any_of(release.builds.cbegin(), release.builds.cend(), [](const auto &build) {
+        return build.status == BuildStatus::Succeeded;
+    });
+}
+
+void applyPrimaryActionStyle(QPushButton *button) {
+    button->setStyleSheet(
+        QStringLiteral("QPushButton { font-weight: 600; padding: 8px 22px; min-height: 36px; }"));
+    button->setDefault(true);
+}
+
+QString builtPackageSummaryHtml(const ProjectStore &store, const PackageRelease &release,
+                                const bool building, const bool installing) {
+    if (building) {
+        return QStringLiteral(
+            "<b>Building…</b><br>Progress and command output are in the dialog.");
+    }
+    if (installing) {
+        return QStringLiteral(
+            "<b>Installing…</b><br>Progress and command output are in the dialog.");
+    }
+    const auto packagePath = retainedPackagePath(store, release);
+    if (packagePath.isEmpty()) {
+        if (release.buildStatus == BuildStatus::Failed) {
+            return QStringLiteral(
+                "<b>No package on disk.</b><br>The last build failed. Rebuild to produce an Arch package.");
+        }
+        if (release.buildStatus == BuildStatus::Canceled) {
+            return QStringLiteral(
+                "<b>No package on disk.</b><br>The last build was canceled.");
+        }
+        if (releaseHasExistingBuild(release)) {
+            return QStringLiteral(
+                "<b>No package on disk.</b><br>A previous build succeeded, but the package file is no longer retained. Rebuild to recreate it.");
+        }
+        return QStringLiteral(
+            "<b>Not built yet.</b><br>Build this release to produce an Arch package, then install it with pacman.");
+    }
+    const QFileInfo info(packagePath);
+    qint64 size = info.size();
+    auto builtAt = info.lastModified();
+    QString packageName;
+    QString packageVersion;
+    QString architecture;
+    if (const auto *build = latestSuccessfulBuild(release)) {
+        if (build->finishedAt.isValid()) builtAt = build->finishedAt;
+        if (!build->artifacts.isEmpty()) {
+            const auto &artifact = build->artifacts.first();
+            if (artifact.size > 0) size = artifact.size;
+            if (artifact.createdAt.isValid()) builtAt = artifact.createdAt;
+            packageName = artifact.packageName;
+            packageVersion = artifact.packageVersion;
+            architecture = artifact.architecture;
+        }
+    }
+    QStringList lines{QStringLiteral("<b>Built package</b>")};
+    if (!packageName.isEmpty()) {
+        auto identity = packageName.toHtmlEscaped();
+        if (!packageVersion.isEmpty()) identity += QLatin1Char(' ') + packageVersion.toHtmlEscaped();
+        if (!architecture.isEmpty()) {
+            identity += QStringLiteral(" (%1)").arg(architecture.toHtmlEscaped());
+        }
+        lines.append(identity);
+    }
+    lines.append(info.fileName().toHtmlEscaped());
+    lines.append(QStringLiteral("Size: %1").arg(QLocale().formattedDataSize(size)));
+    if (builtAt.isValid()) {
+        lines.append(QStringLiteral("Built: %1").arg(
+            QLocale().toString(builtAt.toLocalTime(), QLocale::ShortFormat)));
+    }
+    return lines.join(QStringLiteral("<br>"));
+}
+
 qsizetype pendingPayloadReviews(const PackageRelease &project) {
     if (project.sourceType == SourcePackageType::AppImage) return 0;
     return std::count_if(project.payload.cbegin(), project.payload.cend(), [&project](const auto &entry) {
         return entry.requiresReview && PayloadReview::state(project, entry).needsReview;
     });
 }
+
+bool unsafePackageSymlink(const PayloadEntry &entry) {
+    return !entry.symlinkTarget.isEmpty() &&
+           !PathSafety::safePackageSymlinkTarget(entry.path, entry.symlinkTarget);
+}
+
+const QColor payloadReviewAmber(Qt::darkYellow);
+const QColor payloadUnsafeRed(0xe5, 0x53, 0x4b);
 
 bool pkgbuildReferencesLifecycle(const QString &pkgbuild, const QString &fileName) {
     if (fileName.isEmpty()) return false;
@@ -1034,11 +1237,36 @@ MainWindow::MainWindow(QWidget *parent)
     projectTitle_ = new QLabel(QStringLiteral("<h2>PacSmith</h2>"), dashboard);
     projectSubtitle_ = new QLabel(QStringLiteral("Import a vendor artifact or GitHub release to begin."), dashboard);
     projectSubtitle_->setWordWrap(true);
+    projectPrimaryButton_ = new QPushButton(dashboard);
+    applyPrimaryActionStyle(projectPrimaryButton_);
+    projectPrimaryButton_->setVisible(false);
+    uninstallButton_ = new QPushButton(QStringLiteral("Uninstall"), dashboard);
+    uninstallButton_->setVisible(false);
+    auto *dashboardHeader = new QHBoxLayout;
+    auto *dashboardHeading = new QVBoxLayout;
+    dashboardHeading->addWidget(projectTitle_);
+    dashboardHeading->addWidget(projectSubtitle_);
+    dashboardHeader->addLayout(dashboardHeading, 1);
+    dashboardHeader->addWidget(projectPrimaryButton_, 0, Qt::AlignTop);
+    dashboardHeader->addWidget(uninstallButton_, 0, Qt::AlignTop);
+    connect(projectPrimaryButton_, &QPushButton::clicked, this,
+            &MainWindow::handleProjectPrimaryAction);
+    connect(uninstallButton_, &QPushButton::clicked, this, &MainWindow::startUninstall);
     projectTabs_ = new QTabWidget(dashboard);
+    dashboardUpdatesHost_ = emptyPageHost(dashboard);
+    updatesEditor_ = createUpdatesPage();
+    dashboardUpdatesHost_->layout()->addWidget(updatesEditor_);
     projectTabs_->addTab(createProjectInfoPage(), QStringLiteral("Project Info"));
+    projectTabs_->addTab(dashboardUpdatesHost_, QStringLiteral("Updates"));
     projectTabs_->addTab(createOverviewPage(), QStringLiteral("Version History"));
-    dashboardLayout->addWidget(projectTitle_);
-    dashboardLayout->addWidget(projectSubtitle_);
+    connect(projectTabs_, &QTabWidget::currentChanged, this, [this] {
+        if (rightStack_ == nullptr || rightStack_->currentIndex() != 0) return;
+        if (projectTabs_->currentWidget() == dashboardUpdatesHost_) {
+            placeUpdatesEditor();
+            if (project_) populateUpdates();
+        }
+    });
+    dashboardLayout->addLayout(dashboardHeader);
     dashboardLayout->addWidget(projectTabs_, 1);
 
     auto *workbench = new QWidget(rightStack_);
@@ -1046,11 +1274,22 @@ MainWindow::MainWindow(QWidget *parent)
     auto *workbenchHeader = new QHBoxLayout;
     auto *backButton = new QPushButton(QStringLiteral("← Back to Project"), workbench);
     auto *workbenchHeading = new QVBoxLayout;
+    auto *titleRow = new QHBoxLayout;
     workbenchTitle_ = new QLabel(QStringLiteral("<h2>Package Setup</h2>"), workbench);
+    sourceTypeBadge_ = new QLabel(workbench);
+    sourceTypeBadge_->setObjectName(QStringLiteral("sourceTypeBadge"));
+    sourceTypeBadge_->setAlignment(Qt::AlignCenter);
+    sourceTypeBadge_->setStyleSheet(QStringLiteral(
+        "QLabel#sourceTypeBadge { background: rgba(52, 152, 219, 36); border: 1px solid #2e86ab; "
+        "border-radius: 4px; padding: 4px 10px; font-weight: 600; }"));
+    titleRow->addWidget(workbenchTitle_, 0, Qt::AlignVCenter);
+    titleRow->addWidget(sourceTypeBadge_, 0, Qt::AlignVCenter);
+    titleRow->addStretch();
     workbenchSubtitle_ = new QLabel(
-        QStringLiteral("Review the release recipe in order, then inspect the PKGBUILD and build it."), workbench);
+        QStringLiteral("Inspect the imported artifact, configure the Pacman package, then review the generated recipe."),
+        workbench);
     workbenchSubtitle_->setWordWrap(true);
-    workbenchHeading->addWidget(workbenchTitle_);
+    workbenchHeading->addLayout(titleRow);
     workbenchHeading->addWidget(workbenchSubtitle_);
     workbenchHeader->addWidget(backButton, 0, Qt::AlignTop);
     workbenchHeader->addLayout(workbenchHeading, 1);
@@ -1060,29 +1299,97 @@ MainWindow::MainWindow(QWidget *parent)
     workbenchHeader->addWidget(reanalyzeButton_, 0, Qt::AlignTop);
     resolveWithAiButton_ = new QPushButton(QStringLiteral("Resolve Review Items with AI"), workbench);
     workbenchHeader->addWidget(resolveWithAiButton_, 0, Qt::AlignTop);
-    tabs_ = new QTabWidget(workbench);
-    const auto addSection = [this](const EditorSection section, QWidget *page,
-                                   const QString &name) {
-        const auto index = tabs_->addTab(page, name);
-        sectionTabs_.insert(static_cast<int>(section), index);
-    };
-    addSection(EditorSection::Package, createPackagePage(), QStringLiteral("Package"));
-    addSection(EditorSection::Dependencies, createDependenciesPage(), QStringLiteral("Dependencies"));
-    addSection(EditorSection::Scripts, createScriptsPage(), QStringLiteral("Scripts"));
-    addSection(EditorSection::Payload, createPayloadPage(), QStringLiteral("Payload"));
-    addSection(EditorSection::Commands, createCommandsPage(), QStringLiteral("Commands"));
-    addSection(EditorSection::DesktopEntries, createDesktopEntriesPage(), QStringLiteral("Desktop Entries"));
-    addSection(EditorSection::Icon, createIconPage(), QStringLiteral("Icon"));
-    addSection(EditorSection::Updates, createUpdatesPage(), QStringLiteral("Updates"));
-    addSection(EditorSection::Pkgbuild, createPkgbuildPage(), QStringLiteral("PKGBUILD"));
-    addSection(EditorSection::Build, createBuildPage(), QStringLiteral("Build"));
+    stageTabs_ = new QTabWidget(workbench);
+    auto *sourceHost = createStageHost(&sourceNav_, &sourceStack_);
+    auto *modeSwitch = new QWidget(workbench);
+    modeSwitch->setObjectName(QStringLiteral("configModeSwitch"));
+    auto *modeLayout = new QHBoxLayout(modeSwitch);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(0);
+    guidedModeButton_ = new QPushButton(QStringLiteral("Guided"), modeSwitch);
+    customModeButton_ = new QPushButton(QStringLiteral("Custom"), modeSwitch);
+    guidedModeButton_->setObjectName(QStringLiteral("configModeGuided"));
+    customModeButton_->setObjectName(QStringLiteral("configModeCustom"));
+    guidedModeButton_->setCheckable(true);
+    customModeButton_->setCheckable(true);
+    guidedModeButton_->setCursor(Qt::PointingHandCursor);
+    customModeButton_->setCursor(Qt::PointingHandCursor);
+    guidedModeButton_->setToolTip(QStringLiteral("Generate the PKGBUILD from these settings"));
+    customModeButton_->setToolTip(QStringLiteral("Edit the PKGBUILD directly; Guided settings are ignored"));
+    auto *modeGroup = new QButtonGroup(modeSwitch);
+    modeGroup->setExclusive(true);
+    modeGroup->addButton(guidedModeButton_);
+    modeGroup->addButton(customModeButton_);
+    guidedModeButton_->setChecked(true);
+    modeLayout->addWidget(guidedModeButton_, 1);
+    modeLayout->addWidget(customModeButton_, 1);
+    modeSwitch->setStyleSheet(QStringLiteral(
+        "QPushButton#configModeGuided, QPushButton#configModeCustom {"
+        "  padding: 5px 0; border: 1px solid #5a7a90; background: transparent; }"
+        "QPushButton#configModeGuided { border-top-left-radius: 4px; border-bottom-left-radius: 4px;"
+        "  border-right: none; }"
+        "QPushButton#configModeCustom { border-top-right-radius: 4px; border-bottom-right-radius: 4px; }"
+        "QPushButton#configModeGuided:checked, QPushButton#configModeCustom:checked {"
+        "  background: rgba(52, 152, 219, 70); font-weight: 600; }"));
+    connect(guidedModeButton_, &QPushButton::clicked, this, [this] { setConfigurationMode(false); });
+    connect(customModeButton_, &QPushButton::clicked, this, [this] { setConfigurationMode(true); });
+    auto *configHost = createStageHost(&configNav_, &configStack_, modeSwitch);
+    auto *resultHost = createStageHost(&resultNav_, &resultStack_);
+    stageTabs_->addTab(sourceHost, QStringLiteral("Deb Package"));
+    stageTabs_->addTab(configHost, QStringLiteral("Configuration"));
+    stageTabs_->addTab(resultHost, QStringLiteral("Pacman Package"));
+    stageTabs_->setTabToolTip(0, QStringLiteral("Imported vendor artifact: inspect metadata, original scripts, and payload"));
+    stageTabs_->setTabToolTip(1, QStringLiteral("Guided settings generate the PKGBUILD, or switch to Custom to edit it directly"));
+    stageTabs_->setTabToolTip(2, QStringLiteral("What the Pacman package will install, the PKGBUILD makepkg runs, and the built package"));
+    {
+        QSignalBlocker sourceBlock(sourceNav_);
+        QSignalBlocker configBlock(configNav_);
+        QSignalBlocker resultBlock(resultNav_);
+        addWorkbenchPage(0, sourceNav_, sourceStack_, EditorSection::SourceOverview,
+                         QStringLiteral("Overview"), createSourceOverviewPage());
+        addWorkbenchPage(0, sourceNav_, sourceStack_, EditorSection::SourceMetadata,
+                         QStringLiteral("Metadata"), createSourceMetadataPage());
+        addWorkbenchPage(0, sourceNav_, sourceStack_, EditorSection::SourceScripts,
+                         QStringLiteral("Vendor scripts"), createVendorScriptsPage());
+        addWorkbenchPage(0, sourceNav_, sourceStack_, EditorSection::SourceContents,
+                         QStringLiteral("Contents"), createPayloadPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigPkgbuild,
+                         QStringLiteral("PKGBUILD"), createPkgbuildPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigLayout,
+                         QStringLiteral("Install layout"), createInstallLayoutPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigDependencies,
+                         QStringLiteral("Dependencies"), createDependenciesPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigScripts,
+                         QStringLiteral("Scripts"), createConfigScriptsPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigCommands,
+                         QStringLiteral("Commands"), createCommandsPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigAppRun,
+                         QStringLiteral("AppRun"), createAppRunPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigDesktopEntries,
+                         QStringLiteral("Desktop entries"), createDesktopEntriesPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigIcon,
+                         QStringLiteral("Icon"), createIconPage());
+        configUpdatesHost_ = emptyPageHost(workbench);
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigUpdates,
+                         QStringLiteral("Updates"), configUpdatesHost_);
+        addWorkbenchPage(2, resultNav_, resultStack_, EditorSection::ResultInstallPlan,
+                         QStringLiteral("Install plan"), createInstallPlanPage());
+        addWorkbenchPage(2, resultNav_, resultStack_, EditorSection::ResultPkgbuild,
+                         QStringLiteral("PKGBUILD"), createResultPkgbuildPage());
+        addWorkbenchPage(2, resultNav_, resultStack_, EditorSection::ResultBuild,
+                         QStringLiteral("Build"), createBuildPage());
+    }
+    sourceNav_->setCurrentRow(0);
+    configNav_->setCurrentRow(1);
+    resultNav_->setCurrentRow(0);
     iconNetwork_ = new QNetworkAccessManager(this);
     workbenchLayout->addLayout(workbenchHeader);
-    workbenchLayout->addWidget(tabs_, 1);
+    workbenchLayout->addWidget(stageTabs_, 1);
     connect(backButton, &QPushButton::clicked, this, &MainWindow::showProjectDashboard);
     connect(reanalyzeButton_, &QPushButton::clicked, this, &MainWindow::startReanalysis);
     connect(resolveWithAiButton_, &QPushButton::clicked, this, &MainWindow::startAiResolution);
-    connect(tabs_, &QTabWidget::currentChanged, this, [this] {
+    connect(stageTabs_, &QTabWidget::currentChanged, this, [this] {
+        updateWorkbenchStageChrome();
         if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
             populateCurrentWorkbenchPage();
         }
@@ -1104,9 +1411,7 @@ MainWindow::MainWindow(QWidget *parent)
             });
 
     connect(&buildService_, &BuildService::outputAvailable, this, [this](const QString &text) {
-        buildLog_->moveCursor(QTextCursor::End);
-        buildLog_->insertPlainText(text);
-        buildLog_->moveCursor(QTextCursor::End);
+        if (commandProgress_ != nullptr) commandProgress_->appendOutput(text);
     });
     connect(&buildService_, &BuildService::failedToStart, this, [this](const QString &message) {
         if (project_ && currentRelease()->buildStatus == BuildStatus::Building) {
@@ -1115,7 +1420,10 @@ MainWindow::MainWindow(QWidget *parent)
                                       QStringLiteral("Build could not start")});
             persistCurrent();
         }
-        QMessageBox::critical(this, QStringLiteral("Build could not start"), message);
+        finishCommandProgress(false, QStringLiteral("Build could not start: %1").arg(message));
+        if (commandProgress_ == nullptr) {
+            QMessageBox::critical(this, QStringLiteral("Build could not start"), message);
+        }
         populateBuild();
         updateDeleteButton();
     });
@@ -1141,20 +1449,28 @@ MainWindow::MainWindow(QWidget *parent)
         populateBuild();
         populateHistory();
         updateDeleteButton();
+        finishCommandProgress(!result.canceled && result.succeeded(),
+                              result.canceled ? QStringLiteral("Build canceled.")
+                              : result.succeeded() ? QStringLiteral("Build succeeded.")
+                                                   : QStringLiteral("Build failed (exit %1).")
+                                                         .arg(result.exitCode));
         statusBar()->showMessage(result.canceled ? QStringLiteral("Build canceled")
                                  : result.succeeded() ? QStringLiteral("Build succeeded")
                                                       : QStringLiteral("Build failed"), 8000);
     });
     connect(&installService_, &InstallService::outputAvailable, this, [this](const QString &text) {
-        buildLog_->moveCursor(QTextCursor::End);
-        buildLog_->insertPlainText(text);
+        if (commandProgress_ != nullptr) commandProgress_->appendOutput(text);
     });
     connect(&installService_, &InstallService::progressChanged, this,
-            [this](const QString &message) { statusBar()->showMessage(message); });
+            [this](const QString &message) {
+                statusBar()->showMessage(message);
+                if (commandProgress_ != nullptr && !commandProgress_->isFinished()) {
+                    commandProgress_->setStatus(message);
+                }
+            });
     connect(&installService_, &InstallService::failedToStart, this, [this](const QString &message) {
         projectList_->setEnabled(true);
         pendingPackageOperation_.clear();
-        buildLog_->appendPlainText(QStringLiteral("\nPacSmith package operation failed: %1\n").arg(message));
         if (project_) {
             currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("install"),
                                       QStringLiteral("Installation session failed: %1").arg(message)});
@@ -1162,8 +1478,12 @@ MainWindow::MainWindow(QWidget *parent)
             populateHistory();
         }
         statusBar()->showMessage(QStringLiteral("Package operation failed"), 10000);
-        QMessageBox::critical(this, QStringLiteral("Installation could not start"), message);
+        finishCommandProgress(false, QStringLiteral("Package operation could not start: %1").arg(message));
+        if (commandProgress_ == nullptr) {
+            QMessageBox::critical(this, QStringLiteral("Installation could not start"), message);
+        }
         populateBuild();
+        updateDashboardActions();
         updateDeleteButton();
     });
     connect(&installService_, &InstallService::finished, this, [this](const ProcessResult &result) {
@@ -1184,11 +1504,23 @@ MainWindow::MainWindow(QWidget *parent)
         refreshProjectList(projectId);
         if (!project_ || project_->id != projectId) loadProject(projectId);
         refreshCurrentProject();
-        statusBar()->showMessage(result.succeeded() ? QStringLiteral("Installation succeeded")
-                                                     : QStringLiteral("Installation failed"), 10000);
-        QMessageBox::information(this, QStringLiteral("Package operation"),
-                                 result.succeeded() ? QStringLiteral("Pacman completed successfully.")
-                                                    : QStringLiteral("Pacman did not complete successfully. Review the captured output on Build."));
+        const auto succeeded = result.succeeded();
+        const auto summary = operation == QStringLiteral("uninstall")
+            ? (succeeded ? QStringLiteral("Uninstall completed successfully.")
+                         : QStringLiteral("Uninstall failed (exit %1).").arg(result.exitCode))
+            : operation == QStringLiteral("rollback")
+                ? (succeeded ? QStringLiteral("Rollback completed successfully.")
+                             : QStringLiteral("Rollback failed (exit %1).").arg(result.exitCode))
+                : (succeeded ? QStringLiteral("Installation completed successfully.")
+                             : QStringLiteral("Installation failed (exit %1).").arg(result.exitCode));
+        finishCommandProgress(succeeded, summary);
+        statusBar()->showMessage(succeeded ? QStringLiteral("Installation succeeded")
+                                           : QStringLiteral("Installation failed"), 10000);
+        if (commandProgress_ == nullptr) {
+            QMessageBox::information(this, QStringLiteral("Package operation"),
+                                     succeeded ? QStringLiteral("Pacman completed successfully.")
+                                               : QStringLiteral("Pacman did not complete successfully. Review the captured output in the progress dialog."));
+        }
     });
 
     connect(&debDownloadService_, &DebDownloadService::progress, this,
@@ -1483,7 +1815,7 @@ QWidget *MainWindow::createProjectInfoPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Project status and immutable acquisition details. Package setup and update configuration are kept in their own views."),
+        QStringLiteral("Project status and immutable acquisition details. Update settings are on the Updates tab."),
         page));
     auto *summary = new QHBoxLayout;
     overviewIcon_ = new QLabel(page);
@@ -1507,20 +1839,16 @@ QWidget *MainWindow::createProjectInfoPage() {
     summary->addLayout(details, 1);
     layout->addLayout(summary);
 
-    auto *buttons = new QHBoxLayout;
-    auto *openUpdates = new QPushButton(QStringLiteral("Update Configuration"), page);
-    auto *checkUpdates = new QPushButton(QStringLiteral("Check for Updates"), page);
-    uninstallButton_ = new QPushButton(QStringLiteral("Uninstall"), page);
-    buttons->addWidget(openUpdates);
-    buttons->addWidget(checkUpdates);
-    buttons->addWidget(uninstallButton_);
-    buttons->addStretch();
-    layout->addLayout(buttons);
+    auto *editRow = new QHBoxLayout;
+    editRow->addStretch();
+    editConfigurationButton_ = new QPushButton(QStringLiteral("Edit Package Configuration"), page);
+    editConfigurationButton_->setVisible(false);
+    editRow->addWidget(editConfigurationButton_);
+    editRow->addStretch();
+    layout->addLayout(editRow);
     layout->addStretch();
-    connect(openUpdates, &QPushButton::clicked, this,
-            &MainWindow::configureSelectedReleaseUpdates);
-    connect(checkUpdates, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
-    connect(uninstallButton_, &QPushButton::clicked, this, &MainWindow::startUninstall);
+    connect(editConfigurationButton_, &QPushButton::clicked, this,
+            &MainWindow::editPackageConfiguration);
     return page;
 }
 
@@ -1548,7 +1876,12 @@ QWidget *MainWindow::createOverviewPage() {
     installReleaseButton_ = new QPushButton(QStringLiteral("Install Selected Release"), page);
     rollbackButton_ = new QPushButton(QStringLiteral("Roll Back to Release"), page);
     deleteReleaseButton_ = new QPushButton(QStringLiteral("Delete Release"), page);
+    historyCheckUpdatesButton_ = new QPushButton(QStringLiteral("Check for Updates"), page);
+    historyCheckUpdatesButton_->setToolTip(
+        QStringLiteral("Check the current update source for a newer vendor release"));
+    historyCheckUpdatesButton_->setEnabled(false);
     auto *buttons = new QHBoxLayout;
+    buttons->addWidget(historyCheckUpdatesButton_);
     buttons->addWidget(editReleaseButton_);
     buttons->addWidget(prepareReleaseButton_);
     buttons->addWidget(installReleaseButton_);
@@ -1561,6 +1894,7 @@ QWidget *MainWindow::createOverviewPage() {
     historyList_ = new QListWidget(page);
     historyList_->setMinimumHeight(120);
     layout->addWidget(historyList_, 1);
+    connect(historyCheckUpdatesButton_, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
     connect(editReleaseButton_, &QPushButton::clicked, this, &MainWindow::editSelectedRelease);
     connect(prepareReleaseButton_, &QPushButton::clicked, this, &MainWindow::prepareSelectedRelease);
     connect(installReleaseButton_, &QPushButton::clicked, this, &MainWindow::installSelectedRelease);
@@ -1609,22 +1943,65 @@ QWidget *MainWindow::createOverviewPage() {
     return page;
 }
 
-QWidget *MainWindow::createPackagePage() {
+QWidget *MainWindow::createSourceOverviewPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
-    layout->addWidget(pageIntroduction(QStringLiteral("Artifact metadata preserved alongside PacSmith's parsed package fields."), page));
-    auto *updatesRow = new QHBoxLayout;
-    updatesRow->addWidget(new QLabel(
-        QStringLiteral("Acquisition details are immutable. Future artifact discovery is configured on the dashboard for the active release."),
-        page), 1);
-    auto *configureUpdates = new QPushButton(QStringLiteral("Configure Updates"), page);
-    updatesRow->addWidget(configureUpdates);
-    layout->addLayout(updatesRow);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("This is the vendor artifact PacSmith imported. It is evidence only: analysis never executes package content, and this page does not change the generated Arch package."),
+        page));
+    sourceTypeHeadline_ = new QLabel(page);
+    sourceTypeHeadline_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    sourceTypeHeadline_->setWordWrap(true);
+    sourceTypeExplanation_ = new QLabel(page);
+    sourceTypeExplanation_->setWordWrap(true);
+    sourceTypeExplanation_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    sourceAcquisitionDetail_ = new QLabel(page);
+    sourceAcquisitionDetail_->setWordWrap(true);
+    sourceAcquisitionDetail_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    sourceIdentityDetail_ = new QLabel(page);
+    sourceIdentityDetail_->setWordWrap(true);
+    sourceIdentityDetail_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    sourceInventoryDetail_ = new QLabel(page);
+    sourceInventoryDetail_->setWordWrap(true);
+    sourceInventoryDetail_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(sourceTypeHeadline_);
+    layout->addWidget(sourceTypeExplanation_);
+    layout->addSpacing(8);
+    layout->addWidget(sourceAcquisitionDetail_);
+    layout->addWidget(sourceIdentityDetail_);
+    layout->addWidget(sourceInventoryDetail_);
+    layout->addStretch();
+    return page;
+}
+
+QWidget *MainWindow::createSourceMetadataPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("Vendor metadata taken from the imported artifact. These fields describe the source package; Arch package name, dependencies, and install paths are configured separately."),
+        page));
+    auto *splitter = new QSplitter(Qt::Vertical, page);
+    metadataView_ = new QPlainTextEdit(splitter);
+    rawMetadataView_ = new QPlainTextEdit(splitter);
+    makeReadOnlyCodeEditor(metadataView_);
+    makeReadOnlyCodeEditor(rawMetadataView_);
+    metadataView_->setPlaceholderText(QStringLiteral("Parsed vendor metadata"));
+    rawMetadataView_->setPlaceholderText(QStringLiteral("Raw vendor fields"));
+    splitter->addWidget(metadataView_);
+    splitter->addWidget(rawMetadataView_);
+    layout->addWidget(splitter, 1);
+    return page;
+}
+
+QWidget *MainWindow::createInstallLayoutPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
     auto *mappingGroup = new QGroupBox(QStringLiteral("Archive / binary install mapping"), page);
     installMappingWidget_ = mappingGroup;
     auto *mappingLayout = new QFormLayout(mappingGroup);
+    installMappingLayout_ = mappingLayout;
     auto *mappingExplanation = pageIntroduction(
-        QStringLiteral("For an archive without a recognized Linux filesystem root, choose its /opt directory and optional command symlink. A standalone ELF is copied directly to the selected /usr/bin path."),
+        QStringLiteral("These settings control how the vendor archive or executable is laid out in the generated Arch package. They do not modify the imported artifact."),
         mappingGroup);
     mappingLayout->addRow(mappingExplanation);
     archiveLayout_ = new QComboBox(mappingGroup);
@@ -1646,40 +2023,17 @@ QWidget *MainWindow::createPackagePage() {
     mappingLayout->addRow(QStringLiteral("/opt directory"), installOptDirectory_);
     mappingLayout->addRow(QStringLiteral("Detected common root"), installCommonPrefix_);
     mappingLayout->addRow(QString{}, installStripPrefix_);
+    installCommandsHint_ = new QLabel(
+        QStringLiteral("PATH commands for this archive are configured on Commands. Choose a payload file there instead of typing a raw path here."),
+        mappingGroup);
+    installCommandsHint_->setWordWrap(true);
+    mappingLayout->addRow(installCommandsHint_);
     mappingLayout->addRow(QStringLiteral("Executable inside archive"), installBinarySource_);
     mappingLayout->addRow(QStringLiteral("Command destination"), installBinaryDestination_);
     mappingLayout->addRow(QString{}, saveMapping);
     layout->addWidget(mappingGroup);
-    auto *appImagePlan = new QGroupBox(QStringLiteral("Installed filesystem layout"), page);
-    appImageInstallPlanWidget_ = appImagePlan;
-    auto *appImagePlanLayout = new QVBoxLayout(appImagePlan);
-    appImagePlanLayout->addWidget(pageIntroduction(
-        QStringLiteral("PacSmith preserves the decomposed AppDir below /opt and creates only the host integrations listed here. Bundle contents are not relocated, pruned, or exposed individually."),
-        appImagePlan));
-    appImageInstallPlan_ = new QTreeWidget(appImagePlan);
-    appImageInstallPlan_->setColumnCount(3);
-    appImageInstallPlan_->setHeaderLabels(
-        {QStringLiteral("Installed path"), QStringLiteral("Source"),
-         QStringLiteral("Purpose")});
-    appImageInstallPlan_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    appImageInstallPlan_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-    appImageInstallPlan_->header()->setSectionResizeMode(2, QHeaderView::Stretch);
-    appImageInstallPlan_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    appImagePlanLayout->addWidget(appImageInstallPlan_);
-    layout->addWidget(appImagePlan);
-    auto *splitter = new QSplitter(Qt::Vertical, page);
-    metadataView_ = new QPlainTextEdit(splitter);
-    rawMetadataView_ = new QPlainTextEdit(splitter);
-    makeReadOnlyCodeEditor(metadataView_);
-    makeReadOnlyCodeEditor(rawMetadataView_);
-    metadataView_->setPlaceholderText(QStringLiteral("Parsed package metadata"));
-    rawMetadataView_->setPlaceholderText(QStringLiteral("Raw control fields"));
-    splitter->addWidget(metadataView_);
-    splitter->addWidget(rawMetadataView_);
-    layout->addWidget(splitter, 1);
+    layout->addStretch();
     connect(saveMapping, &QPushButton::clicked, this, &MainWindow::saveInstallMapping);
-    connect(configureUpdates, &QPushButton::clicked, this,
-            &MainWindow::configureSelectedReleaseUpdates);
     connect(archiveLayout_, &QComboBox::currentIndexChanged, this, [this](const int index) {
         if (currentRelease() == nullptr ||
             (currentRelease()->sourceType != SourcePackageType::Archive &&
@@ -1689,6 +2043,32 @@ QWidget *MainWindow::createPackagePage() {
         installBinarySource_->setEnabled(opt);
         installBinaryDestination_->setEnabled(opt);
     });
+    return page;
+}
+
+QWidget *MainWindow::createInstallPlanPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    installPlanNotice_ = pageIntroduction({}, page);
+    layout->addWidget(installPlanNotice_);
+    auto *appImagePlan = new QGroupBox(QStringLiteral("Installed filesystem layout"), page);
+    appImageInstallPlanWidget_ = appImagePlan;
+    auto *appImagePlanLayout = new QVBoxLayout(appImagePlan);
+    appImageInstallPlan_ = new QTreeWidget(appImagePlan);
+    appImageInstallPlan_->setColumnCount(3);
+    appImageInstallPlan_->setHeaderLabels(
+        {QStringLiteral("Installed path"), QStringLiteral("Source"),
+         QStringLiteral("Purpose")});
+    appImageInstallPlan_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    appImageInstallPlan_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    appImageInstallPlan_->header()->setSectionResizeMode(2, QHeaderView::Stretch);
+    appImageInstallPlan_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    appImageInstallPlan_->setItemsExpandable(true);
+    appImageInstallPlan_->setExpandsOnDoubleClick(true);
+    appImageInstallPlan_->setAnimated(true);
+    appImageInstallPlan_->setUniformRowHeights(true);
+    appImagePlanLayout->addWidget(appImageInstallPlan_);
+    layout->addWidget(appImagePlan, 1);
     return page;
 }
 
@@ -1715,28 +2095,12 @@ QWidget *MainWindow::createDependenciesPage() {
     return page;
 }
 
-QWidget *MainWindow::createScriptsPage() {
+QWidget *MainWindow::createVendorScriptsPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("PacSmith never executes lifecycle scripts from an imported package. The responsibility table shows what each script was trying to accomplish and how that work is handled on Arch. Original source below is reference-only."), page));
-    scriptsActionNotice_ = new QLabel(page);
-    scriptsActionNotice_->setWordWrap(true);
-    scriptsActionNotice_->setFrameStyle(QFrame::StyledPanel);
-    scriptsActionNotice_->setContentsMargins(10, 8, 10, 8);
-    layout->addWidget(scriptsActionNotice_);
-    scriptFindingsTable_ = new QTableWidget(page);
-    scriptFindingsTable_->setColumnCount(4);
-    scriptFindingsTable_->setHorizontalHeaderLabels({QStringLiteral("Script"), QStringLiteral("Responsibility"),
-                                                     QStringLiteral("Resolution"), QStringLiteral("Provenance")});
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    scriptFindingsTable_->verticalHeader()->setVisible(false);
-    scriptFindingsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    scriptFindingsTable_->setMaximumHeight(230);
-    layout->addWidget(scriptFindingsTable_);
+        QStringLiteral("Original maintainer scripts from the vendor package. PacSmith never executes them. Use them as reference while deciding Arch-specific handling under Configuration."),
+        page));
     auto *splitter = new QSplitter(page);
     scriptsList_ = new QListWidget(splitter);
     scriptView_ = new QPlainTextEdit(splitter);
@@ -1753,14 +2117,53 @@ QWidget *MainWindow::createScriptsPage() {
     reviewRow->addWidget(scriptStatus_, 1);
     reviewRow->addWidget(acknowledgeScriptButton_);
     layout->addLayout(reviewRow);
-    auto *lifecycleGroup = new QGroupBox(QStringLiteral("Arch lifecycle (.install)"), page);
+    connect(scriptsList_, &QListWidget::currentRowChanged, this, [this] { updateSelectedScript(); });
+    connect(acknowledgeScriptButton_, &QPushButton::clicked, this, &MainWindow::acknowledgeSelectedScript);
+    return page;
+}
+
+QWidget *MainWindow::createConfigScriptsPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("Vendor maintainer scripts are the source. Each row maps a responsibility onto Arch handling; the .install file below is the destination pacman may run as root. Original script text stays on the imported package tab."),
+        page));
+    scriptsActionNotice_ = new QLabel(page);
+    scriptsActionNotice_->setWordWrap(true);
+    scriptsActionNotice_->setFrameStyle(QFrame::StyledPanel);
+    scriptsActionNotice_->setContentsMargins(10, 8, 10, 8);
+    layout->addWidget(scriptsActionNotice_);
+    auto *splitter = new QSplitter(Qt::Vertical, page);
+    auto *mapping = new QWidget(splitter);
+    auto *mappingLayout = new QVBoxLayout(mapping);
+    mappingLayout->setContentsMargins(0, 0, 0, 0);
+    scriptFindingsTable_ = new QTableWidget(mapping);
+    scriptFindingsTable_->setColumnCount(4);
+    scriptFindingsTable_->setHorizontalHeaderLabels(
+        {QStringLiteral("Source script"), QStringLiteral("Responsibility"),
+         QStringLiteral("Arch handling"), QStringLiteral("Provenance")});
+    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    scriptFindingsTable_->verticalHeader()->setVisible(false);
+    scriptFindingsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    scriptFindingsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    mappingLayout->addWidget(scriptFindingsTable_, 1);
+    auto *jumpRow = new QHBoxLayout;
+    auto *viewSource = new QPushButton(QStringLiteral("View vendor scripts"), mapping);
+    jumpRow->addWidget(viewSource);
+    jumpRow->addStretch();
+    mappingLayout->addLayout(jumpRow);
+
+    auto *lifecycleGroup = new QGroupBox(QStringLiteral("Arch lifecycle (.install)"), splitter);
     auto *lifecycleLayout = new QVBoxLayout(lifecycleGroup);
     lifecycleStatus_ = new QLabel(lifecycleGroup);
     lifecycleStatus_->setWordWrap(true);
     lifecycleView_ = new QPlainTextEdit(lifecycleGroup);
     makeReadOnlyCodeEditor(lifecycleView_);
     new PkgbuildHighlighter(lifecycleView_->document());
-    lifecycleView_->setMinimumHeight(180);
+    lifecycleView_->setMinimumHeight(140);
     editLifecycleButton_ = new QPushButton(QStringLiteral("Create Lifecycle Script"), lifecycleGroup);
     saveLifecycleButton_ = new QPushButton(QStringLiteral("Save Script"), lifecycleGroup);
     cancelLifecycleButton_ = new QPushButton(QStringLiteral("Cancel Edit"), lifecycleGroup);
@@ -1774,11 +2177,30 @@ QWidget *MainWindow::createScriptsPage() {
     lifecycleButtons->addWidget(discardLifecycleButton_);
     lifecycleButtons->addWidget(acknowledgeLifecycleButton_);
     lifecycleLayout->addWidget(lifecycleStatus_);
-    lifecycleLayout->addWidget(lifecycleView_);
+    lifecycleLayout->addWidget(lifecycleView_, 1);
     lifecycleLayout->addLayout(lifecycleButtons);
-    layout->addWidget(lifecycleGroup);
-    connect(scriptsList_, &QListWidget::currentRowChanged, this, [this] { updateSelectedScript(); });
-    connect(acknowledgeScriptButton_, &QPushButton::clicked, this, &MainWindow::acknowledgeSelectedScript);
+    splitter->addWidget(mapping);
+    splitter->addWidget(lifecycleGroup);
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 1);
+    layout->addWidget(splitter, 1);
+    connect(viewSource, &QPushButton::clicked, this, [this] {
+        selectSection(EditorSection::SourceScripts);
+    });
+    connect(scriptFindingsTable_, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem *item) {
+        if (item == nullptr || scriptsList_ == nullptr) return;
+        const auto *nameItem = scriptFindingsTable_->item(item->row(), 0);
+        if (nameItem == nullptr) return;
+        selectSection(EditorSection::SourceScripts);
+        const auto name = nameItem->text();
+        for (int row = 0; row < scriptsList_->count(); ++row) {
+            const auto *scriptItem = scriptsList_->item(row);
+            if (scriptItem != nullptr && scriptItem->text().contains(name)) {
+                scriptsList_->setCurrentRow(row);
+                break;
+            }
+        }
+    });
     connect(editLifecycleButton_, &QPushButton::clicked, this, &MainWindow::beginLifecycleEdit);
     connect(saveLifecycleButton_, &QPushButton::clicked, this, &MainWindow::saveLifecycleEdit);
     connect(cancelLifecycleButton_, &QPushButton::clicked, this, &MainWindow::cancelLifecycleEdit);
@@ -1791,7 +2213,7 @@ QWidget *MainWindow::createPayloadPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     payloadIntroduction_ = pageIntroduction(
-        QStringLiteral("This is the filesystem payload in the vendor artifact. Most files need no action. For highlighted system files, inspect the explanation/content and explicitly keep or exclude them. Decisions are content-specific and changed files require review again."), page);
+        QStringLiteral("Vendor filesystem from the imported artifact. Most files need no action. Keep or exclude records a recipe rule for the resulting package; it does not modify the source archive. Changed upstream content restores review."), page);
     layout->addWidget(payloadIntroduction_);
     auto *splitter = new QSplitter(Qt::Vertical, page);
     payloadTree_ = new QTreeWidget(page);
@@ -1835,7 +2257,7 @@ QWidget *MainWindow::createCommandsPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Choose the inspected executables PacSmith should expose on PATH. Source paths must name exact files in the artifact; AppImage commands use a small wrapper that recreates the documented AppDir environment without executing the original AppImage runtime."),
+        QStringLiteral("Choose which inspected executables the generated Arch package should expose on PATH. Rename a command to change the /usr/bin name. Source paths name exact files in the vendor artifact; they are not edited there. Use Add from payload to map any archive file onto /usr/bin."),
         page));
     commandsTable_ = new QTableWidget(page);
     commandsTable_->setColumnCount(6);
@@ -1850,9 +2272,76 @@ QWidget *MainWindow::createCommandsPage() {
     commandsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     commandsTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
     commandsTable_->verticalHeader()->setVisible(false);
+    commandsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    commandsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     layout->addWidget(commandsTable_, 1);
+    auto *buttons = new QHBoxLayout;
+    auto *add = new QPushButton(QStringLiteral("Add from payload…"), page);
+    auto *assign = new QPushButton(QStringLiteral("Assign payload…"), page);
+    auto *remove = new QPushButton(QStringLiteral("Remove"), page);
+    buttons->addWidget(add);
+    buttons->addWidget(assign);
+    buttons->addWidget(remove);
+    buttons->addStretch();
+    layout->addLayout(buttons);
     connect(commandsTable_, &QTableWidget::cellChanged,
             this, &MainWindow::commandEdited);
+    connect(add, &QPushButton::clicked, this, &MainWindow::addCommandFromPayload);
+    connect(assign, &QPushButton::clicked, this, &MainWindow::assignPayloadToSelectedCommand);
+    connect(remove, &QPushButton::clicked, this, &MainWindow::removeSelectedCommand);
+    return page;
+}
+
+QWidget *MainWindow::createAppRunPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("AppRun is the AppImage entry point. It stays inside the extracted AppDir under /opt with the rest of the image; the PATH command on Commands is a separate wrapper. Vendor AppRun scripts often assume they are still a mounted AppImage and can hang or mis-launch once extracted. Review this script, keep the original, edit it, or resolve it with AI."),
+        page));
+    appRunReviewBanner_ = new QFrame(page);
+    appRunReviewBanner_->setObjectName(QStringLiteral("appRunReviewBanner"));
+    appRunReviewBanner_->setStyleSheet(QStringLiteral(
+        "QFrame#appRunReviewBanner { background-color: rgba(229,185,61,28); "
+        "border: 1px solid #b89624; border-radius: 5px; }"
+        "QFrame#appRunReviewBanner QLabel { background: transparent; border: none; color: #e5b93d; }"));
+    auto *bannerLayout = new QHBoxLayout(appRunReviewBanner_);
+    bannerLayout->setContentsMargins(12, 8, 12, 8);
+    appRunReviewLabel_ = new QLabel(appRunReviewBanner_);
+    appRunReviewLabel_->setWordWrap(true);
+    keepOriginalAppRunButton_ = new QPushButton(QStringLiteral("Keep original"), appRunReviewBanner_);
+    bannerLayout->addWidget(appRunReviewLabel_, 1);
+    bannerLayout->addWidget(keepOriginalAppRunButton_, 0, Qt::AlignTop);
+    layout->addWidget(appRunReviewBanner_);
+    appRunEditor_ = new QPlainTextEdit(page);
+    appRunEditor_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    appRunEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
+    new ShellHighlighter(appRunEditor_->document());
+    appRunStatus_ = new QLabel(page);
+    appRunStatus_->setWordWrap(true);
+    restoreAppRunButton_ = new QPushButton(QStringLiteral("Restore original"), page);
+    saveAppRunButton_ = new QPushButton(QStringLiteral("Save"), page);
+    auto *buttons = new QHBoxLayout;
+    buttons->addWidget(appRunStatus_, 1);
+    buttons->addWidget(restoreAppRunButton_);
+    buttons->addWidget(saveAppRunButton_);
+    layout->addWidget(appRunEditor_, 1);
+    layout->addLayout(buttons);
+    connect(saveAppRunButton_, &QPushButton::clicked, this, &MainWindow::saveAppRun);
+    connect(keepOriginalAppRunButton_, &QPushButton::clicked, this, &MainWindow::keepOriginalAppRun);
+    connect(restoreAppRunButton_, &QPushButton::clicked, this, &MainWindow::restoreOriginalAppRun);
+    connect(appRunEditor_->document(), &QTextDocument::modificationChanged, this, [this](const bool modified) {
+        if (currentRelease() == nullptr) return;
+        const auto &appRun = currentRelease()->installMapping.appRun;
+        if (keepOriginalAppRunButton_ != nullptr) {
+            keepOriginalAppRunButton_->setEnabled(appRun.requiresReview() && !modified);
+        }
+        if (restoreAppRunButton_ != nullptr) {
+            restoreAppRunButton_->setVisible(
+                !appRun.originalContents.isEmpty() &&
+                (appRun.userModified || modified ||
+                 appRunEditor_->toPlainText() != appRun.originalContents));
+        }
+    });
     return page;
 }
 
@@ -1965,7 +2454,7 @@ QWidget *MainWindow::createPkgbuildPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("This is the actual Arch build recipe that makepkg executes. While it matches PacSmith's generated version, changes made on the Dependencies, Payload, and Scripts pages regenerate it automatically. Update discovery is release-owned but is not part of the package recipe. If you save a manual edit, the PKGBUILD becomes user-owned: PacSmith preserves it, later structured changes are not merged into it, and PKGBUILD edits never change values on the structured tabs."),
+        QStringLiteral("Custom mode: this PKGBUILD is what makepkg executes. Guided configuration is ignored until you switch back. Saving keeps this file user-owned."),
         page));
     pkgbuildState_ = new QLabel(page);
     pkgbuildEditor_ = new QPlainTextEdit(page);
@@ -1975,14 +2464,14 @@ QWidget *MainWindow::createPkgbuildPage() {
     auto *saveButton = new QPushButton(QStringLiteral("Save"), page);
     auto *reloadButton = new QPushButton(QStringLiteral("Reload"), page);
     auto *validateButton = new QPushButton(QStringLiteral("Validate"), page);
-    auto *restoreButton = new QPushButton(QStringLiteral("Restore Generated Version"), page);
-    auto *buildButton = new QPushButton(QStringLiteral("Build"), page);
+    auto *guidedButton = new QPushButton(QStringLiteral("Return to Guided"), page);
+    pkgbuildBuildButton_ = new QPushButton(QStringLiteral("Build"), page);
     auto *buttons = new QHBoxLayout;
     buttons->addWidget(saveButton);
     buttons->addWidget(reloadButton);
     buttons->addWidget(validateButton);
-    buttons->addWidget(restoreButton);
-    buttons->addWidget(buildButton);
+    buttons->addWidget(guidedButton);
+    buttons->addWidget(pkgbuildBuildButton_);
     buttons->addStretch();
     layout->addWidget(pkgbuildState_);
     layout->addWidget(pkgbuildEditor_, 1);
@@ -1993,33 +2482,44 @@ QWidget *MainWindow::createPkgbuildPage() {
         QMessageBox::information(this, QStringLiteral("PKGBUILD validation"),
                                  PkgbuildGenerator::validate(pkgbuildEditor_->toPlainText()));
     });
-    connect(restoreButton, &QPushButton::clicked, this, [this] {
-        if (!project_) return;
-        if (currentRelease()->pkgbuildManuallyModified &&
-            QMessageBox::warning(this, QStringLiteral("Restore generated PKGBUILD"),
-                                 QStringLiteral("Replace the manually edited PKGBUILD with the current recipe generated from PacSmith's structured project settings?"),
-                                 QMessageBox::Yes | QMessageBox::Cancel,
-                                 QMessageBox::Cancel) != QMessageBox::Yes) {
-            return;
-        }
-        QString error;
-        if (!store_.savePkgbuild(*project_, *currentRelease(), currentRelease()->generatedPkgbuild, &error)) {
-            QMessageBox::critical(this, QStringLiteral("Could not restore PKGBUILD"), error);
-            return;
-        }
-        projectCache_.insert(project_->id, *project_);
-        populatePkgbuild();
-        populateBuild();
-        statusBar()->showMessage(QStringLiteral("Restored PacSmith's generated PKGBUILD"), 6000);
-    });
-    connect(buildButton, &QPushButton::clicked, this, &MainWindow::startBuild);
+    connect(guidedButton, &QPushButton::clicked, this, [this] { setConfigurationMode(false); });
+    connect(pkgbuildBuildButton_, &QPushButton::clicked, this, &MainWindow::startBuild);
     connect(pkgbuildEditor_->document(), &QTextDocument::modificationChanged, this, [this](const bool modified) {
-        if (!project_) return;
+        if (!project_ || pkgbuildState_ == nullptr) return;
         pkgbuildState_->setText(modified ? QStringLiteral("● Unsaved editor changes")
-                                         : (currentRelease()->pkgbuildManuallyModified
-                                                ? QStringLiteral("⚠ Manually modified from PacSmith's generated version")
-                                                : QStringLiteral("✓ Matches PacSmith's generated version")));
+                                         : QStringLiteral("⚠ Custom PKGBUILD. Guided configuration is ignored until you switch back."));
     });
+    return page;
+}
+
+QWidget *MainWindow::createResultPkgbuildPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("Read-only PKGBUILD makepkg will run. Change Guided settings to regenerate it, or switch Configuration to Custom to edit it."),
+        page));
+    pkgbuildPreviewNotice_ = new QLabel(page);
+    pkgbuildPreviewNotice_->setWordWrap(true);
+    pkgbuildPreview_ = new QPlainTextEdit(page);
+    makeReadOnlyCodeEditor(pkgbuildPreview_);
+    new PkgbuildHighlighter(pkgbuildPreview_->document());
+    auto *validateButton = new QPushButton(QStringLiteral("Validate"), page);
+    auto *editButton = new QPushButton(QStringLiteral("Edit in Custom"), page);
+    resultPkgbuildBuildButton_ = new QPushButton(QStringLiteral("Build"), page);
+    auto *buttons = new QHBoxLayout;
+    buttons->addWidget(validateButton);
+    buttons->addWidget(editButton);
+    buttons->addWidget(resultPkgbuildBuildButton_);
+    buttons->addStretch();
+    layout->addWidget(pkgbuildPreviewNotice_);
+    layout->addWidget(pkgbuildPreview_, 1);
+    layout->addLayout(buttons);
+    connect(validateButton, &QPushButton::clicked, this, [this]() {
+        QMessageBox::information(this, QStringLiteral("PKGBUILD validation"),
+                                 PkgbuildGenerator::validate(currentPkgbuildText()));
+    });
+    connect(editButton, &QPushButton::clicked, this, [this] { setConfigurationMode(true); });
+    connect(resultPkgbuildBuildButton_, &QPushButton::clicked, this, &MainWindow::startBuild);
     return page;
 }
 
@@ -2027,7 +2527,7 @@ QWidget *MainWindow::createUpdatesPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("This configuration belongs to this release. It controls how PacSmith discovers its successor and is deliberately separate from the generated Arch package. Review it before installing so future update checks use the intended vendor source and artifact."), page));
+        QStringLiteral("How PacSmith will look for the next vendor release. On the project dashboard this edits the current tracking release (installed, or newest analyzed if nothing is installed). In Configuration it edits the open release. This is not part of the Pacman package, and it is separate from the immutable acquisition recorded for the imported artifact."), page));
     updateOwnerLabel_ = new QLabel(page);
     updateOwnerLabel_->setWordWrap(true);
     updateOwnerLabel_->setFrameStyle(QFrame::StyledPanel);
@@ -2118,7 +2618,7 @@ QWidget *MainWindow::createUpdatesPage() {
     updateNotice_->setWordWrap(true);
     updateCandidates_ = new QListWidget(page);
     updateSaveButton_ = new QPushButton(QStringLiteral("Save Update Configuration"), page);
-    updateCheckButton_ = new QPushButton(QStringLiteral("Check Now"), page);
+    updateCheckButton_ = new QPushButton(QStringLiteral("Check for Updates"), page);
     updateCheckStatus_ = new QLabel(page);
     updateCheckStatus_->setWordWrap(true);
     layout->addLayout(form);
@@ -2225,11 +2725,7 @@ QWidget *MainWindow::createUpdatesPage() {
                                          aiSettings_.provider != AiProviderKind::None &&
                                          !aiService_.isRunning());
         updateSaveButton_->setEnabled(hasRelease);
-        updateCheckButton_->setEnabled(hasRelease && (repository || github) &&
-                                       !aptUpdateService_.isRunning() &&
-                                       !rpmUpdateService_.isRunning() &&
-                                       !githubUpdateService_.isRunning() &&
-                                       !debDownloadService_.isRunning() && importThread_ == nullptr);
+        syncUpdateCheckButtons();
         updateNotice_->setText(index == 0 ? QStringLiteral("Manual updates: PacSmith will not query the network.")
                               : index == 1 ? QStringLiteral("Direct URL saved; automatic version discovery is not implemented yet.")
                               : apt ? QStringLiteral("APT checks compare verified Packages metadata with the active release.")
@@ -2272,29 +2768,26 @@ QWidget *MainWindow::createUpdatesPage() {
 QWidget *MainWindow::createBuildPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("Build the Arch package with makepkg, then install it with pacman. Progress and command output open in a dialog."),
+        page));
     buildChecklist_ = new QLabel(page);
     buildChecklist_->setWordWrap(true);
+    buildButton_ = new QPushButton(QStringLiteral("Build"), page);
+    installButton_ = new QPushButton(QStringLiteral("Install"), page);
+    applyPrimaryActionStyle(installButton_);
     builtPackage_ = new QLabel(page);
     builtPackage_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    buildButton_ = new QPushButton(QStringLiteral("Build"), page);
-    installButton_ = new QPushButton(QStringLiteral("Install with pacman"), page);
-    auto *buttons = new QHBoxLayout;
-    buttons->addWidget(buildButton_);
-    buttons->addWidget(installButton_);
-    buttons->addStretch();
-    buildLog_ = new QPlainTextEdit(page);
-    makeReadOnlyCodeEditor(buildLog_);
-    buildLog_->setPlaceholderText(QStringLiteral("Raw makepkg and pacman output appears here."));
+    builtPackage_->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+    auto *packageRow = new QHBoxLayout;
+    packageRow->setSpacing(16);
+    packageRow->addWidget(builtPackage_, 0, Qt::AlignTop);
+    packageRow->addWidget(installButton_, 0, Qt::AlignTop);
+    packageRow->addStretch(1);
     layout->addWidget(buildChecklist_);
-    layout->addWidget(builtPackage_);
-    buildProgress_ = new QProgressBar(page);
-    buildProgress_->setRange(0, 0);
-    buildProgress_->setTextVisible(false);
-    buildProgress_->setVisible(false);
-    layout->addWidget(buildProgress_);
-    layout->addLayout(buttons);
-    layout->addWidget(new QLabel(QStringLiteral("Build output"), page));
-    layout->addWidget(buildLog_, 1);
+    layout->addWidget(buildButton_, 0, Qt::AlignLeft);
+    layout->addLayout(packageRow);
+    layout->addStretch(1);
     connect(buildButton_, &QPushButton::clicked, this, [this] {
         if (buildService_.isRunning()) {
             buildButton_->setText(QStringLiteral("Canceling…"));
@@ -2649,10 +3142,355 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
     }
 }
 
+QWidget *MainWindow::createStageHost(QListWidget **nav, QStackedWidget **stack, QWidget *navHeader) {
+    auto *host = new QWidget(this);
+    auto *layout = new QHBoxLayout(host);
+    layout->setContentsMargins(0, 8, 0, 0);
+    layout->setSpacing(8);
+    auto *list = new QListWidget(host);
+    list->setObjectName(QStringLiteral("workbenchStageNav"));
+    list->setFixedWidth(188);
+    list->setSpacing(1);
+    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    list->setStyleSheet(QStringLiteral(
+        "QListWidget#workbenchStageNav { border: none; background: transparent; outline: none; }"
+        "QListWidget#workbenchStageNav::item { padding: 8px 10px; }"
+        "QListWidget#workbenchStageNav::item:selected { background: rgba(52, 152, 219, 40); }"));
+    auto *pages = new QStackedWidget(host);
+    if (navHeader != nullptr) {
+        auto *navColumn = new QWidget(host);
+        navColumn->setFixedWidth(188);
+        auto *navLayout = new QVBoxLayout(navColumn);
+        navLayout->setContentsMargins(0, 0, 0, 0);
+        navLayout->setSpacing(6);
+        navHeader->setParent(navColumn);
+        navLayout->addWidget(navHeader);
+        list->setFixedWidth(188);
+        navLayout->addWidget(list, 1);
+        layout->addWidget(navColumn);
+    } else {
+        layout->addWidget(list);
+    }
+    layout->addWidget(pages, 1);
+    connect(list, &QListWidget::currentRowChanged, this, [this, pages](const int row) {
+        if (row >= 0) pages->setCurrentIndex(row);
+        if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
+            populateCurrentWorkbenchPage();
+        }
+    });
+    *nav = list;
+    *stack = pages;
+    return host;
+}
+
+void MainWindow::addWorkbenchPage(const int stage, QListWidget *nav, QStackedWidget *stack,
+                                  const EditorSection section, const QString &label, QWidget *page) {
+    auto *item = new QListWidgetItem(label, nav);
+    item->setData(Qt::UserRole, static_cast<int>(section));
+    item->setData(sectionBaseLabelRole, label);
+    stack->addWidget(page);
+    SectionLocation location;
+    location.stage = stage;
+    location.page = nav->count() - 1;
+    location.nav = nav;
+    location.stack = stack;
+    location.item = item;
+    sectionLocations_.insert(static_cast<int>(section), location);
+}
+
+void MainWindow::setSectionVisible(const EditorSection section, const bool visible) {
+    const auto location = sectionLocations_.value(static_cast<int>(section));
+    if (location.item != nullptr) location.item->setHidden(!visible);
+}
+
+void MainWindow::updateSectionReviewMarkers() {
+    if (currentRelease() == nullptr) return;
+    const auto &release = *currentRelease();
+    const auto mark = [this](const EditorSection section, const bool needsReview) {
+        const auto location = sectionLocations_.value(static_cast<int>(section));
+        if (location.item == nullptr) return;
+        const auto base = location.item->data(sectionBaseLabelRole).toString();
+        if (base.isEmpty()) return;
+        location.item->setText(needsReview ? base + QStringLiteral("  ⚠") : base);
+        if (needsReview) {
+            location.item->setForeground(QColor(0xe5, 0xb9, 0x3d));
+        } else {
+            location.item->setData(Qt::ForegroundRole, QVariant());
+        }
+    };
+    const bool commandReview = std::any_of(
+        release.installMapping.launchers.cbegin(), release.installMapping.launchers.cend(),
+        [](const auto &launcher) { return launcher.enabled && launcher.missing; }) ||
+        (release.sourceType == SourcePackageType::Archive &&
+         std::any_of(release.installMapping.desktopEntries.cbegin(),
+                     release.installMapping.desktopEntries.cend(),
+                     [&](const auto &desktop) {
+                         if (!desktop.enabled) return false;
+                         const auto command = desktopEntryCommand(desktop.contents);
+                         if (command.isEmpty()) return false;
+                         return std::none_of(
+                             release.installMapping.launchers.cbegin(),
+                             release.installMapping.launchers.cend(),
+                             [&](const auto &launcher) {
+                                 return launcher.enabled && !launcher.missing &&
+                                        launcher.commandName.compare(
+                                            command, Qt::CaseInsensitive) == 0;
+                             });
+                     }));
+    const bool desktopReview = std::any_of(
+        release.installMapping.desktopEntries.cbegin(),
+        release.installMapping.desktopEntries.cend(),
+        [](const auto &desktop) { return desktop.enabled && desktop.missing; });
+    const bool dependencyReview = std::any_of(
+        release.dependencies.cbegin(), release.dependencies.cend(),
+        [this](const auto &dependency) {
+            return dependency.status == MappingStatus::Unresolved ||
+                   repositoryPackageUnavailable(dependency, repositoryDependencyAvailability_);
+        });
+    const bool lifecycleReview = !release.lifecycleScript.contents.isEmpty() &&
+        (!release.lifecycleScript.validationPassed ||
+         release.lifecycleScript.requiresAcknowledgement());
+    mark(EditorSection::SourceContents, pendingPayloadReviews(release) > 0);
+    mark(EditorSection::SourceScripts, pendingScriptFindings(release) > 0);
+    mark(EditorSection::ConfigDependencies, dependencyReview);
+    mark(EditorSection::ConfigScripts, pendingScriptFindings(release) > 0 || lifecycleReview);
+    mark(EditorSection::ConfigCommands, commandReview);
+    mark(EditorSection::ConfigAppRun, release.installMapping.appRun.requiresReview());
+    mark(EditorSection::ConfigDesktopEntries, desktopReview);
+    mark(EditorSection::ConfigIcon, release.installMapping.icon.missing);
+}
+
+void MainWindow::updateWorkbenchStageChrome() {
+    if (stageTabs_ == nullptr) return;
+    const auto stage = stageTabs_->currentIndex();
+    if (currentRelease() != nullptr) {
+        const auto sourceTitle = sourcePackageTypeTitle(currentRelease()->sourceType);
+        if (sourceTypeBadge_ != nullptr) {
+            sourceTypeBadge_->setText(sourceTitle);
+            sourceTypeBadge_->setVisible(true);
+        }
+        stageTabs_->setTabText(0, sourceTitle);
+        stageTabs_->setTabText(2, QStringLiteral("Pacman Package"));
+        stageTabs_->setTabToolTip(0, QStringLiteral("Imported %1: inspect metadata, original scripts, and payload")
+                                       .arg(sourceTitle.toLower()));
+        stageTabs_->setTabToolTip(1, currentRelease()->pkgbuildManuallyModified
+            ? QStringLiteral("Custom PKGBUILD for this release. Guided configuration is ignored.")
+            : QStringLiteral("Guided settings generate the PKGBUILD for this release."));
+    }
+    updateConfigurationModeChrome();
+    if (workbenchSubtitle_ == nullptr || currentRelease() == nullptr) return;
+    const auto version = currentRelease()->debian.version;
+    const auto sourceTitle = sourcePackageTypeTitle(currentRelease()->sourceType);
+    if (stage == 0) {
+        workbenchSubtitle_->setText(
+            QStringLiteral("%1 for release %2 — inspect only. Nothing here is executed or installed.")
+                .arg(sourceTitle, version));
+    } else if (stage == 1) {
+        workbenchSubtitle_->setText(
+            currentRelease()->pkgbuildManuallyModified
+                ? QStringLiteral("Custom configuration for release %1. Edit the PKGBUILD directly; Guided pages are hidden.")
+                      .arg(version)
+                : QStringLiteral("Guided configuration for release %1. These settings generate the PKGBUILD on Pacman Package.")
+                      .arg(version));
+    } else {
+        workbenchSubtitle_->setText(
+            currentRelease()->pkgbuildManuallyModified
+                ? QStringLiteral("Pacman package for release %1. The Custom PKGBUILD is what makepkg will run.")
+                      .arg(version)
+                : QStringLiteral("Pacman package for release %1: install layout, generated PKGBUILD, and build.")
+                      .arg(version));
+    }
+}
+
+void MainWindow::updateConfigurationModeChrome() {
+    if (guidedModeButton_ == nullptr || customModeButton_ == nullptr) return;
+    const bool custom = currentRelease() != nullptr && currentRelease()->pkgbuildManuallyModified;
+    QSignalBlocker guidedBlock(guidedModeButton_);
+    QSignalBlocker customBlock(customModeButton_);
+    guidedModeButton_->setChecked(!custom);
+    customModeButton_->setChecked(custom);
+}
+
+void MainWindow::setConfigurationMode(const bool custom) {
+    if (!project_ || currentRelease() == nullptr) {
+        updateConfigurationModeChrome();
+        return;
+    }
+    const bool already = currentRelease()->pkgbuildManuallyModified == custom;
+    if (pkgbuildEditor_ != nullptr && pkgbuildEditor_->document()->isModified()) {
+        QString error;
+        if (!store_.saveCustomPkgbuild(*project_, *currentRelease(), pkgbuildEditor_->toPlainText(), &error)) {
+            QMessageBox::critical(this, QStringLiteral("Could not save Custom PKGBUILD"), error);
+            updateConfigurationModeChrome();
+            return;
+        }
+        pkgbuildEditor_->document()->setModified(false);
+        projectCache_.insert(project_->id, *project_);
+    }
+    if (currentRelease()->pkgbuildManuallyModified != custom) {
+        QString error;
+        const bool ok = custom
+            ? store_.activateCustomPkgbuild(*project_, *currentRelease(), &error)
+            : store_.activateGuidedPkgbuild(*project_, *currentRelease(), &error);
+        if (!ok) {
+            QMessageBox::critical(this, QStringLiteral("Could not switch PKGBUILD mode"), error);
+            updateConfigurationModeChrome();
+            return;
+        }
+        projectCache_.insert(project_->id, *project_);
+    }
+    configureEditorProfile();
+    updateConfigurationModeChrome();
+    if (already) {
+        populatePkgbuild();
+        return;
+    }
+    if (custom) {
+        selectSection(EditorSection::ConfigPkgbuild);
+    } else if (configNav_ != nullptr) {
+        for (int row = 0; row < configNav_->count(); ++row) {
+            const auto *item = configNav_->item(row);
+            if (item != nullptr && !item->isHidden() &&
+                static_cast<EditorSection>(item->data(Qt::UserRole).toInt()) != EditorSection::ConfigPkgbuild) {
+                selectSection(static_cast<EditorSection>(item->data(Qt::UserRole).toInt()));
+                break;
+            }
+        }
+    }
+    populatePkgbuild();
+}
+
+MainWindow::EditorSection MainWindow::currentSection() const {
+    if (stageTabs_ == nullptr) return EditorSection::SourceOverview;
+    const auto stage = stageTabs_->currentIndex();
+    QListWidget *nav = stage == 1 ? configNav_ : stage == 2 ? resultNav_ : sourceNav_;
+    if (nav == nullptr || nav->currentItem() == nullptr) return EditorSection::SourceOverview;
+    return static_cast<EditorSection>(nav->currentItem()->data(Qt::UserRole).toInt());
+}
+
+QString MainWindow::sectionTitle(const EditorSection section) const {
+    const auto location = sectionLocations_.value(static_cast<int>(section));
+    if (location.item != nullptr) return location.item->text();
+    return QStringLiteral("Package setup");
+}
+
+bool MainWindow::isSectionActive(const EditorSection section) const {
+    if (stageTabs_ == nullptr || rightStack_ == nullptr || rightStack_->currentIndex() != 1) {
+        return false;
+    }
+    const auto location = sectionLocations_.value(static_cast<int>(section));
+    return location.nav != nullptr && stageTabs_->currentIndex() == location.stage &&
+           location.nav->currentRow() == location.page &&
+           (location.item == nullptr || !location.item->isHidden());
+}
+
+void MainWindow::placeUpdatesEditor() {
+    if (updatesEditor_ == nullptr) return;
+    QWidget *host = (rightStack_ != nullptr && rightStack_->currentIndex() == 1)
+                        ? configUpdatesHost_
+                        : dashboardUpdatesHost_;
+    if (host == nullptr || updatesEditor_->parentWidget() == host) return;
+    if (auto *layout = host->layout()) layout->addWidget(updatesEditor_);
+}
+
+void MainWindow::syncUpdateCheckButtons() {
+    const bool busy = aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
+                      githubUpdateService_.isRunning() || debDownloadService_.isRunning() ||
+                      importThread_ != nullptr;
+    bool allowed = false;
+    if (!busy && project_ && updateEditorRelease() != nullptr && updateStrategy_ != nullptr) {
+        const auto index = updateStrategy_->currentIndex();
+        allowed = index == 2 || index == 3 || index == 4;
+    }
+    if (updateCheckButton_ != nullptr) updateCheckButton_->setEnabled(allowed);
+    if (historyCheckUpdatesButton_ != nullptr) historyCheckUpdatesButton_->setEnabled(allowed);
+}
+
+void MainWindow::updateDashboardActions() {
+    const bool installed = project_ && !project_->installedVersion.isEmpty();
+    if (uninstallButton_ != nullptr) {
+        uninstallButton_->setVisible(installed);
+        uninstallButton_->setEnabled(installed && !installService_.isRunning());
+    }
+    const auto *tracker = project_ ? project_->activeTrackingRelease() : nullptr;
+    if (editConfigurationButton_ != nullptr) {
+        editConfigurationButton_->setVisible(tracker != nullptr &&
+                                             tracker->state != ReleaseState::Discovered);
+    }
+    if (projectPrimaryButton_ == nullptr) {
+        syncUpdateCheckButtons();
+        return;
+    }
+    if (tracker == nullptr) {
+        projectPrimaryButton_->setVisible(false);
+        syncUpdateCheckButtons();
+        return;
+    }
+    const bool preparing = tracker->id == preparingReleaseId_ && project_->id == preparingProjectId_;
+    const bool hasPackage = !retainedPackagePath(store_, *tracker).isEmpty();
+    const bool installedHere = tracker->id == project_->installedReleaseId;
+    if (preparing) {
+        projectPrimaryButton_->setVisible(true);
+        projectPrimaryButton_->setText(QStringLiteral("Show Progress"));
+        projectPrimaryButton_->setEnabled(true);
+    } else if (hasPackage && !installedHere) {
+        projectPrimaryButton_->setVisible(true);
+        projectPrimaryButton_->setText(project_->installedVersion.isEmpty()
+                                           ? QStringLiteral("Install")
+                                           : QStringLiteral("Install Update"));
+        projectPrimaryButton_->setEnabled(!installService_.isRunning());
+    } else if (tracker->state == ReleaseState::Discovered) {
+        projectPrimaryButton_->setVisible(true);
+        projectPrimaryButton_->setText(QStringLiteral("Download & Prepare"));
+        projectPrimaryButton_->setEnabled(!debDownloadService_.isRunning() &&
+                                          importThread_ == nullptr);
+    } else {
+        projectPrimaryButton_->setVisible(false);
+    }
+    syncUpdateCheckButtons();
+}
+
+void MainWindow::handleProjectPrimaryAction() {
+    if (!project_) return;
+    auto *tracker = project_->activeTrackingRelease();
+    if (tracker == nullptr) return;
+    const bool preparing = tracker->id == preparingReleaseId_ && project_->id == preparingProjectId_;
+    if (preparing) {
+        if (downloadProgress_ != nullptr) {
+            downloadProgress_->show();
+            downloadProgress_->raise();
+            downloadProgress_->activateWindow();
+        } else if (importProgress_ != nullptr) {
+            importProgress_->show();
+            importProgress_->raise();
+            importProgress_->activateWindow();
+        }
+        return;
+    }
+    const bool hasPackage = !retainedPackagePath(store_, *tracker).isEmpty();
+    const bool installedHere = tracker->id == project_->installedReleaseId;
+    if (hasPackage && !installedHere) {
+        currentReleaseId_ = tracker->id;
+        startInstall();
+        return;
+    }
+    if (tracker->state == ReleaseState::Discovered) {
+        beginReleasePreparation(tracker->id, true);
+    }
+}
+
+void MainWindow::editPackageConfiguration() {
+    if (!project_) return;
+    const auto *tracker = project_->activeTrackingRelease();
+    if (tracker == nullptr || tracker->state == ReleaseState::Discovered) return;
+    showReleaseWorkbenchAtFirstAttention(tracker->id);
+}
+
 void MainWindow::showProjectDashboard() {
     if (rightStack_ == nullptr) return;
     if (projectSidebar_ != nullptr) projectSidebar_->show();
     rightStack_->setCurrentIndex(0);
+    placeUpdatesEditor();
     if (projectTabs_ != nullptr) projectTabs_->setCurrentIndex(0);
     if (project_) refreshCurrentProject();
 }
@@ -2664,84 +3502,102 @@ void MainWindow::showReleaseWorkbench(const QString &releaseId) {
     currentReleaseId_ = releaseId;
     if (projectSidebar_ != nullptr) projectSidebar_->hide();
     rightStack_->setCurrentIndex(1);
+    placeUpdatesEditor();
     configureEditorProfile();
-    selectSection(EditorSection::Package);
+    selectSection(EditorSection::SourceOverview);
     refreshCurrentProject();
     workbenchTitle_->setText(
         QStringLiteral("<h2>Set Up %1 %2</h2>")
             .arg(project_->displayName.toHtmlEscaped(), release->debian.version.toHtmlEscaped()));
-    workbenchSubtitle_->setText(
-        QStringLiteral("Editing the local Arch package recipe and release-owned update discovery for release %1. Update settings are not embedded in the generated package.")
-            .arg(release->debian.version.toHtmlEscaped()));
+    updateWorkbenchStageChrome();
 }
 
 int MainWindow::sectionIndex(const EditorSection section) const {
-    return sectionTabs_.value(static_cast<int>(section), -1);
+    return sectionLocations_.value(static_cast<int>(section)).page;
 }
 
 void MainWindow::selectSection(const EditorSection section) {
-    const auto index = sectionIndex(section);
-    if (index >= 0 && tabs_ != nullptr && tabs_->isTabVisible(index)) {
-        tabs_->setCurrentIndex(index);
+    auto location = sectionLocations_.value(static_cast<int>(section));
+    if (location.item != nullptr && location.item->isHidden()) {
+        location = sectionLocations_.value(static_cast<int>(EditorSection::SourceOverview));
+    }
+    if (location.nav == nullptr || location.stack == nullptr || location.item == nullptr ||
+        location.item->isHidden() || stageTabs_ == nullptr) {
+        return;
+    }
+    QSignalBlocker stageBlocker(stageTabs_);
+    QSignalBlocker navBlocker(location.nav);
+    stageTabs_->setCurrentIndex(location.stage);
+    location.nav->setCurrentRow(location.page);
+    location.stack->setCurrentIndex(location.page);
+    updateWorkbenchStageChrome();
+    if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
+        populateCurrentWorkbenchPage();
     }
 }
 
 void MainWindow::configureEditorProfile() {
-    if (tabs_ == nullptr || currentRelease() == nullptr) return;
+    if (stageTabs_ == nullptr || currentRelease() == nullptr) return;
     const auto type = currentRelease()->sourceType;
-    if (resolveWithAiButton_ != nullptr) {
-        resolveWithAiButton_->setVisible(type != SourcePackageType::AppImage);
+    if (sourceTypeBadge_ != nullptr) {
+        sourceTypeBadge_->setText(sourcePackageTypeTitle(type));
+        sourceTypeBadge_->setVisible(true);
     }
-    const bool bundle = type == SourcePackageType::Archive ||
-                        type == SourcePackageType::AppImage;
     const bool standalone = type == SourcePackageType::ElfBinary;
     const bool packageContainer = type == SourcePackageType::Debian ||
                                   type == SourcePackageType::Rpm ||
                                   type == SourcePackageType::ArchPackage;
-    const auto visible = [this](const EditorSection section, const bool value) {
-        const auto index = sectionIndex(section);
-        if (index >= 0) tabs_->setTabVisible(index, value);
-    };
-    visible(EditorSection::Package, true);
-    visible(EditorSection::Dependencies,
-            packageContainer || !currentRelease()->dependencies.isEmpty());
-    visible(EditorSection::Scripts,
-            packageContainer || !currentRelease()->maintainerScripts.isEmpty() ||
-            !currentRelease()->lifecycleScript.contents.isEmpty());
-    visible(EditorSection::Payload, !standalone);
-    visible(EditorSection::Commands,
-            (bundle && type != SourcePackageType::AppImage) || standalone ||
-                type == SourcePackageType::Debian ||
-                type == SourcePackageType::Rpm);
-    visible(EditorSection::DesktopEntries, true);
-    visible(EditorSection::Icon, true);
-    visible(EditorSection::Updates, true);
-    visible(EditorSection::Pkgbuild, true);
-    visible(EditorSection::Build, true);
+    const bool custom = currentRelease()->pkgbuildManuallyModified;
+    const bool hasScripts = packageContainer ||
+                            !currentRelease()->maintainerScripts.isEmpty() ||
+                            !currentRelease()->scriptFindings.isEmpty();
+    const bool hasLifecycle = hasScripts || !currentRelease()->lifecycleScript.contents.isEmpty();
+    setSectionVisible(EditorSection::SourceOverview, true);
+    setSectionVisible(EditorSection::SourceMetadata, true);
+    setSectionVisible(EditorSection::SourceScripts, hasScripts);
+    setSectionVisible(EditorSection::SourceContents, !standalone);
+    setSectionVisible(EditorSection::ConfigPkgbuild, custom);
+    setSectionVisible(EditorSection::ConfigLayout,
+                      !custom && (type == SourcePackageType::Archive || standalone));
+    setSectionVisible(EditorSection::ConfigDependencies,
+                      !custom && (packageContainer || !currentRelease()->dependencies.isEmpty()));
+    setSectionVisible(EditorSection::ConfigScripts, hasScripts || hasLifecycle);
+    setSectionVisible(EditorSection::ConfigCommands,
+                      !custom && (!currentRelease()->installMapping.launchers.isEmpty() ||
+                          type == SourcePackageType::Archive || standalone ||
+                          type == SourcePackageType::Debian ||
+                          type == SourcePackageType::Rpm));
+    setSectionVisible(EditorSection::ConfigAppRun,
+                      !custom && type == SourcePackageType::AppImage);
+    setSectionVisible(EditorSection::ConfigDesktopEntries, !custom);
+    setSectionVisible(EditorSection::ConfigIcon, !custom);
+    setSectionVisible(EditorSection::ConfigUpdates, true);
+    setSectionVisible(EditorSection::ResultInstallPlan, true);
+    setSectionVisible(EditorSection::ResultPkgbuild, true);
+    setSectionVisible(EditorSection::ResultBuild, true);
+    updateSectionReviewMarkers();
 
-    struct Label { EditorSection section; QString text; };
-    const QList<Label> labels{
-        {EditorSection::Package, type == SourcePackageType::AppImage
-                                     ? QStringLiteral("Installation")
-                                     : bundle ? QStringLiteral("Bundle Layout")
-                                        : QStringLiteral("Package")},
-        {EditorSection::Dependencies, QStringLiteral("Dependencies")},
-        {EditorSection::Scripts, QStringLiteral("Scripts")},
-        {EditorSection::Payload, bundle ? QStringLiteral("Contents")
-                                        : QStringLiteral("Payload")},
-        {EditorSection::Commands, QStringLiteral("Commands")},
-        {EditorSection::DesktopEntries, QStringLiteral("Desktop Entries")},
-        {EditorSection::Icon, QStringLiteral("Icon")},
-        {EditorSection::Updates, QStringLiteral("Updates")},
-        {EditorSection::Pkgbuild, QStringLiteral("PKGBUILD")},
-        {EditorSection::Build, QStringLiteral("Build")}};
-    int number = 1;
-    for (const auto &label : labels) {
-        const auto index = sectionIndex(label.section);
-        if (index >= 0 && tabs_->isTabVisible(index)) {
-            tabs_->setTabText(index, QStringLiteral("%1 · %2").arg(number++).arg(label.text));
+    const auto showStageIfNeeded = [this](QListWidget *nav, const int stage) {
+        if (nav == nullptr || stageTabs_ == nullptr) return;
+        bool any = false;
+        for (int row = 0; row < nav->count(); ++row) {
+            const auto *item = nav->item(row);
+            if (item != nullptr && !item->isHidden()) any = true;
         }
-    }
+        stageTabs_->setTabVisible(stage, any);
+        if (any && (nav->currentItem() == nullptr || nav->currentItem()->isHidden())) {
+            for (int row = 0; row < nav->count(); ++row) {
+                if (nav->item(row) != nullptr && !nav->item(row)->isHidden()) {
+                    nav->setCurrentRow(row);
+                    break;
+                }
+            }
+        }
+    };
+    showStageIfNeeded(sourceNav_, 0);
+    showStageIfNeeded(configNav_, 1);
+    showStageIfNeeded(resultNav_, 2);
+    updateWorkbenchStageChrome();
 }
 
 void MainWindow::showReleaseWorkbenchAtFirstAttention(const QString &releaseId) {
@@ -2750,7 +3606,7 @@ void MainWindow::showReleaseWorkbenchAtFirstAttention(const QString &releaseId) 
     if (release == nullptr || release->state == ReleaseState::Discovered) return;
     showReleaseWorkbench(releaseId);
 
-    auto attention = EditorSection::Build;
+    auto attention = EditorSection::ResultBuild;
     const bool packageMappingNeedsAttention =
         ((release->sourceType == SourcePackageType::Archive ||
           release->sourceType == SourcePackageType::AppImage) &&
@@ -2770,19 +3626,44 @@ void MainWindow::showReleaseWorkbenchAtFirstAttention(const QString &releaseId) 
          release->lifecycleScript.requiresAcknowledgement());
     const bool commandReview = std::any_of(
         release->installMapping.launchers.cbegin(), release->installMapping.launchers.cend(),
-        [](const auto &launcher) { return launcher.enabled && launcher.missing; });
+        [](const auto &launcher) { return launcher.enabled && launcher.missing; }) ||
+        (release->sourceType == SourcePackageType::Archive &&
+         std::any_of(release->installMapping.desktopEntries.cbegin(),
+                     release->installMapping.desktopEntries.cend(),
+                     [&](const auto &desktop) {
+                         if (!desktop.enabled) return false;
+                         const auto command = desktopEntryCommand(desktop.contents);
+                         if (command.isEmpty()) return false;
+                         return std::none_of(
+                             release->installMapping.launchers.cbegin(),
+                             release->installMapping.launchers.cend(),
+                             [&](const auto &launcher) {
+                                 return launcher.enabled && !launcher.missing &&
+                                        launcher.commandName.compare(
+                                            command, Qt::CaseInsensitive) == 0;
+                             });
+                     }));
     const bool desktopReview = std::any_of(
         release->installMapping.desktopEntries.cbegin(),
         release->installMapping.desktopEntries.cend(),
         [](const auto &desktop) { return desktop.enabled && desktop.missing; });
-    if (packageMappingNeedsAttention) attention = EditorSection::Package;
-    else if (dependencyReview) attention = EditorSection::Dependencies;
-    else if (pendingScriptFindings(*release) > 0 || lifecycleReview) attention = EditorSection::Scripts;
-    else if (pendingPayloadReviews(*release) > 0) attention = EditorSection::Payload;
-    else if (commandReview) attention = EditorSection::Commands;
-    else if (desktopReview) attention = EditorSection::DesktopEntries;
-    else if (release->installMapping.icon.missing) attention = EditorSection::Icon;
-    else if (release->pkgbuildManuallyModified) attention = EditorSection::Pkgbuild;
+    const bool custom = release->pkgbuildManuallyModified;
+    if (packageMappingNeedsAttention && !custom) {
+        attention = release->sourceType == SourcePackageType::AppImage
+                        ? EditorSection::ResultInstallPlan
+                        : EditorSection::ConfigLayout;
+    }
+    else if (dependencyReview && !custom) attention = EditorSection::ConfigDependencies;
+    else if (pendingScriptFindings(*release) > 0) attention = EditorSection::ConfigScripts;
+    else if (lifecycleReview) attention = EditorSection::ConfigScripts;
+    else if (pendingPayloadReviews(*release) > 0) attention = EditorSection::SourceContents;
+    else if (release->installMapping.appRun.requiresReview() && !custom) {
+        attention = EditorSection::ConfigAppRun;
+    }
+    else if (commandReview && !custom) attention = EditorSection::ConfigCommands;
+    else if (desktopReview && !custom) attention = EditorSection::ConfigDesktopEntries;
+    else if (release->installMapping.icon.missing && !custom) attention = EditorSection::ConfigIcon;
+    else if (custom) attention = EditorSection::ConfigPkgbuild;
     selectSection(attention);
 }
 
@@ -2790,7 +3671,14 @@ void MainWindow::selectDashboardRelease(const QString &releaseId) {
     if (releaseTable_ == nullptr) return;
     if (projectSidebar_ != nullptr) projectSidebar_->show();
     rightStack_->setCurrentIndex(0);
-    projectTabs_->setCurrentIndex(1);
+    placeUpdatesEditor();
+    if (projectTabs_ != nullptr) {
+        QWidget *historyPage = releaseTable_;
+        while (historyPage != nullptr && projectTabs_->indexOf(historyPage) < 0) {
+            historyPage = historyPage->parentWidget();
+        }
+        if (historyPage != nullptr) projectTabs_->setCurrentWidget(historyPage);
+    }
     for (int row = 0; row < releaseTable_->rowCount(); ++row) {
         const auto *item = releaseTable_->item(row, 0);
         if (item != nullptr && item->data(Qt::UserRole).toString() == releaseId) {
@@ -2960,6 +3848,7 @@ void MainWindow::importPackage(const QString &path) {
             currentReleaseId_ = releaseId;
             const bool needsReview = pendingScriptFindings(*currentRelease()) > 0 ||
                                      pendingPayloadReviews(*currentRelease()) > 0 ||
+                                     currentRelease()->installMapping.appRun.requiresReview() ||
                                      std::any_of(currentRelease()->dependencies.cbegin(), currentRelease()->dependencies.cend(),
                                                  [](const auto &dependency) {
                                                      return dependency.status == MappingStatus::Unresolved;
@@ -3389,13 +4278,16 @@ void MainWindow::refreshProjectList(const QString &selectId) {
     if (projects.isEmpty()) {
         project_.reset();
         projectCache_.clear();
-        tabs_->setEnabled(false);
+        stageTabs_->setEnabled(false);
         projectTabs_->setEnabled(false);
         if (projectSidebar_ != nullptr) projectSidebar_->show();
         rightStack_->setCurrentIndex(0);
         deleteProjectButton_->setEnabled(false);
         projectTitle_->setText(QStringLiteral("<h2>PacSmith</h2>"));
         projectSubtitle_->setText(QStringLiteral("Import a vendor artifact or GitHub release to begin."));
+        if (projectPrimaryButton_ != nullptr) projectPrimaryButton_->setVisible(false);
+        if (uninstallButton_ != nullptr) uninstallButton_->setVisible(false);
+        if (editConfigurationButton_ != nullptr) editConfigurationButton_->setVisible(false);
     }
 }
 
@@ -3417,7 +4309,7 @@ void MainWindow::loadProject(const QString &id) {
     const auto *initialRelease = project_->activeTrackingRelease();
     if (initialRelease == nullptr) initialRelease = project_->newestRelease();
     currentReleaseId_ = initialRelease == nullptr ? QString{} : initialRelease->id;
-    tabs_->setEnabled(true);
+    stageTabs_->setEnabled(true);
     projectTabs_->setEnabled(true);
     showProjectDashboard();
 }
@@ -3454,16 +4346,13 @@ void MainWindow::refreshCurrentProject() {
         subtitleParts.append(QStringLiteral("Installed %1").arg(project_->installedVersion));
     }
     subtitleParts.append(QStringLiteral("%1 %2")
-                             .arg(sourcePackageTypeName(currentRelease()->sourceType),
+                             .arg(sourcePackageTypeTitle(currentRelease()->sourceType),
                                   currentRelease()->debian.version));
     subtitleParts.append(QStringLiteral("Arch package %1").arg(project_->archPackageName));
     projectSubtitle_->setText(subtitleParts.join(QStringLiteral(" · ")));
     workbenchTitle_->setText(
         QStringLiteral("<h2>Set Up %1 %2</h2>")
             .arg(project_->displayName.toHtmlEscaped(), currentRelease()->debian.version.toHtmlEscaped()));
-    workbenchSubtitle_->setText(
-        QStringLiteral("Editing the local Arch package recipe and release-owned update discovery for release %1. Update settings are not embedded in the generated package.")
-            .arg(currentRelease()->debian.version.toHtmlEscaped()));
     configureEditorProfile();
     updateDeleteButton();
     if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
@@ -3477,18 +4366,52 @@ void MainWindow::refreshCurrentProject() {
 }
 
 void MainWindow::populateCurrentWorkbenchPage() {
-    if (!project_ || currentRelease() == nullptr || tabs_ == nullptr) return;
-    const auto index = tabs_->currentIndex();
-    if (index == sectionIndex(EditorSection::Package)) populatePackage();
-    else if (index == sectionIndex(EditorSection::Dependencies)) populateDependencies();
-    else if (index == sectionIndex(EditorSection::Scripts)) populateScripts();
-    else if (index == sectionIndex(EditorSection::Payload)) populatePayload();
-    else if (index == sectionIndex(EditorSection::Commands)) populateCommands();
-    else if (index == sectionIndex(EditorSection::DesktopEntries)) populateDesktopEntries();
-    else if (index == sectionIndex(EditorSection::Icon)) populateIcon();
-    else if (index == sectionIndex(EditorSection::Updates)) populateUpdates();
-    else if (index == sectionIndex(EditorSection::Pkgbuild)) populatePkgbuild();
-    else if (index == sectionIndex(EditorSection::Build)) populateBuild();
+    if (!project_ || currentRelease() == nullptr || stageTabs_ == nullptr) return;
+    switch (currentSection()) {
+    case EditorSection::SourceOverview:
+        populateSourceOverview();
+        break;
+    case EditorSection::SourceMetadata:
+    case EditorSection::ConfigLayout:
+        populatePackage();
+        break;
+    case EditorSection::ResultInstallPlan:
+        populateInstallPlan();
+        break;
+    case EditorSection::ConfigDependencies:
+        populateDependencies();
+        break;
+    case EditorSection::SourceScripts:
+    case EditorSection::ConfigScripts:
+        populateScripts();
+        break;
+    case EditorSection::SourceContents:
+        populatePayload();
+        break;
+    case EditorSection::ConfigCommands:
+        populateCommands();
+        break;
+    case EditorSection::ConfigAppRun:
+        populateAppRunEditor();
+        break;
+    case EditorSection::ConfigDesktopEntries:
+        populateDesktopEntries();
+        break;
+    case EditorSection::ConfigIcon:
+        populateIcon();
+        break;
+    case EditorSection::ConfigUpdates:
+        placeUpdatesEditor();
+        populateUpdates();
+        break;
+    case EditorSection::ConfigPkgbuild:
+    case EditorSection::ResultPkgbuild:
+        populatePkgbuild();
+        break;
+    case EditorSection::ResultBuild:
+        populateBuild();
+        break;
+    }
 }
 
 void MainWindow::updateDeleteButton() {
@@ -3648,6 +4571,7 @@ void MainWindow::populateOverview() {
             });
         const auto reviewCount = release.state == ReleaseState::Discovered ? 0
             : unresolvedForRelease + pendingScriptFindings(release) + pendingPayloadReviews(release) +
+                  (release.installMapping.appRun.requiresReview() ? 1 : 0) +
                   ((!release.lifecycleScript.contents.isEmpty() &&
                     (!release.lifecycleScript.validationPassed || release.lifecycleScript.requiresAcknowledgement())) ? 1 : 0);
         QString packageVersion;
@@ -3744,10 +4668,76 @@ void MainWindow::populateOverview() {
                                          lines.join(QStringLiteral("<br>"))));
     resolveWithAiButton_->setEnabled(!aiService_.isRunning() &&
                                      currentRelease()->state != ReleaseState::Discovered);
-    uninstallButton_->setEnabled(!project_->installedVersion.isEmpty() && !installService_.isRunning());
+    updateDashboardActions();
     tableBlocker.unblock();
     if (selectedRow >= 0) emit releaseTable_->itemSelectionChanged();
     if (!preparingReleaseId_.isEmpty()) updatePreparationIndicators();
+}
+
+void MainWindow::populateSourceOverview() {
+    if (!project_ || currentRelease() == nullptr || sourceTypeHeadline_ == nullptr) return;
+    const auto &release = *currentRelease();
+    sourceTypeHeadline_->setText(
+        QStringLiteral("<h2>%1</h2>").arg(sourcePackageTypeTitle(release.sourceType).toHtmlEscaped()));
+    sourceTypeExplanation_->setText(sourcePackageTypeExplanation(release.sourceType));
+    const auto location = !release.acquisition.originalUrl.isEmpty()
+        ? release.acquisition.originalUrl
+        : !release.sourceUrl.isEmpty() ? release.sourceUrl : release.originalSourceFilename;
+    QString acquisition = QStringLiteral("<b>Acquired from:</b> %1")
+                              .arg(acquisitionKindTitle(release.acquisition.kind).toHtmlEscaped());
+    if (!location.isEmpty()) {
+        acquisition += QStringLiteral("<br>%1").arg(location.toHtmlEscaped());
+    }
+    if (release.acquisition.kind == AcquisitionKind::GitHubRelease &&
+        !release.acquisition.githubOwner.isEmpty()) {
+        acquisition += QStringLiteral("<br>%1/%2")
+                           .arg(release.acquisition.githubOwner.toHtmlEscaped(),
+                                release.acquisition.githubRepository.toHtmlEscaped());
+        if (!release.acquisition.githubTag.isEmpty()) {
+            acquisition += QStringLiteral(" · %1").arg(release.acquisition.githubTag.toHtmlEscaped());
+        }
+        if (!release.acquisition.githubAssetName.isEmpty()) {
+            acquisition += QStringLiteral("<br>Asset: %1")
+                               .arg(release.acquisition.githubAssetName.toHtmlEscaped());
+        }
+    }
+    sourceAcquisitionDetail_->setText(acquisition);
+    QString identity = QStringLiteral("<b>File:</b> %1")
+                           .arg(release.originalSourceFilename.isEmpty()
+                                    ? QStringLiteral("(none recorded)")
+                                    : release.originalSourceFilename.toHtmlEscaped());
+    if (!release.sourceSha256.isEmpty()) {
+        identity += QStringLiteral("<br><b>SHA256:</b> %1").arg(release.sourceSha256.toHtmlEscaped());
+    }
+    if (!release.acquisition.publisherDigest.isEmpty()) {
+        identity += QStringLiteral("<br><b>Publisher digest:</b> %1%2")
+                        .arg(release.acquisition.publisherDigest.toHtmlEscaped(),
+                             release.acquisition.publisherVerified
+                                 ? QStringLiteral(" (verified)")
+                                 : QStringLiteral(" (recorded, not verified)"));
+    } else if (release.acquisition.kind != AcquisitionKind::LocalFile) {
+        identity += QStringLiteral("<br>No publisher checksum; the local SHA256 is recorded and the source remains unsigned.");
+    }
+    sourceIdentityDetail_->setText(identity);
+    const auto pendingScripts = pendingScriptFindings(release);
+    const auto pendingPayload = pendingPayloadReviews(release);
+    QStringList inventory;
+    inventory.append(QStringLiteral("%1 payload file(s)").arg(release.payload.size()));
+    inventory.append(QStringLiteral("%1 vendor script(s)").arg(release.maintainerScripts.size()));
+    inventory.append(QStringLiteral("%1 dependency group(s)").arg(release.dependencies.size()));
+    if (pendingScripts > 0) {
+        inventory.append(QStringLiteral("%1 script responsibility item(s) need configuration")
+                             .arg(pendingScripts));
+    }
+    if (pendingPayload > 0) {
+        inventory.append(QStringLiteral("%1 payload path(s) need a keep/exclude decision")
+                             .arg(pendingPayload));
+    }
+    if (release.installMapping.appRun.requiresReview()) {
+        inventory.append(QStringLiteral("AppRun needs review"));
+    }
+    sourceInventoryDetail_->setText(
+        QStringLiteral("<b>Inspected contents:</b> %1").arg(inventory.join(QStringLiteral(" · "))));
 }
 
 void MainWindow::populatePackage() {
@@ -3756,50 +4746,6 @@ void MainWindow::populatePackage() {
     const bool appImage = currentRelease()->sourceType == SourcePackageType::AppImage;
     const bool elf = currentRelease()->sourceType == SourcePackageType::ElfBinary;
     installMappingWidget_->setVisible(archive || elf);
-    appImageInstallPlanWidget_->setVisible(appImage);
-    appImageInstallPlan_->clear();
-    if (appImage) {
-        const auto &release = *currentRelease();
-        const auto opt = release.installMapping.optDirectory.isEmpty()
-            ? release.archPackageName : release.installMapping.optDirectory;
-        new QTreeWidgetItem(
-            appImageInstallPlan_,
-            {QStringLiteral("/opt/%1/").arg(opt), release.originalSourceFilename,
-             QStringLiteral("Complete decomposed AppDir; internal layout is preserved and privilege bits are removed")});
-        for (const auto &launcher : release.installMapping.launchers) {
-            if (!launcher.enabled || launcher.missing ||
-                launcher.sourcePath != QStringLiteral("AppRun")) continue;
-            new QTreeWidgetItem(
-                appImageInstallPlan_,
-                {launcher.destination,
-                 QStringLiteral("PacSmith wrapper → /opt/%1/AppRun").arg(opt),
-                 QStringLiteral("User-facing command; vendor AppRun remains the sole bundle entry point")});
-        }
-        for (const auto &desktop : release.installMapping.desktopEntries) {
-            if (!desktop.enabled || desktop.missing) continue;
-            new QTreeWidgetItem(
-                appImageInstallPlan_,
-                {desktop.destination,
-                 desktop.sourcePath.isEmpty()
-                     ? QStringLiteral("User-created desktop entry")
-                     : QStringLiteral("Generated from AppDir/%1").arg(desktop.sourcePath),
-                 QStringLiteral("Editable host desktop integration")});
-        }
-        const auto &icon = release.installMapping.icon;
-        if (!icon.missing && !icon.projectPath.isEmpty() && !icon.iconName.isEmpty()) {
-            const auto extension = icon.format.isEmpty()
-                ? QFileInfo(icon.projectPath).suffix().toLower() : icon.format.toLower();
-            const auto directory = extension == QStringLiteral("svg")
-                ? QStringLiteral("/usr/share/icons/hicolor/scalable/apps")
-                : QStringLiteral("/usr/share/icons/hicolor/256x256/apps");
-            new QTreeWidgetItem(
-                appImageInstallPlan_,
-                {QStringLiteral("%1/%2.%3").arg(directory, icon.iconName, extension),
-                 icon.sourcePath.isEmpty() ? QStringLiteral("Selected icon")
-                                           : QStringLiteral("Detected AppDir/%1").arg(icon.sourcePath),
-                 QStringLiteral("Editable host application icon")});
-        }
-    }
     archiveLayout_->setEnabled(archive);
     archiveLayout_->setCurrentIndex(
         currentRelease()->installMapping.archiveLayout == ArchiveLayout::OptBundle ? 0 : 1);
@@ -3816,11 +4762,16 @@ void MainWindow::populatePackage() {
                                     !currentRelease()->installMapping.commonPrefix.isEmpty());
     installBinarySource_->setText(currentRelease()->installMapping.binarySourcePath);
     installBinaryDestination_->setText(currentRelease()->installMapping.binaryDestination);
+    if (installCommandsHint_ != nullptr) installCommandsHint_->setVisible(archive);
+    if (installMappingLayout_ != nullptr) {
+        installMappingLayout_->setRowVisible(installBinarySource_, false);
+        installMappingLayout_->setRowVisible(installBinaryDestination_, elf);
+    }
     const auto &metadata = currentRelease()->debian;
     metadataView_->setPlainText(
         QStringLiteral("Artifact type: %1\nAcquisition: %2\nPackage: %3\nVersion: %4\nArchitecture: %5\nMaintainer: %6\nHomepage: %7\n\nDescription:\n%8\n\nDepends: %9\nPre-Depends: %10\nRecommends: %11\nSuggests: %12\nConflicts: %13\nProvides: %14")
-            .arg(sourcePackageTypeName(currentRelease()->sourceType),
-                 acquisitionKindName(currentRelease()->acquisition.kind), metadata.package,
+            .arg(sourcePackageTypeTitle(currentRelease()->sourceType),
+                 acquisitionKindTitle(currentRelease()->acquisition.kind), metadata.package,
                  metadata.version, metadata.architecture, metadata.maintainer,
                  metadata.homepage, metadata.description, metadata.depends,
                  metadata.preDepends, metadata.recommends, metadata.suggests,
@@ -3834,6 +4785,35 @@ void MainWindow::populatePackage() {
     rawMetadataView_->setPlainText(raw.join(QLatin1Char('\n')));
 }
 
+void MainWindow::populateInstallPlan() {
+    if (!project_ || currentRelease() == nullptr || appImageInstallPlan_ == nullptr) return;
+    const auto &release = *currentRelease();
+    const auto pkgbuild = currentPkgbuildText();
+    const auto plan = PkgbuildInstallPlan::parse(pkgbuild, release);
+    if (installPlanNotice_ != nullptr) {
+        QString notice = release.pkgbuildManuallyModified
+            ? QStringLiteral("Filesystem parsed from the Custom PKGBUILD. Expand a directory to see each file.")
+            : QStringLiteral("Filesystem parsed from the Guided PKGBUILD. Expand a directory to see each file.");
+        if (!plan.warnings.isEmpty()) {
+            notice += QLatin1Char('\n') + plan.warnings.join(QLatin1Char('\n'));
+        }
+        installPlanNotice_->setText(notice);
+    }
+    appImageInstallPlan_->clear();
+    QHash<QString, QTreeWidgetItem *> nodes;
+    const auto excludedColor = QColor(150, 150, 150);
+    for (const auto &entry : plan.entries) {
+        addInstallPlanEntry(appImageInstallPlan_, &nodes, entry.path, entry.source, entry.purpose,
+                            entry.excluded ? excludedColor : QColor{});
+    }
+    for (int row = 0; row < appImageInstallPlan_->topLevelItemCount(); ++row) {
+        auto *item = appImageInstallPlan_->topLevelItem(row);
+        decorateInstallPlanTree(item);
+        item->setExpanded(true);
+    }
+    appImageInstallPlan_->sortItems(0, Qt::AscendingOrder);
+}
+
 void MainWindow::saveInstallMapping() {
     if (!project_ || currentRelease() == nullptr) return;
     auto &release = *currentRelease();
@@ -3843,7 +4823,8 @@ void MainWindow::saveInstallMapping() {
     const auto destination = installBinaryDestination_->text().trimmed();
     static const QRegularExpression commandPath(
         QStringLiteral("^/usr/bin/[A-Za-z0-9@._+\\-]+$"));
-    if (!destination.isEmpty() && !commandPath.match(destination).hasMatch()) {
+    if (release.sourceType == SourcePackageType::ElfBinary && !destination.isEmpty() &&
+        !commandPath.match(destination).hasMatch()) {
         QMessageBox::warning(this, QStringLiteral("Unsafe command destination"),
                              QStringLiteral("The command destination must be a simple absolute path below /usr/bin."));
         return;
@@ -3852,34 +4833,24 @@ void MainWindow::saveInstallMapping() {
         release.sourceType == SourcePackageType::AppImage) {
         static const QRegularExpression optName(QStringLiteral("^[A-Za-z0-9@._+\\-]+$"));
         const auto opt = installOptDirectory_->text().trimmed();
-        const auto source = installBinarySource_->text().trimmed();
         if (!optName.match(opt).hasMatch()) {
             QMessageBox::warning(this, QStringLiteral("Unsafe /opt directory"),
                                  QStringLiteral("Use a single directory name containing letters, digits, '.', '_', '+', '@', or '-'."));
             return;
         }
-        if (!source.isEmpty() && !PathSafety::normalizedArchivePath(source).has_value()) {
-            QMessageBox::warning(this, QStringLiteral("Unsafe executable path"),
-                                 QStringLiteral("The executable path must be a safe relative path inside the archive."));
-            return;
-        }
-        if (!destination.isEmpty() && source.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("Executable path required"),
-                                 QStringLiteral("Select the executable inside the archive before creating a command symlink."));
-            return;
-        }
         release.installMapping.optDirectory = opt;
-        release.installMapping.binarySourcePath = source;
         if (release.sourceType == SourcePackageType::Archive) {
             release.installMapping.stripCommonPrefix = installStripPrefix_->isChecked();
         }
     }
     release.installMapping.archiveLayout = archiveLayout_->currentIndex() == 0
         ? ArchiveLayout::OptBundle : ArchiveLayout::PreserveRoot;
-    release.installMapping.binaryDestination = destination;
-    if (!release.installMapping.launchers.isEmpty() && !destination.isEmpty()) {
-        release.installMapping.launchers.first().destination = destination;
-        release.installMapping.launchers.first().commandName = QFileInfo(destination).fileName();
+    if (release.sourceType == SourcePackageType::ElfBinary) {
+        release.installMapping.binaryDestination = destination;
+        if (!release.installMapping.launchers.isEmpty() && !destination.isEmpty()) {
+            release.installMapping.launchers.first().destination = destination;
+            release.installMapping.launchers.first().commandName = QFileInfo(destination).fileName();
+        }
     }
     refreshGeneratedPkgbuildAfterModelChange();
     populatePackage();
@@ -4004,10 +4975,10 @@ void MainWindow::loadRepositoryPackageCatalog() {
             dependenciesTable_->setProperty("pacsmithRepositoryPackages",
                                             repositoryPackageNames_);
         }
-        if (project_ && currentRelease() != nullptr && tabs_ != nullptr &&
+        if (project_ && currentRelease() != nullptr && stageTabs_ != nullptr &&
             rightStack_->currentIndex() == 1) {
-            if (tabs_->currentIndex() == sectionIndex(EditorSection::Dependencies)) populateDependencies();
-            else if (tabs_->currentIndex() == sectionIndex(EditorSection::Build)) populateBuild();
+            if (isSectionActive(EditorSection::ConfigDependencies)) populateDependencies();
+            else if (isSectionActive(EditorSection::ResultBuild)) populateBuild();
         } else if (project_ && rightStack_->currentIndex() == 0) {
             populateOverview();
         }
@@ -4037,8 +5008,8 @@ void MainWindow::scheduleRepositoryPackageValidation(const QStringList &packages
             repositoryDependencyChecksPending_.remove(iterator.key());
         }
         if (project_ && currentRelease() != nullptr && rightStack_->currentIndex() == 1) {
-            if (tabs_->currentIndex() == sectionIndex(EditorSection::Dependencies)) populateDependencies();
-            else if (tabs_->currentIndex() == sectionIndex(EditorSection::Build)) populateBuild();
+            if (isSectionActive(EditorSection::ConfigDependencies)) populateDependencies();
+            else if (isSectionActive(EditorSection::ResultBuild)) populateBuild();
         } else if (project_ && rightStack_->currentIndex() == 0) {
             populateOverview();
         }
@@ -4072,20 +5043,20 @@ void MainWindow::populateScripts() {
     } else if (!lifecycle.contents.isEmpty() && lifecycle.validationPassed &&
         lifecycle.requiresAcknowledgement()) {
         scriptsActionNotice_->setText(
-            QStringLiteral("⚠ Action required before installation: review the Arch lifecycle script at the bottom of this page, then select “Approve Exact Arch Script.” It is the script pacman will run as root. Imported package scripts are reference-only and will not execute."));
+            QStringLiteral("Action required before installation: review the exact .install script below, then approve it. That is the script pacman will run as root. Vendor scripts on the imported package tab are reference-only."));
         scriptsActionNotice_->setStyleSheet(QStringLiteral(
             "background: rgba(229,185,61,28); border: 1px solid #b89624; border-radius: 5px;"));
     } else if (unresolvedResponsibilities > 0) {
         scriptsActionNotice_->setText(
-            QStringLiteral("⚠ %1 extracted script responsibility item(s) still need an Arch-specific resolution. Original package-script source is shown for context; merely reading it does not create an Arch action.")
+            QStringLiteral("⚠ %1 extracted script responsibility item(s) still need an Arch-specific resolution. Vendor script text is on the imported package tab → Vendor scripts; reading it does not create an Arch action.")
                 .arg(unresolvedResponsibilities));
         scriptsActionNotice_->setStyleSheet(QStringLiteral(
             "background: rgba(229,185,61,28); border: 1px solid #b89624; border-radius: 5px;"));
     } else {
         scriptsActionNotice_->setText(
             lifecycle.contents.isEmpty()
-                ? QStringLiteral("✓ No action required. All extracted responsibilities are handled, and no privileged Arch lifecycle script is needed. Imported scripts remain available only for reference.")
-                : QStringLiteral("✓ All extracted responsibilities are handled and the exact generated Arch lifecycle script has been approved. Imported scripts remain available only for reference."));
+                ? QStringLiteral("✓ No action required. All extracted responsibilities are handled, and no privileged Arch lifecycle script is needed. Vendor scripts remain on the imported package tab for reference.")
+                : QStringLiteral("✓ All extracted responsibilities are handled and the exact generated Arch lifecycle script has been approved. Vendor scripts remain on the imported package tab for reference."));
         scriptsActionNotice_->setStyleSheet(QStringLiteral(
             "background: rgba(85,204,119,24); border: 1px solid #3f8f58; border-radius: 5px;"));
     }
@@ -4207,7 +5178,7 @@ void MainWindow::populateScripts() {
                                            .arg(lifecycle.fileName);
         lifecycleStatus_->setText(QStringLiteral("%1 · "
                                                  "<span style='color:#e5b93d'>⚠ user approval required before installation</span><br>"
-                                                 "This is the only script on this page that pacman will execute. Review the exact content below.<br>%2<br>%3")
+                                                 "This is the only script pacman will execute. Vendor maintainer scripts are never this file.<br>%2<br>%3")
                                       .arg(lifecycleOrigin, lifecycle.validationMessage.toHtmlEscaped(), integration));
         acknowledgeLifecycleButton_->setEnabled(true);
         discardLifecycleButton_->setEnabled(true);
@@ -4366,7 +5337,7 @@ void MainWindow::saveLifecycleEdit() {
     } else if (currentRelease()->pkgbuildManuallyModified) {
         QMessageBox::warning(
             this, QStringLiteral("Lifecycle script saved; PKGBUILD needs attention"),
-            QStringLiteral("The script validated, but the PKGBUILD is user-owned. Add install='%1' manually or use Restore Generated Version on the PKGBUILD page. Then review and approve the exact script before installation.")
+            QStringLiteral("The script validated, but Configuration is in Custom mode. Add install='%1' to the PKGBUILD or switch back to Guided. Then review and approve the exact script before installation.")
                 .arg(lifecycleFileName));
     } else {
         statusBar()->showMessage(
@@ -4434,7 +5405,7 @@ void MainWindow::populatePayload() {
               .arg(currentRelease()->installMapping.optDirectory.isEmpty()
                        ? currentRelease()->archPackageName
                        : currentRelease()->installMapping.optDirectory)
-        : QStringLiteral("This is the filesystem payload in the vendor artifact. Most files need no action. For highlighted system files, inspect the explanation/content and explicitly keep or exclude them. Decisions are content-specific and changed files require review again."));
+        : QStringLiteral("This is the filesystem payload in the vendor artifact. Most files need no action. For highlighted system files, inspect the explanation/content and explicitly keep or exclude them. Symbolic links that point outside the package are shown in red and stay excluded until you keep them. Decisions are content-specific and changed files require review again."));
     payloadTree_->headerItem()->setText(3, appImage ? QStringLiteral("Bundle status")
                                                     : QStringLiteral("Review"));
     keepPayloadButton_->setVisible(!appImage);
@@ -4481,11 +5452,19 @@ void MainWindow::populatePayload() {
                     if (review.needsReview) {
                         const bool currentlyExcluded = review.disposition == PayloadDisposition::ExcludedByDefault ||
                                                        review.disposition == PayloadDisposition::Excluded;
+                        const bool unsafeLink = unsafePackageSymlink(entry);
                         item->setText(3, currentlyExcluded
                                                  ? QStringLiteral("Currently excluded — choose keep or exclude")
                                                  : QStringLiteral("Currently kept — choose keep or exclude"));
+                        if (unsafeLink) {
+                            item->setText(3, currentlyExcluded
+                                                 ? QStringLiteral("Unsafe symlink, excluded — choose keep or exclude")
+                                                 : QStringLiteral("Unsafe symlink — choose keep or exclude"));
+                            item->setData(0, Qt::UserRole + 1, true);
+                        }
+                        const auto color = unsafeLink ? payloadUnsafeRed : payloadReviewAmber;
                         for (int column = 0; column < 4; ++column) {
-                            item->setForeground(column, QColor(Qt::darkYellow));
+                            item->setForeground(column, color);
                         }
                     } else if (review.disposition == PayloadDisposition::Excluded) {
                         item->setText(3, aiGenerated && provenance.userApproved
@@ -4512,17 +5491,23 @@ void MainWindow::populatePayload() {
             }
         }
     }
-    std::function<bool(QTreeWidgetItem *)> markPendingDescendants = [&](QTreeWidgetItem *item) {
-        bool pending = item->text(3).contains(QStringLiteral("choose keep"), Qt::CaseInsensitive);
-        for (int child = 0; child < item->childCount(); ++child) {
-            pending = markPendingDescendants(item->child(child)) || pending;
-        }
-        if (pending && item->text(3).isEmpty()) {
-            item->setText(3, QStringLiteral("Contains item(s) needing a decision"));
-            for (int column = 0; column < 4; ++column) item->setForeground(column, QColor(Qt::darkYellow));
-        }
-        return pending;
-    };
+    std::function<std::pair<bool, bool>(QTreeWidgetItem *)> markPendingDescendants =
+        [&](QTreeWidgetItem *item) {
+            bool pending = item->text(3).contains(QStringLiteral("choose keep"), Qt::CaseInsensitive);
+            bool unsafe = item->data(0, Qt::UserRole + 1).toBool();
+            for (int child = 0; child < item->childCount(); ++child) {
+                const auto childState = markPendingDescendants(item->child(child));
+                pending = childState.first || pending;
+                unsafe = childState.second || unsafe;
+            }
+            if (pending && item->text(3).isEmpty()) {
+                item->setText(3, unsafe ? QStringLiteral("Contains unsafe symlink(s) needing a decision")
+                                        : QStringLiteral("Contains item(s) needing a decision"));
+                const auto color = unsafe ? payloadUnsafeRed : payloadReviewAmber;
+                for (int column = 0; column < 4; ++column) item->setForeground(column, color);
+            }
+            return std::pair<bool, bool>{pending, unsafe};
+        };
     for (int top = 0; top < payloadTree_->topLevelItemCount(); ++top) {
         static_cast<void>(markPendingDescendants(payloadTree_->topLevelItem(top)));
     }
@@ -4592,8 +5577,7 @@ void MainWindow::updateSelectedPayload() {
     if (!entry.textPreview.isEmpty()) {
         payloadPreview_->setPlainText(entry.textPreview +
                                       (entry.previewTruncated ? QStringLiteral("\n\n[Preview truncated at 1 MiB]") : QString{}));
-    } else if (entry.type == QStringLiteral("file") && entry.contentSha256.isEmpty() &&
-               (entry.requiresReview || appImage)) {
+    } else if (entry.type == QStringLiteral("file") && entry.contentSha256.isEmpty()) {
         payloadPreview_->setPlainText(QStringLiteral("Loading file content from the saved vendor artifact…"));
         loadSelectedPayloadPreview(path);
     } else if (entry.type == QStringLiteral("file")) {
@@ -4740,6 +5724,116 @@ void MainWindow::populateCommands() {
     populating_ = false;
 }
 
+void MainWindow::populateAppRunEditor() {
+    if (appRunEditor_ == nullptr || currentRelease() == nullptr) return;
+    const auto &appRun = currentRelease()->installMapping.appRun;
+    const auto disableEditor = [this] {
+        appRunEditor_->setEnabled(false);
+        saveAppRunButton_->setEnabled(false);
+        if (keepOriginalAppRunButton_ != nullptr) keepOriginalAppRunButton_->setEnabled(false);
+        if (restoreAppRunButton_ != nullptr) restoreAppRunButton_->setVisible(false);
+    };
+    if (!appRun.present) {
+        appRunEditor_->clear();
+        disableEditor();
+        if (appRunReviewBanner_ != nullptr) appRunReviewBanner_->setVisible(false);
+        appRunStatus_->setText(QStringLiteral("Reanalyze to inspect AppRun."));
+        updateSectionReviewMarkers();
+        return;
+    }
+    if (!appRun.script) {
+        appRunEditor_->clear();
+        disableEditor();
+        if (appRunReviewBanner_ != nullptr) appRunReviewBanner_->setVisible(false);
+        appRunStatus_->setText(QStringLiteral("Binary or symlink AppRun; not editable as text."));
+        updateSectionReviewMarkers();
+        return;
+    }
+    appRunEditor_->setEnabled(true);
+    saveAppRunButton_->setEnabled(true);
+    if (appRunEditor_->toPlainText() != appRun.contents) {
+        appRunEditor_->setPlainText(appRun.contents);
+        appRunEditor_->document()->setModified(false);
+    }
+    const bool needsReview = appRun.requiresReview();
+    const bool edited = appRun.userModified ||
+        appRunEditor_->toPlainText() != appRun.originalContents;
+    if (appRunReviewBanner_ != nullptr) {
+        appRunReviewBanner_->setVisible(needsReview);
+        const auto reason = appRun.reviewReason.isEmpty()
+            ? QStringLiteral("Review this AppRun script before packaging.")
+            : appRun.reviewReason;
+        appRunReviewLabel_->setText(QStringLiteral("⚠ Needs review — %1").arg(reason));
+    }
+    if (keepOriginalAppRunButton_ != nullptr) {
+        keepOriginalAppRunButton_->setEnabled(needsReview && !appRunEditor_->document()->isModified());
+    }
+    restoreAppRunButton_->setVisible(edited && !appRun.originalContents.isEmpty());
+    if (needsReview) {
+        appRunStatus_->clear();
+    } else if (appRun.userModified) {
+        appRunStatus_->setText(QStringLiteral("Edited"));
+    } else {
+        appRunStatus_->setText(QStringLiteral("Original kept"));
+    }
+    updateSectionReviewMarkers();
+}
+
+void MainWindow::saveAppRun() {
+    if (!project_ || currentRelease() == nullptr || appRunEditor_ == nullptr) return;
+    auto &appRun = currentRelease()->installMapping.appRun;
+    if (!appRun.present || !appRun.script) return;
+    const auto contents = appRunEditor_->toPlainText();
+    if (!contents.startsWith(QStringLiteral("#!")) || contents.contains(QChar(QChar::Null)) ||
+        contents.size() > 256 * 1024) {
+        appRunStatus_->setText(QStringLiteral("⚠ AppRun must remain a #! script of at most 256 KiB."));
+        return;
+    }
+    appRun.contents = contents;
+    appRun.userModified = contents != appRun.originalContents;
+    appRun.acknowledge();
+    appRun.provenance.origin = ValueOrigin::User;
+    appRun.provenance.userApproved = true;
+    appRun.provenance.timestamp = QDateTime::currentDateTimeUtc();
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateAppRunEditor();
+    appRunStatus_->setText(appRun.userModified ? QStringLiteral("✓ Saved")
+                                               : QStringLiteral("✓ Original kept"));
+}
+
+void MainWindow::keepOriginalAppRun() {
+    if (!project_ || currentRelease() == nullptr) return;
+    auto &appRun = currentRelease()->installMapping.appRun;
+    if (!appRun.present || !appRun.script || !appRun.requiresReview()) return;
+    appRun.contents = appRun.originalContents.isEmpty() ? appRun.contents : appRun.originalContents;
+    appRun.userModified = false;
+    appRun.acknowledge();
+    appRun.provenance.origin = ValueOrigin::User;
+    appRun.provenance.userApproved = true;
+    appRun.provenance.timestamp = QDateTime::currentDateTimeUtc();
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateAppRunEditor();
+    appRunStatus_->setText(QStringLiteral("✓ Original kept"));
+}
+
+void MainWindow::restoreOriginalAppRun() {
+    if (!project_ || currentRelease() == nullptr) return;
+    auto &appRun = currentRelease()->installMapping.appRun;
+    if (appRun.originalContents.isEmpty()) return;
+    appRun.contents = appRun.originalContents;
+    appRun.userModified = false;
+    appRun.acknowledgedFingerprint.clear();
+    appRun.provenance.origin = ValueOrigin::User;
+    appRun.provenance.userApproved = true;
+    appRun.provenance.timestamp = QDateTime::currentDateTimeUtc();
+    refreshGeneratedPkgbuildAfterModelChange();
+    if (appRunEditor_ != nullptr) {
+        appRunEditor_->setPlainText(appRun.contents);
+        appRunEditor_->document()->setModified(false);
+    }
+    populateAppRunEditor();
+}
+
 void MainWindow::commandEdited(const int row, const int column) {
     if (populating_ || !project_ || row < 0 ||
         row >= currentRelease()->installMapping.launchers.size()) return;
@@ -4764,12 +5858,132 @@ void MainWindow::commandEdited(const int row, const int column) {
     launcher.provenance.origin = ValueOrigin::User;
     launcher.provenance.userApproved = true;
     launcher.provenance.timestamp = QDateTime::currentDateTimeUtc();
-    if (row == 0) {
-        currentRelease()->installMapping.binarySourcePath = launcher.sourcePath;
-        currentRelease()->installMapping.binaryDestination = launcher.destination;
-    }
+    syncInstallMappingFromLaunchers();
     refreshGeneratedPkgbuildAfterModelChange();
     populateCommands();
+}
+
+QStringList MainWindow::payloadFileChoices() const {
+    QStringList executable;
+    QStringList other;
+    if (currentRelease() == nullptr) return {};
+    for (const auto &entry : currentRelease()->payload) {
+        if (entry.type != QStringLiteral("file")) continue;
+        if (entry.executable) executable.append(entry.path);
+        else other.append(entry.path);
+    }
+    executable.sort();
+    other.sort();
+    return executable + other;
+}
+
+QString MainWindow::choosePayloadFile(const QString &title, const QString &selected) {
+    const auto choices = payloadFileChoices();
+    if (choices.isEmpty()) {
+        QMessageBox::information(this, title,
+                                 QStringLiteral("This artifact has no inspected files to map."));
+        return {};
+    }
+    int current = 0;
+    if (!selected.isEmpty()) {
+        const auto index = choices.indexOf(selected);
+        if (index >= 0) current = static_cast<int>(index);
+    }
+    bool accepted = false;
+    const auto path = QInputDialog::getItem(
+        this, title,
+        QStringLiteral("Choose a file from the inspected vendor payload:"),
+        choices, current, false, &accepted);
+    if (!accepted) return {};
+    return path;
+}
+
+void MainWindow::syncInstallMappingFromLaunchers() {
+    if (currentRelease() == nullptr) return;
+    auto &mapping = currentRelease()->installMapping;
+    mapping.binarySourcePath.clear();
+    mapping.binaryDestination.clear();
+    mapping.executableLinks.clear();
+    for (const auto &launcher : mapping.launchers) {
+        if (!launcher.enabled || launcher.missing || launcher.sourcePath.isEmpty() ||
+            launcher.commandName.isEmpty()) {
+            continue;
+        }
+        mapping.binarySourcePath = launcher.sourcePath;
+        mapping.binaryDestination = launcher.destination;
+        mapping.executableLinks.append(launcher.commandName);
+        break;
+    }
+}
+
+void MainWindow::addCommandFromPayload() {
+    if (!project_ || currentRelease() == nullptr) return;
+    const auto path = choosePayloadFile(QStringLiteral("Add command from payload"));
+    if (path.isEmpty()) return;
+    const auto already = std::any_of(
+        currentRelease()->installMapping.launchers.cbegin(),
+        currentRelease()->installMapping.launchers.cend(),
+        [&](const auto &launcher) { return launcher.sourcePath == path; });
+    if (already) {
+        QMessageBox::information(this, QStringLiteral("Command already listed"),
+                                 QStringLiteral("That payload file is already listed as a command."));
+        return;
+    }
+    LauncherMapping launcher;
+    launcher.enabled = true;
+    launcher.sourcePath = path;
+    launcher.commandName = QFileInfo(path).fileName().toLower();
+    launcher.destination = QStringLiteral("/usr/bin/%1").arg(launcher.commandName);
+    launcher.provenance.origin = ValueOrigin::User;
+    launcher.provenance.userApproved = true;
+    launcher.provenance.timestamp = QDateTime::currentDateTimeUtc();
+    launcher.provenance.rationale = QStringLiteral("User selected an inspected payload file");
+    currentRelease()->installMapping.launchers.append(std::move(launcher));
+    syncInstallMappingFromLaunchers();
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateCommands();
+    statusBar()->showMessage(QStringLiteral("Command added from payload"), 6000);
+}
+
+void MainWindow::assignPayloadToSelectedCommand() {
+    if (!project_ || currentRelease() == nullptr || commandsTable_ == nullptr) return;
+    const auto row = commandsTable_->currentRow();
+    if (row < 0 || row >= currentRelease()->installMapping.launchers.size()) {
+        QMessageBox::information(this, QStringLiteral("Assign payload"),
+                                 QStringLiteral("Select a command row first."));
+        return;
+    }
+    auto &launcher = currentRelease()->installMapping.launchers[row];
+    const auto path = choosePayloadFile(QStringLiteral("Assign payload file"), launcher.sourcePath);
+    if (path.isEmpty()) return;
+    launcher.sourcePath = path;
+    launcher.missing = false;
+    if (launcher.commandName.isEmpty()) {
+        launcher.commandName = QFileInfo(path).fileName().toLower();
+        launcher.destination = QStringLiteral("/usr/bin/%1").arg(launcher.commandName);
+    }
+    launcher.provenance.origin = ValueOrigin::User;
+    launcher.provenance.userApproved = true;
+    launcher.provenance.timestamp = QDateTime::currentDateTimeUtc();
+    syncInstallMappingFromLaunchers();
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateCommands();
+    statusBar()->showMessage(QStringLiteral("Command source assigned from payload"), 6000);
+}
+
+void MainWindow::removeSelectedCommand() {
+    if (!project_ || currentRelease() == nullptr || commandsTable_ == nullptr) return;
+    const auto row = commandsTable_->currentRow();
+    if (row < 0 || row >= currentRelease()->installMapping.launchers.size()) {
+        QMessageBox::information(this, QStringLiteral("Remove command"),
+                                 QStringLiteral("Select a command row first."));
+        return;
+    }
+    currentRelease()->installMapping.launchers.removeAt(row);
+    syncInstallMappingFromLaunchers();
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateCommands();
+    statusBar()->showMessage(QStringLiteral("Command removed"), 6000);
 }
 
 void MainWindow::populateDesktopEntries() {
@@ -5132,22 +6346,53 @@ void MainWindow::applyIconBytes(const QByteArray &contents, const QString &suffi
 }
 
 void MainWindow::populatePkgbuild() {
-    if (!project_) return;
+    if (!project_ || currentRelease() == nullptr) return;
     QString error;
     const auto contents = store_.readPkgbuild(*currentRelease(), &error);
     if (!contents) {
         QMessageBox::critical(this, QStringLiteral("Could not read PKGBUILD"), error);
         return;
     }
-    pkgbuildEditor_->setPlainText(*contents);
-    pkgbuildEditor_->document()->setModified(false);
-    auto state = currentRelease()->pkgbuildManuallyModified
-        ? QStringLiteral("⚠ User-owned PKGBUILD. Structured-tab changes are not merged into this file, and edits here do not update the tabs. Restore the generated version to resume automatic regeneration.")
-        : QStringLiteral("✓ Matches PacSmith's generated version");
-    if (!currentRelease()->previousManualPkgbuild.isEmpty()) {
-        state += QStringLiteral("\nThe previous release had a manually owned recipe. PacSmith generated this release fresh and kept the prior text at files/previous-manual-PKGBUILD for reference; it was not merged automatically.");
+    const bool keepDraft = pkgbuildEditor_ != nullptr &&
+                           pkgbuildEditor_->document()->isModified() &&
+                           isSectionActive(EditorSection::ConfigPkgbuild);
+    if (pkgbuildEditor_ != nullptr && !keepDraft) {
+        pkgbuildEditor_->setPlainText(*contents);
+        pkgbuildEditor_->document()->setModified(false);
     }
-    pkgbuildState_->setText(state);
+    if (pkgbuildPreview_ != nullptr) {
+        pkgbuildPreview_->setPlainText(*contents);
+    }
+    auto state = currentRelease()->pkgbuildManuallyModified
+        ? QStringLiteral("⚠ Custom PKGBUILD. Guided configuration is ignored until you switch back.")
+        : QStringLiteral("✓ Generated from Guided configuration");
+    if (!currentRelease()->previousManualPkgbuild.isEmpty()) {
+        state += QStringLiteral("\nThe previous release had a Custom PKGBUILD. PacSmith generated this release fresh and kept the prior text at files/previous-manual-PKGBUILD for reference; it was not merged automatically.");
+    }
+    if (pkgbuildState_ != nullptr &&
+        (pkgbuildEditor_ == nullptr || !pkgbuildEditor_->document()->isModified())) {
+        pkgbuildState_->setText(state);
+    }
+    if (pkgbuildPreviewNotice_ != nullptr) {
+        pkgbuildPreviewNotice_->setText(state);
+    }
+    if (isSectionActive(EditorSection::ResultBuild) || buildButton_ != nullptr) populateBuild();
+}
+
+QString MainWindow::currentPkgbuildText() const {
+    if (pkgbuildEditor_ != nullptr && pkgbuildEditor_->document()->isModified()) {
+        return pkgbuildEditor_->toPlainText();
+    }
+    if (!project_ || currentRelease() == nullptr) {
+        return pkgbuildEditor_ != nullptr ? pkgbuildEditor_->toPlainText() : QString{};
+    }
+    QString error;
+    const auto contents = store_.readPkgbuild(*currentRelease(), &error);
+    if (contents) return *contents;
+    if (pkgbuildPreview_ != nullptr && !pkgbuildPreview_->toPlainText().isEmpty()) {
+        return pkgbuildPreview_->toPlainText();
+    }
+    return pkgbuildEditor_ != nullptr ? pkgbuildEditor_->toPlainText() : QString{};
 }
 
 void MainWindow::populateUpdates() {
@@ -5183,7 +6428,7 @@ void MainWindow::populateUpdates() {
         updateCandidates_->clear();
         updateNotice_->setText(QStringLiteral("Update configuration is release-owned; there is no project-level source record."));
         updateCheckStatus_->setText(QStringLiteral("No update checks are available."));
-        updateCheckButton_->setEnabled(false);
+        syncUpdateCheckButtons();
         populating_ = false;
         return;
     }
@@ -5311,10 +6556,7 @@ void MainWindow::populateUpdates() {
     aptSigningKey_->setEnabled(repository);
     githubRegexAiButton_->setEnabled(github && aiSettings_.provider != AiProviderKind::None &&
                                      !aiService_.isRunning());
-    updateCheckButton_->setEnabled((repository || github) && !aptUpdateService_.isRunning() &&
-                                   !rpmUpdateService_.isRunning() &&
-                                   !githubUpdateService_.isRunning() &&
-                                   !debDownloadService_.isRunning() && importThread_ == nullptr);
+    syncUpdateCheckButtons();
     const auto githubPolicy = tracker->update.githubIncludePrereleases
         ? QStringLiteral(" Preview tracking is enabled, so newer prereleases may be selected even when a stable release exists.")
         : QStringLiteral(" Stable releases are preferred. If none match, PacSmith follows prereleases until a matching stable release is published, then remains on stable.");
@@ -5387,30 +6629,38 @@ void MainWindow::populateBuild() {
                                                 .arg(payloadReviews), lifecycleState));
     const bool building = buildService_.isRunning();
     const bool installing = installService_.isRunning();
-    buildButton_->setText(building ? QStringLiteral("Cancel Build") : QStringLiteral("Build"));
+    const bool hasExistingBuild = releaseHasExistingBuild(*currentRelease());
+    buildButton_->setText(building ? QStringLiteral("Cancel Build")
+                                   : hasExistingBuild ? QStringLiteral("Rebuild")
+                                                      : QStringLiteral("Build"));
     buildButton_->setEnabled(!installing && (building || unavailable == 0));
     buildButton_->setToolTip(!building && unavailable > 0
                                  ? QStringLiteral("Correct unavailable package names on Dependencies before building")
                                  : QString{});
-    buildProgress_->setVisible(building || installing);
+    const bool updateInstall = !project_->installedVersion.isEmpty() &&
+                               currentRelease()->id != project_->installedReleaseId;
     installButton_->setText(installing ? QStringLiteral("Installing…")
-                                       : QStringLiteral("Install with pacman"));
-    QString packageText = QStringLiteral("Build status: %1").arg(buildStatusName(currentRelease()->buildStatus));
-    bool installable = false;
-    if (!currentRelease()->producedPackages.isEmpty()) {
-        packageText += QStringLiteral("\nPackage: %1").arg(currentRelease()->producedPackages.first());
-        installable = QFileInfo::exists(currentRelease()->producedPackages.first());
-    }
-    builtPackage_->setText(packageText);
+                                       : updateInstall ? QStringLiteral("Install Update")
+                                                       : QStringLiteral("Install"));
+    builtPackage_->setText(builtPackageSummaryHtml(store_, *currentRelease(), building, installing));
     const bool lifecycleReady = currentRelease()->lifecycleScript.contents.isEmpty() ||
                                 (currentRelease()->lifecycleScript.validationPassed &&
                                  !currentRelease()->lifecycleScript.requiresAcknowledgement());
+    const bool installable = !retainedPackagePath(store_, *currentRelease()).isEmpty();
     installButton_->setEnabled(!building && !installing && installable && lifecycleReady);
     installButton_->setToolTip(!lifecycleReady
                                    ? QStringLiteral("Review and acknowledge the exact privileged lifecycle script first")
-                                   : QString{});
-    if (!building && buildLog_->toPlainText().isEmpty() && !currentRelease()->lastBuildLog.isEmpty()) {
-        buildLog_->setPlainText(currentRelease()->lastBuildLog);
+                                   : !installable
+                                         ? QStringLiteral("Build the package before installing")
+                                         : QString{});
+    const auto pkgbuildLabel = hasExistingBuild ? QStringLiteral("Rebuild") : QStringLiteral("Build");
+    if (pkgbuildBuildButton_ != nullptr) {
+        pkgbuildBuildButton_->setText(pkgbuildLabel);
+        pkgbuildBuildButton_->setEnabled(!building && !installing && unavailable == 0);
+    }
+    if (resultPkgbuildBuildButton_ != nullptr) {
+        resultPkgbuildBuildButton_->setText(pkgbuildLabel);
+        resultPkgbuildBuildButton_->setEnabled(!building && !installing && unavailable == 0);
     }
 }
 
@@ -5436,53 +6686,44 @@ bool MainWindow::persistCurrent() {
 }
 
 bool MainWindow::savePkgbuild() {
-    if (!project_) return false;
-    const auto contents = pkgbuildEditor_->toPlainText();
-    const bool becomesManual = !currentRelease()->pkgbuildManuallyModified &&
-                               sha256Hex(contents.toUtf8()) != currentRelease()->generatedPkgbuildSha256;
-    if (becomesManual &&
-        QMessageBox::warning(
-            this, QStringLiteral("Save manual PKGBUILD"),
-            QStringLiteral("This differs from PacSmith's generated recipe. Saving it makes the PKGBUILD user-owned. "
-                           "PacSmith will preserve it, but later changes on structured tabs will not be merged into it, "
-                           "and edits here will not update those tabs. Continue?"),
-            QMessageBox::Yes | QMessageBox::Cancel,
-            QMessageBox::Cancel) != QMessageBox::Yes) {
-        return false;
-    }
+    if (!project_ || currentRelease() == nullptr || pkgbuildEditor_ == nullptr) return false;
+    if (!pkgbuildEditor_->document()->isModified()) return true;
     QString error;
-    if (!store_.savePkgbuild(*project_, *currentRelease(), contents, &error)) {
+    if (!store_.saveCustomPkgbuild(*project_, *currentRelease(), pkgbuildEditor_->toPlainText(), &error)) {
         QMessageBox::critical(this, QStringLiteral("Could not save PKGBUILD"), error);
         return false;
     }
     projectCache_.insert(project_->id, *project_);
     pkgbuildEditor_->document()->setModified(false);
-    pkgbuildState_->setText(currentRelease()->pkgbuildManuallyModified
-                                ? QStringLiteral("⚠ User-owned PKGBUILD. Structured-tab changes are not merged into this file, and edits here do not update the tabs. Restore the generated version to resume automatic regeneration.")
-                                : QStringLiteral("✓ Matches PacSmith's generated version"));
-    statusBar()->showMessage(QStringLiteral("PKGBUILD saved"), 5000);
+    configureEditorProfile();
+    populatePkgbuild();
+    populateBuild();
+    populateHistory();
+    statusBar()->showMessage(QStringLiteral("PKGBUILD saved"), 4000);
     return true;
 }
 
+void MainWindow::restoreGeneratedPkgbuild() {
+    setConfigurationMode(false);
+}
+
 void MainWindow::refreshGeneratedPkgbuildAfterModelChange() {
-    if (!project_) return;
-    const bool preserveManualFile = currentRelease()->pkgbuildManuallyModified;
+    if (!project_ || currentRelease() == nullptr) return;
+    const bool custom = currentRelease()->pkgbuildManuallyModified;
     currentRelease()->generatedPkgbuild = PkgbuildGenerator::generate(*currentRelease());
     currentRelease()->generatedPkgbuildSha256 = sha256Hex(currentRelease()->generatedPkgbuild.toUtf8());
-    if (preserveManualFile) {
-        currentRelease()->pkgbuildManuallyModified = true;
+    if (custom) {
         persistCurrent();
-        pkgbuildState_->setText(QStringLiteral(
-            "⚠ User-owned PKGBUILD preserved; structured project changes were not merged into it. Review and update the recipe manually, or restore PacSmith's generated version."));
     } else {
         QString error;
-        if (!store_.savePkgbuild(*project_, *currentRelease(), currentRelease()->generatedPkgbuild, &error)) {
+        if (!store_.activateGuidedPkgbuild(*project_, *currentRelease(), &error)) {
             QMessageBox::critical(this, QStringLiteral("Could not update generated PKGBUILD"), error);
             return;
         }
         projectCache_.insert(project_->id, *project_);
         populatePkgbuild();
     }
+    updateConfigurationModeChrome();
 }
 
 void MainWindow::dependencyEdited(const int row, const int column) {
@@ -6939,18 +8180,8 @@ void MainWindow::applyAiResolution(const AiResolution &resolution) {
     currentReleaseId_ = releaseId;
     showReleaseWorkbenchAtFirstAttention(releaseId);
 
-    QString stepName;
-    switch (tabs_->currentIndex()) {
-    case 0: stepName = QStringLiteral("Package"); break;
-    case 1: stepName = QStringLiteral("Dependencies"); break;
-    case 2: stepName = QStringLiteral("Scripts"); break;
-    case 3: stepName = QStringLiteral("Payload"); break;
-    case 4: stepName = QStringLiteral("Updates"); break;
-    case 5: stepName = QStringLiteral("PKGBUILD"); break;
-    default: stepName = QStringLiteral("Build"); break;
-    }
-
-    const bool readyToBuild = tabs_->currentIndex() == sectionIndex(EditorSection::Build);
+    QString stepName = sectionTitle(currentSection());
+    const bool readyToBuild = currentSection() == EditorSection::ResultBuild;
     const auto appliedSummary = applied.changed
         ? QStringLiteral("PacSmith applied the accepted AI recommendations.")
         : QStringLiteral("The AI review completed without an accepted configuration change.");
@@ -6992,6 +8223,7 @@ void MainWindow::startUpdateCheck() {
         return;
     }
     updateCheckButton_->setEnabled(false);
+    if (historyCheckUpdatesButton_ != nullptr) historyCheckUpdatesButton_->setEnabled(false);
     projectList_->setEnabled(false);
     updateCheckReleaseId_ = tracker->id;
     updateCheckFromWorkbench_ = rightStack_ != nullptr && rightStack_->currentIndex() == 1;
@@ -7079,7 +8311,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
     if (remainInWorkbench && project_.has_value() &&
         project_->release(checkedReleaseId) != nullptr) {
         showReleaseWorkbench(checkedReleaseId);
-        selectSection(EditorSection::Updates);
+        selectSection(EditorSection::ConfigUpdates);
         populateUpdates();
     } else {
         populateUpdates();
@@ -7122,6 +8354,40 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
         8000);
 }
 
+void MainWindow::showCommandProgress(const QString &title, const QString &status,
+                                     const bool cancelable) {
+    if (commandProgress_ != nullptr) {
+        auto *previous = commandProgress_;
+        commandProgress_ = nullptr;
+        previous->hide();
+        previous->deleteLater();
+    }
+    auto *dialog = new CommandProgressDialog(this);
+    commandProgress_ = dialog;
+    dialog->setWindowTitle(title);
+    dialog->setStatus(status);
+    dialog->setCancelable(cancelable);
+    connect(dialog, &CommandProgressDialog::cancelRequested, this, [this, dialog] {
+        if (commandProgress_ != dialog || !buildService_.isRunning()) return;
+        buildService_.cancel();
+        dialog->setStatus(QStringLiteral("Canceling build…"));
+        dialog->setCancelable(false);
+        dialog->appendOutput(QStringLiteral("\n[PacSmith] Cancel requested.\n"));
+    });
+    connect(dialog, &QDialog::finished, this, [this, dialog] {
+        if (commandProgress_ == dialog) commandProgress_ = nullptr;
+        dialog->deleteLater();
+    });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+void MainWindow::finishCommandProgress(const bool success, const QString &summary) {
+    if (commandProgress_ == nullptr) return;
+    commandProgress_->markFinished(success, summary);
+}
+
 void MainWindow::startBuild() {
     if (!project_ || buildService_.isRunning()) return;
     bool lifecycleChanged = false;
@@ -7136,22 +8402,22 @@ void MainWindow::startBuild() {
         populateBuild();
         QMessageBox::information(
             this, QStringLiteral("Lifecycle file synchronized"),
-            QStringLiteral("PacSmith restored a missing project-local .install file from its exact recorded content, or detected a direct edit. Prior build results were cleared. Review the Scripts step, then build again."));
+            QStringLiteral("PacSmith restored a missing project-local .install file from its exact recorded content, or detected a direct edit. Prior build results were cleared. Review Configuration → Scripts, then build again."));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
-        selectSection(EditorSection::Scripts);
+        selectSection(EditorSection::ConfigScripts);
         return;
     }
     if (!currentRelease()->lifecycleScript.contents.isEmpty() &&
         !currentRelease()->lifecycleScript.validationPassed) {
         QMessageBox::warning(
             this, QStringLiteral("Lifecycle script is not buildable"),
-            QStringLiteral("The PKGBUILD expects '%1', but its recorded lifecycle content is missing or failed validation. Open Scripts and repair or remove the lifecycle script before building.\n\n%2")
+            QStringLiteral("The PKGBUILD expects '%1', but its recorded lifecycle content is missing or failed validation. Open Configuration → Scripts and repair or remove the lifecycle script before building.\n\n%2")
                 .arg(currentRelease()->lifecycleScript.fileName,
                      currentRelease()->lifecycleScript.validationMessage));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
-        selectSection(EditorSection::Scripts);
+        selectSection(EditorSection::ConfigScripts);
         return;
     }
     QStringList unavailablePackages;
@@ -7181,7 +8447,7 @@ void MainWindow::startBuild() {
                 .arg(uncheckedPackages.join(QLatin1Char('\n'))));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
-        selectSection(EditorSection::Dependencies);
+        selectSection(EditorSection::ConfigDependencies);
         return;
     }
     unavailablePackages.removeDuplicates();
@@ -7192,7 +8458,7 @@ void MainWindow::startBuild() {
                 .arg(unavailablePackages.join(QLatin1Char('\n'))));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
-        selectSection(EditorSection::Dependencies);
+        selectSection(EditorSection::ConfigDependencies);
         return;
     }
     const auto unresolved = std::count_if(currentRelease()->dependencies.cbegin(), currentRelease()->dependencies.cend(),
@@ -7205,7 +8471,8 @@ void MainWindow::startBuild() {
         return;
     }
     if (!savePkgbuild()) return;
-    const auto lifecycleReference = pkgbuildLifecycleReference(pkgbuildEditor_->toPlainText());
+    const auto pkgbuildText = currentPkgbuildText();
+    const auto lifecycleReference = pkgbuildLifecycleReference(pkgbuildText);
     if (!lifecycleReference.isEmpty() &&
         (lifecycleReference.contains(QLatin1Char('/')) ||
          (!lifecycleReference.contains(QLatin1Char('$')) &&
@@ -7215,35 +8482,39 @@ void MainWindow::startBuild() {
                .isFile()))) {
         QMessageBox::warning(
             this, QStringLiteral("PKGBUILD lifecycle file is unavailable"),
-            QStringLiteral("The PKGBUILD references install='%1', but PacSmith cannot verify a regular project-local file with that literal name. Repair the lifecycle file on Scripts or correct the user-owned PKGBUILD before building.")
+            QStringLiteral("The PKGBUILD references install='%1', but PacSmith cannot verify a regular project-local file with that literal name. Repair the lifecycle file on Configuration → Scripts or correct the Custom PKGBUILD before building.")
                 .arg(lifecycleReference));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
         selectSection(currentRelease()->lifecycleScript.contents.isEmpty()
-                          ? EditorSection::Pkgbuild : EditorSection::Scripts);
+                          ? (currentRelease()->pkgbuildManuallyModified
+                                 ? EditorSection::ConfigPkgbuild : EditorSection::ResultPkgbuild)
+                          : EditorSection::ConfigScripts);
         return;
     }
     if (!currentRelease()->lifecycleScript.contents.isEmpty() &&
         currentRelease()->lifecycleScript.validationPassed &&
-        !pkgbuildReferencesLifecycle(pkgbuildEditor_->toPlainText(),
+        !pkgbuildReferencesLifecycle(pkgbuildText,
                                      currentRelease()->lifecycleScript.fileName)) {
         QMessageBox::warning(
             this, QStringLiteral("PKGBUILD omits lifecycle script"),
             QStringLiteral("The validated lifecycle script '%1' is not referenced by the PKGBUILD. "
-                           "Add install='%1' to the user-owned PKGBUILD or restore PacSmith's generated version before building.")
+                           "Add install='%1' in Custom mode or switch back to Guided before building.")
                 .arg(currentRelease()->lifecycleScript.fileName));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
-        selectSection(EditorSection::Pkgbuild);
+        selectSection(currentRelease()->pkgbuildManuallyModified
+                          ? EditorSection::ConfigPkgbuild : EditorSection::ConfigScripts);
         return;
     }
-    buildLog_->clear();
     currentRelease()->buildStatus = BuildStatus::Building;
     persistCurrent();
     populateOverview();
     if (projectSidebar_ != nullptr) projectSidebar_->hide();
     rightStack_->setCurrentIndex(1);
-    selectSection(EditorSection::Build);
+    selectSection(EditorSection::ResultBuild);
+    showCommandProgress(QStringLiteral("Building %1").arg(project_->displayName),
+                        QStringLiteral("Running makepkg…"), true);
     buildService_.start(store_.releasePath(*currentRelease()));
     populateBuild();
     updateDeleteButton();
@@ -7272,7 +8543,7 @@ void MainWindow::startInstall() {
                                             "Open Scripts, review it, and acknowledge the exact content before installation."));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);
-        selectSection(EditorSection::Scripts);
+        selectSection(EditorSection::ConfigScripts);
         return;
     }
     const auto package = retainedPackagePath(store_, *currentRelease());
@@ -7289,10 +8560,17 @@ void MainWindow::startInstall() {
                               QStringLiteral("Authorize pacman to install this package? PacSmith will run only pacman -U for the path below and pass --noconfirm after this explicit confirmation. Polkit may request your password.\n\n%1%2")
                                   .arg(package, lifecycleNotice)) !=
         QMessageBox::Yes) return;
-    buildLog_->appendPlainText(QStringLiteral("\nRequesting narrowly scoped privilege elevation for non-interactive pacman -U…\n"));
     installButton_->setEnabled(false);
+    if (projectPrimaryButton_ != nullptr) projectPrimaryButton_->setEnabled(false);
     projectList_->setEnabled(false);
     pendingPackageOperation_ = QStringLiteral("install");
+    showCommandProgress(QStringLiteral("Installing %1").arg(project_->displayName),
+                        QStringLiteral("Waiting for polkit authorization…"), false);
+    if (commandProgress_ != nullptr) {
+        commandProgress_->appendOutput(
+            QStringLiteral("Requesting narrowly scoped privilege elevation for non-interactive pacman -U…\n%1\n")
+                .arg(package));
+    }
     installService_.start(std::filesystem::path(package.toUtf8().constData()), true);
     populateBuild();
     updateDeleteButton();
@@ -7310,20 +8588,6 @@ void MainWindow::editSelectedRelease() {
     const auto *release = project_->release(id);
     if (release == nullptr || release->state == ReleaseState::Discovered) return;
     showReleaseWorkbench(id);
-}
-
-void MainWindow::configureSelectedReleaseUpdates() {
-    if (!project_) return;
-    const auto *tracker = project_->activeTrackingRelease();
-    if (tracker == nullptr) {
-        QMessageBox::information(
-            this, QStringLiteral("No active update configuration"),
-            QStringLiteral("Prepare a release first. PacSmith edits the installed release's update configuration, or the newest analyzed release when nothing is installed."));
-        return;
-    }
-    showReleaseWorkbench(tracker->id);
-    selectSection(EditorSection::Updates);
-    populateUpdates();
 }
 
 void MainWindow::prepareSelectedRelease() {
@@ -7429,6 +8693,12 @@ void MainWindow::rollbackSelectedRelease() {
     currentReleaseId_ = id;
     pendingPackageOperation_ = QStringLiteral("rollback");
     projectList_->setEnabled(false);
+    showCommandProgress(QStringLiteral("Rolling back %1").arg(project_->displayName),
+                        QStringLiteral("Waiting for polkit authorization…"), false);
+    if (commandProgress_ != nullptr) {
+        commandProgress_->appendOutput(
+            QStringLiteral("Installing retained package:\n%1\n").arg(package));
+    }
     installService_.start(std::filesystem::path(package.toUtf8().constData()), true);
     populateOverview();
 }
@@ -7450,6 +8720,12 @@ void MainWindow::startUninstall() {
     pendingPackageOperation_ = QStringLiteral("uninstall");
     if (project_->installedRelease() != nullptr) currentReleaseId_ = project_->installedReleaseId;
     projectList_->setEnabled(false);
+    showCommandProgress(QStringLiteral("Uninstalling %1").arg(project_->displayName),
+                        QStringLiteral("Waiting for polkit authorization…"), false);
+    if (commandProgress_ != nullptr) {
+        commandProgress_->appendOutput(
+            QStringLiteral("Removing pacman package %1\n").arg(project_->archPackageName));
+    }
     installService_.startUninstall(project_->archPackageName, true);
     populateOverview();
 }

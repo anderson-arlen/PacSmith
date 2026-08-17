@@ -23,14 +23,16 @@ class QCheckBox;
 class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
+class QFormLayout;
+class QFrame;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
 class QNetworkAccessManager;
 class QNetworkReply;
 class QPlainTextEdit;
 class QProgressDialog;
-class QProgressBar;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
@@ -44,6 +46,7 @@ class QWidget;
 namespace pacsmith::gui {
 
 class AiProgressDialog;
+class CommandProgressDialog;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -58,23 +61,61 @@ protected:
 
 private:
     enum class EditorSection {
-        Package, Dependencies, Scripts, Payload, Commands, DesktopEntries,
-        Icon, Updates, Pkgbuild, Build
+        SourceOverview,
+        SourceMetadata,
+        SourceScripts,
+        SourceContents,
+        ConfigPkgbuild,
+        ConfigLayout,
+        ConfigDependencies,
+        ConfigScripts,
+        ConfigCommands,
+        ConfigAppRun,
+        ConfigDesktopEntries,
+        ConfigIcon,
+        ConfigUpdates,
+        ResultInstallPlan,
+        ResultPkgbuild,
+        ResultBuild
+    };
+
+    struct SectionLocation {
+        int stage{-1};
+        int page{-1};
+        QListWidget *nav{nullptr};
+        QStackedWidget *stack{nullptr};
+        QListWidgetItem *item{nullptr};
     };
 
     QWidget *createProjectInfoPage();
     QWidget *createOverviewPage();
-    QWidget *createPackagePage();
+    QWidget *createSourceOverviewPage();
+    QWidget *createSourceMetadataPage();
+    QWidget *createInstallLayoutPage();
+    QWidget *createInstallPlanPage();
     QWidget *createDependenciesPage();
-    QWidget *createScriptsPage();
+    QWidget *createVendorScriptsPage();
+    QWidget *createConfigScriptsPage();
     QWidget *createPayloadPage();
     QWidget *createCommandsPage();
+    QWidget *createAppRunPage();
     QWidget *createDesktopEntriesPage();
     QWidget *createIconPage();
     QWidget *createPkgbuildPage();
+    QWidget *createResultPkgbuildPage();
     QWidget *createUpdatesPage();
     QWidget *createBuildPage();
     QWidget *createHistoryPage();
+    QWidget *createStageHost(QListWidget **nav, QStackedWidget **stack,
+                             QWidget *navHeader = nullptr);
+    void addWorkbenchPage(int stage, QListWidget *nav, QStackedWidget *stack,
+                          EditorSection section, const QString &label, QWidget *page);
+    void setSectionVisible(EditorSection section, bool visible);
+    void updateSectionReviewMarkers();
+    void updateWorkbenchStageChrome();
+    [[nodiscard]] EditorSection currentSection() const;
+    [[nodiscard]] QString sectionTitle(EditorSection section) const;
+    [[nodiscard]] bool isSectionActive(EditorSection section) const;
 
     void chooseImport();
     void importGitHubUrl();
@@ -95,7 +136,18 @@ private:
     void populateCurrentWorkbenchPage();
     void updateDeleteButton();
     void populateOverview();
+    void updateDashboardActions();
+    void placeUpdatesEditor();
+    void handleProjectPrimaryAction();
+    void editPackageConfiguration();
+    void syncUpdateCheckButtons();
+    void populateSourceOverview();
     void populatePackage();
+    void populateInstallPlan();
+    void restoreGeneratedPkgbuild();
+    void setConfigurationMode(bool custom);
+    void updateConfigurationModeChrome();
+    [[nodiscard]] QString currentPkgbuildText() const;
     void saveInstallMapping();
     void populateDependencies();
     void loadRepositoryPackageCatalog();
@@ -113,6 +165,16 @@ private:
     void populatePayload();
     void populateCommands();
     void commandEdited(int row, int column);
+    void addCommandFromPayload();
+    void assignPayloadToSelectedCommand();
+    void removeSelectedCommand();
+    void syncInstallMappingFromLaunchers();
+    void populateAppRunEditor();
+    void saveAppRun();
+    void keepOriginalAppRun();
+    void restoreOriginalAppRun();
+    [[nodiscard]] QStringList payloadFileChoices() const;
+    [[nodiscard]] QString choosePayloadFile(const QString &title, const QString &selected = {});
     void populateDesktopEntries();
     void updateSelectedDesktopEntry();
     void saveSelectedDesktopEntry();
@@ -148,10 +210,11 @@ private:
     void startBuild();
     void startInstall();
     void startUninstall();
+    void showCommandProgress(const QString &title, const QString &status, bool cancelable);
+    void finishCommandProgress(bool success, const QString &summary);
     void installSelectedRelease();
     void rollbackSelectedRelease();
     void editSelectedRelease();
-    void configureSelectedReleaseUpdates();
     void deleteSelectedRelease();
     void prepareSelectedRelease();
     void beginReleasePreparation(const QString &releaseId, bool askForConfirmation);
@@ -218,6 +281,7 @@ private:
     qint64 preparationBytesTotal_{-1};
     int preparationSpinnerFrame_{0};
     AiProgressDialog *aiProgress_{nullptr};
+    CommandProgressDialog *commandProgress_{nullptr};
     bool aiProgressCanceled_{false};
     bool githubRegexAiPending_{false};
     QString githubRegexAiReleaseId_;
@@ -237,10 +301,27 @@ private:
     QLabel *projectSubtitle_{nullptr};
     QStackedWidget *rightStack_{nullptr};
     QTabWidget *projectTabs_{nullptr};
+    QWidget *dashboardUpdatesHost_{nullptr};
+    QWidget *configUpdatesHost_{nullptr};
+    QWidget *updatesEditor_{nullptr};
     QLabel *workbenchTitle_{nullptr};
     QLabel *workbenchSubtitle_{nullptr};
-    QTabWidget *tabs_{nullptr};
+    QLabel *sourceTypeBadge_{nullptr};
+    QPushButton *guidedModeButton_{nullptr};
+    QPushButton *customModeButton_{nullptr};
+    QTabWidget *stageTabs_{nullptr};
+    QListWidget *sourceNav_{nullptr};
+    QStackedWidget *sourceStack_{nullptr};
+    QListWidget *configNav_{nullptr};
+    QStackedWidget *configStack_{nullptr};
+    QListWidget *resultNav_{nullptr};
+    QStackedWidget *resultStack_{nullptr};
 
+    QLabel *sourceTypeHeadline_{nullptr};
+    QLabel *sourceTypeExplanation_{nullptr};
+    QLabel *sourceAcquisitionDetail_{nullptr};
+    QLabel *sourceIdentityDetail_{nullptr};
+    QLabel *sourceInventoryDetail_{nullptr};
     QLabel *overviewIcon_{nullptr};
     QLabel *overviewChecklist_{nullptr};
     QLabel *projectStateLabel_{nullptr};
@@ -252,14 +333,20 @@ private:
     QPushButton *installReleaseButton_{nullptr};
     QPushButton *rollbackButton_{nullptr};
     QPushButton *uninstallButton_{nullptr};
+    QPushButton *projectPrimaryButton_{nullptr};
+    QPushButton *historyCheckUpdatesButton_{nullptr};
+    QPushButton *editConfigurationButton_{nullptr};
     QPushButton *deleteReleaseButton_{nullptr};
     QPlainTextEdit *metadataView_{nullptr};
     QPlainTextEdit *rawMetadataView_{nullptr};
     QWidget *installMappingWidget_{nullptr};
     QWidget *appImageInstallPlanWidget_{nullptr};
+    QLabel *installPlanNotice_{nullptr};
     QTreeWidget *appImageInstallPlan_{nullptr};
     QComboBox *archiveLayout_{nullptr};
     QLineEdit *installOptDirectory_{nullptr};
+    QFormLayout *installMappingLayout_{nullptr};
+    QLabel *installCommandsHint_{nullptr};
     QLineEdit *installBinarySource_{nullptr};
     QLineEdit *installBinaryDestination_{nullptr};
     QLineEdit *installCommonPrefix_{nullptr};
@@ -290,6 +377,13 @@ private:
     QPushButton *clearPayloadDecisionButton_{nullptr};
     bool payloadInspectionRunning_{false};
     QTableWidget *commandsTable_{nullptr};
+    QPlainTextEdit *appRunEditor_{nullptr};
+    QFrame *appRunReviewBanner_{nullptr};
+    QLabel *appRunReviewLabel_{nullptr};
+    QLabel *appRunStatus_{nullptr};
+    QPushButton *saveAppRunButton_{nullptr};
+    QPushButton *keepOriginalAppRunButton_{nullptr};
+    QPushButton *restoreAppRunButton_{nullptr};
     QListWidget *desktopEntriesList_{nullptr};
     QCheckBox *desktopEntryEnabled_{nullptr};
     QLineEdit *desktopEntryDestination_{nullptr};
@@ -304,7 +398,9 @@ private:
     QNetworkAccessManager *iconNetwork_{nullptr};
     QNetworkReply *iconReply_{nullptr};
     QPlainTextEdit *pkgbuildEditor_{nullptr};
+    QPlainTextEdit *pkgbuildPreview_{nullptr};
     QLabel *pkgbuildState_{nullptr};
+    QLabel *pkgbuildPreviewNotice_{nullptr};
     QComboBox *updateStrategy_{nullptr};
     QLineEdit *updateUrl_{nullptr};
     QLineEdit *aptSuite_{nullptr};
@@ -330,16 +426,16 @@ private:
     QPushButton *updateSaveButton_{nullptr};
     QPushButton *updateCheckButton_{nullptr};
     QLabel *buildChecklist_{nullptr};
-    QPlainTextEdit *buildLog_{nullptr};
     QLabel *builtPackage_{nullptr};
-    QProgressBar *buildProgress_{nullptr};
     QPushButton *buildButton_{nullptr};
     QPushButton *installButton_{nullptr};
+    QPushButton *pkgbuildBuildButton_{nullptr};
+    QPushButton *resultPkgbuildBuildButton_{nullptr};
     QListWidget *historyList_{nullptr};
     QString pendingPackageOperation_;
     QString pendingDownloadedImport_;
     ImportOptions pendingImportOptions_;
-    QHash<int, int> sectionTabs_;
+    QHash<int, SectionLocation> sectionLocations_;
 };
 
 } // namespace pacsmith::gui

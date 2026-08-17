@@ -113,6 +113,12 @@ struct DesktopEntryConfiguration {
     [[nodiscard]] static DesktopEntryConfiguration fromJson(const QJsonObject &object);
 };
 
+[[nodiscard]] QString desktopEntryField(const QString &contents, const QString &key);
+[[nodiscard]] QString desktopEntryCommand(const QString &contents);
+[[nodiscard]] QString preferredDisplayName(
+    const DebianMetadata &metadata,
+    const QList<DesktopEntryConfiguration> &desktopEntries = {});
+
 struct IconConfiguration {
     IconSourceKind sourceKind{IconSourceKind::None};
     QString sourcePath;
@@ -129,6 +135,28 @@ struct IconConfiguration {
     [[nodiscard]] static IconConfiguration fromJson(const QJsonObject &object);
 };
 
+// Vendor AppDir entry point for an extracted AppImage. Text scripts can be
+// edited in the recipe (or by AI) and overlaid after unsquashfs; the AppImage
+// bytes stay immutable. Binary or symlink AppRuns are not text-editable.
+struct AppRunConfiguration {
+    bool present{false};
+    bool script{false};
+    QString contents;
+    QString originalContents;
+    QString originalContentsSha256;
+    QString acknowledgedFingerprint;
+    bool userModified{false};
+    QString reviewReason;
+    FieldProvenance provenance;
+
+    [[nodiscard]] QString contentFingerprint() const;
+    [[nodiscard]] bool requiresReview() const;
+    void acknowledge();
+
+    [[nodiscard]] QJsonObject toJson() const;
+    [[nodiscard]] static AppRunConfiguration fromJson(const QJsonObject &object);
+};
+
 struct InstallMapping {
     ArchiveLayout archiveLayout{ArchiveLayout::OptBundle};
     QString optDirectory;
@@ -141,6 +169,7 @@ struct InstallMapping {
     QList<LauncherMapping> launchers;
     QList<DesktopEntryConfiguration> desktopEntries;
     IconConfiguration icon;
+    AppRunConfiguration appRun;
 
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static InstallMapping fromJson(const QJsonObject &object);
@@ -205,6 +234,7 @@ struct PayloadEntry {
     QString contentSha256;
     QString textPreview;
     bool previewTruncated{false};
+    bool executable{false};
 
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static PayloadEntry fromJson(const QJsonObject &object);
@@ -387,6 +417,7 @@ struct PackageRelease {
     QString generatedPkgbuild;
     QString generatedPkgbuildSha256;
     bool pkgbuildManuallyModified{false};
+    QString customPkgbuild;
     QString previousManualPkgbuild;
     ArchLifecycleScript lifecycleScript;
     QMap<QString, FieldProvenance> fieldProvenance;

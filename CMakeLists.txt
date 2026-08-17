@@ -73,6 +73,7 @@ add_library(pacsmith_core STATIC
     src/core/github_update_service.cpp
     src/core/project_store.cpp
     src/core/pkgbuild_generator.cpp
+    src/core/pkgbuild_install_plan.cpp
     src/core/process_services.cpp
     src/core/terminal_install_service.cpp
     src/core/terminal_install_service.hpp
@@ -96,11 +97,13 @@ pacsmith_target_defaults(pacsmith)
 add_executable(pacsmith-gui
     src/gui/main.cpp
     src/gui/ai_progress_dialog.cpp
+    src/gui/command_progress_dialog.cpp
     src/gui/desktop_entry_highlighter.cpp
     src/gui/import_worker.cpp
     src/gui/reanalyze_worker.cpp
     src/gui/main_window.cpp
-    src/gui/pkgbuild_highlighter.cpp)
+    src/gui/pkgbuild_highlighter.cpp
+    src/gui/shell_highlighter.cpp)
 target_link_libraries(pacsmith-gui PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent)
 pacsmith_target_defaults(pacsmith-gui)
 

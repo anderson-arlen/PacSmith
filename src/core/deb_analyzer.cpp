@@ -418,11 +418,6 @@ std::optional<DebAnalysis> DebAnalyzer::analyze(const std::filesystem::path &pat
         if (symlink == nullptr) symlink = archive_entry_symlink(entry);
         if (symlink != nullptr) {
             payloadEntry.symlinkTarget = QString::fromUtf8(symlink);
-            if (!PathSafety::safeSymlinkTarget(*safePath, payloadEntry.symlinkTarget)) {
-                error.message = QStringLiteral("Unsafe symlink in data archive: %1 -> %2")
-                                    .arg(*safePath, payloadEntry.symlinkTarget);
-                return std::nullopt;
-            }
         }
         const char *hardlink = archive_entry_hardlink_utf8(entry);
         if (hardlink == nullptr) hardlink = archive_entry_hardlink(entry);
@@ -432,6 +427,16 @@ std::optional<DebAnalysis> DebAnalyzer::analyze(const std::filesystem::path &pat
         }
         const auto fileType = archive_entry_filetype(entry);
         payloadEntry.reviewReason = PathSafety::reviewReason(*safePath);
+        if (!payloadEntry.symlinkTarget.isEmpty()) {
+            const auto symlinkReason =
+                PathSafety::symlinkReviewReason(*safePath, payloadEntry.symlinkTarget);
+            if (!symlinkReason.isEmpty()) {
+                if (!payloadEntry.reviewReason.isEmpty()) {
+                    payloadEntry.reviewReason += QStringLiteral("; ");
+                }
+                payloadEntry.reviewReason += symlinkReason;
+            }
+        }
         payloadEntry.requiresReview = !payloadEntry.reviewReason.isEmpty() && fileType != AE_IFDIR;
         const bool specialEntry = fileType == AE_IFCHR || fileType == AE_IFBLK ||
                                   fileType == AE_IFIFO || fileType == AE_IFSOCK;
@@ -484,6 +489,13 @@ std::optional<DebAnalysis> DebAnalyzer::analyze(const std::filesystem::path &pat
         if (specialEntry && !rulePaths.contains(*safePath)) {
             result.payloadRules.append({*safePath, true,
                                         QStringLiteral("Special filesystem entry is excluded by default"), false, {}});
+            rulePaths.insert(*safePath);
+        }
+        if (!payloadEntry.symlinkTarget.isEmpty() &&
+            !PathSafety::safePackageSymlinkTarget(*safePath, payloadEntry.symlinkTarget) &&
+            !rulePaths.contains(*safePath)) {
+            result.payloadRules.append(
+                {*safePath, true, payloadEntry.reviewReason, false, {}});
             rulePaths.insert(*safePath);
         }
         const bool desktopEntry = fileType == AE_IFREG &&
