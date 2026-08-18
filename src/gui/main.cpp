@@ -87,7 +87,14 @@ int main(int argc, char *argv[]) {
     parser.addPositionalArgument(QStringLiteral("source"),
                                  QStringLiteral("Artifact path or GitHub release URL"),
                                  QStringLiteral("[source]"));
-    parser.process(application);
+    auto arguments = QCoreApplication::arguments();
+    if (!arguments.isEmpty()) {
+        const QString &last = arguments.constLast();
+        if (last == QStringLiteral("--import") || last == QStringLiteral("-i")) {
+            arguments.removeLast();
+        }
+    }
+    parser.process(arguments);
 
     if (parser.isSet(trayOption)) {
         const auto settings = pacsmith::AppSettingsStore{}.load();

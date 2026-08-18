@@ -142,6 +142,7 @@ Individual stages are also available:
 make deps
 make build
 make test
+make uninstall
 ```
 
 The default installation prefix is `~/.local`. Executables go to `~/.local/bin`, desktop integration to `~/.local/share/applications`, and the update timer/service to `~/.local/share/systemd/user`. The timer is not enabled automatically; opt in with:
@@ -149,6 +150,8 @@ The default installation prefix is `~/.local`. Executables go to `~/.local/bin`,
 ```bash
 systemctl --user enable --now pacsmith-update.timer
 ```
+
+`make uninstall` removes the files recorded by the last install. It does not delete project data under `~/.local/share/pacsmith`.
 
 `SUDO=doas` may be supplied on systems using `doas` instead of `sudo`. `PREFIX=/another/user/writable/prefix` can override the installation location.
 If `~/.local/bin` is not already on the shell's `PATH`, add it or launch `~/.local/bin/pacsmith-gui` directly.

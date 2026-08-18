@@ -12,7 +12,7 @@ DEPENDENCIES := base-devel cmake ninja qt6-base qt6-svg libarchive squashfs-tool
 
 .DEFAULT_GOAL := all
 .NOTPARALLEL:
-.PHONY: help all check-arch check-user deps configure build test install clean
+.PHONY: help all check-arch check-user deps configure build test install uninstall clean
 
 help:
 	@echo "PacSmith build targets:"
@@ -20,6 +20,7 @@ help:
 	@echo "  make build    Configure and build PacSmith"
 	@echo "  make test     Build and run the automated tests"
 	@echo "  make install  Install dependencies, test, and install for this user"
+	@echo "  make uninstall Remove files recorded by the last current-user install"
 	@echo "  make clean    Clean compiled files in the configured build directory"
 	@echo
 	@echo "Optional variables: BUILD_DIR=build BUILD_TYPE=Release PREFIX=~/.local SUDO=sudo"
@@ -83,6 +84,35 @@ install: check-user deps test
 	@echo "PacSmith installed for the current user under $(PREFIX)."
 	@echo "Run '$(PREFIX)/bin/pacsmith-gui' or add '$(PREFIX)/bin' to PATH."
 	@echo "Configure the optional user timer, tray, and cleanup policy in PacSmith Settings -> Updates & Cleanup."
+
+uninstall: check-user
+	@set -eu; \
+	manifest="$(BUILD_DIR)/install_manifest.txt"; \
+	if [ ! -f "$$manifest" ]; then \
+		echo "error: no install manifest at $$manifest; run 'make install' first (or set BUILD_DIR to the build that was installed)." >&2; \
+		exit 1; \
+	fi; \
+	if command -v systemctl >/dev/null 2>&1; then \
+		systemctl --user disable --now pacsmith-update.timer pacsmith-tray.service >/dev/null 2>&1 || true; \
+		systemctl --user stop pacsmith-update.service >/dev/null 2>&1 || true; \
+	fi; \
+	while IFS= read -r file; do \
+		[ -n "$$file" ] || continue; \
+		if [ -e "$$file" ] || [ -L "$$file" ]; then \
+			rm -f "$$file"; \
+		fi; \
+	done < "$$manifest"; \
+	rmdir "$(PREFIX)/share/doc/pacsmith" >/dev/null 2>&1 || true; \
+	if command -v update-desktop-database >/dev/null 2>&1; then \
+		update-desktop-database "$(PREFIX)/share/applications" || \
+			echo "warning: desktop application cache could not be refreshed." >&2; \
+	fi; \
+	if command -v systemctl >/dev/null 2>&1; then \
+		systemctl --user daemon-reload || \
+			echo "warning: systemd user manager was not available; run 'systemctl --user daemon-reload' later." >&2; \
+	fi; \
+	echo "PacSmith uninstalled using $$manifest."; \
+	echo "Project data under ~/.local/share/pacsmith was left in place."
 
 clean: check-arch
 	@if [ -f "$(BUILD_DIR)/build.ninja" ]; then \
