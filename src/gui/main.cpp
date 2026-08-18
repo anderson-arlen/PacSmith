@@ -7,9 +7,12 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QIcon>
 #include <QMessageBox>
 #include <QMenu>
 #include <QPainter>
+#include <QPixmap>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
@@ -21,11 +24,49 @@
 
 #include <unistd.h>
 
+namespace {
+
+QIcon applicationIcon() {
+    return QIcon(QStringLiteral(":/pacsmith/icons/pacsmith.png"));
+}
+
+QIcon trayStatusIcon(const QApplication &application, int availableUpdates) {
+    QIcon source(QStringLiteral(":/pacsmith/icons/pacsmith-tray.png"));
+    QPixmap mask = source.pixmap(QSize(32, 32));
+    if (mask.isNull()) mask = application.style()->standardIcon(QStyle::SP_ComputerIcon).pixmap(32, 32);
+    QPixmap pixmap(mask.size());
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    painter.drawPixmap(0, 0, mask);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.fillRect(pixmap.rect(), application.palette().color(QPalette::WindowText));
+    if (availableUpdates > 0) {
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        painter.setBrush(QColor(210, 50, 50));
+        painter.setPen(Qt::white);
+        painter.drawEllipse(QRect(17, 0, 15, 15));
+        auto font = painter.font();
+        font.setBold(true);
+        font.setPixelSize(10);
+        painter.setFont(font);
+        painter.drawText(QRect(17, 0, 15, 15), Qt::AlignCenter,
+                         availableUpdates > 9 ? QStringLiteral("9+")
+                                              : QString::number(availableUpdates));
+    }
+    return QIcon(pixmap);
+}
+
+}
+
 int main(int argc, char *argv[]) {
     QApplication application(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("pacsmith-gui"));
     QCoreApplication::setApplicationVersion(QStringLiteral(PACSMITH_VERSION));
     QCoreApplication::setOrganizationName(QStringLiteral("PacSmith"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("pacsmith"));
+    application.setWindowIcon(applicationIcon());
 
     if (geteuid() == 0) {
         QMessageBox::critical(nullptr, QStringLiteral("PacSmith"),
@@ -84,25 +125,7 @@ int main(int argc, char *argv[]) {
         refreshTimer.setInterval(5000);
         const auto refresh = [&] {
             const auto current = pacsmith::BackgroundUpdateStateStore::load();
-            QIcon base = QIcon::fromTheme(current.checking
-                ? QStringLiteral("view-refresh") : QStringLiteral("system-software-update"));
-            if (base.isNull()) base = application.style()->standardIcon(QStyle::SP_ComputerIcon);
-            auto pixmap = base.pixmap(32, 32);
-            if (current.availableUpdates > 0) {
-                QPainter painter(&pixmap);
-                painter.setRenderHint(QPainter::Antialiasing);
-                painter.setBrush(QColor(210, 50, 50));
-                painter.setPen(Qt::white);
-                painter.drawEllipse(QRect(17, 0, 15, 15));
-                auto font = painter.font();
-                font.setBold(true);
-                font.setPixelSize(10);
-                painter.setFont(font);
-                painter.drawText(QRect(17, 0, 15, 15), Qt::AlignCenter,
-                                 current.availableUpdates > 9 ? QStringLiteral("9+")
-                                                               : QString::number(current.availableUpdates));
-            }
-            tray.setIcon(QIcon(pixmap));
+            tray.setIcon(trayStatusIcon(application, current.availableUpdates));
             tray.setToolTip(current.checking ? QStringLiteral("PacSmith is checking for updates")
                 : current.availableUpdates > 0 ? QStringLiteral("PacSmith: %1 update(s) available").arg(current.availableUpdates)
                                                : QStringLiteral("PacSmith: packages are current"));

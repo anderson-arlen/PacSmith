@@ -105,6 +105,12 @@ add_executable(pacsmith-gui
     src/gui/pkgbuild_highlighter.cpp
     src/gui/shell_highlighter.cpp)
 target_link_libraries(pacsmith-gui PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent)
+qt_add_resources(pacsmith-gui gui_resources
+    PREFIX "/pacsmith"
+    BASE resources
+    FILES
+        resources/icons/pacsmith.png
+        resources/icons/pacsmith-tray.png)
 pacsmith_target_defaults(pacsmith-gui)
 
 include(GNUInstallDirs)
@@ -118,6 +124,8 @@ configure_file(packaging/systemd/pacsmith-tray.service.in
 install(TARGETS pacsmith pacsmith-gui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(DIRECTORY resources/icons/hicolor
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith-update.service
               ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith-tray.service
               packaging/systemd/pacsmith-update.timer
