@@ -1,4 +1,5 @@
 #include "gui/main_window.hpp"
+#include "gui/gui_instance.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/project_store.hpp"
@@ -6,6 +7,7 @@
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
+#include <QCursor>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
@@ -18,9 +20,9 @@
 #include <QSystemTrayIcon>
 #include <QStyle>
 #include <QTimer>
+#include <QUrl>
 
 #include <algorithm>
-#include <memory>
 
 #include <unistd.h>
 
@@ -106,28 +108,28 @@ int main(int argc, char *argv[]) {
         auto *openAction = menu.addAction(QStringLiteral("Open PacSmith"));
         auto *checkAction = menu.addAction(QStringLiteral("Check for Updates Now"));
         menu.addSeparator();
-        auto *quitAction = menu.addAction(QStringLiteral("Quit Tray Icon"));
+        auto *exitAction = menu.addAction(QStringLiteral("Exit"));
         tray.setContextMenu(&menu);
-        std::unique_ptr<pacsmith::gui::MainWindow> window;
-        const auto openWindow = [&] {
-            if (!window) {
-                window = std::make_unique<pacsmith::gui::MainWindow>();
-                window->resize(1180, 760);
+        const auto openPacSmith = [&] {
+            if (pacsmith::gui::GuiInstanceServer::activateExisting()) return;
+            if (!QProcess::startDetached(QCoreApplication::applicationFilePath(), {})) {
+                tray.showMessage(QStringLiteral("PacSmith"),
+                                 QStringLiteral("Could not start PacSmith."));
             }
-            window->show();
-            window->raise();
-            window->activateWindow();
         };
-        QObject::connect(openAction, &QAction::triggered, &application, openWindow);
+        QObject::connect(openAction, &QAction::triggered, &application, openPacSmith);
         QObject::connect(&tray, &QSystemTrayIcon::activated, &application,
                          [&](const QSystemTrayIcon::ActivationReason reason) {
-            if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) openWindow();
+            if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick ||
+                reason == QSystemTrayIcon::MiddleClick) {
+                menu.popup(QCursor::pos());
+            }
         });
         QObject::connect(checkAction, &QAction::triggered, &application, [&] {
             QString error;
             if (!pacsmith::BackgroundUpdateManager::runNow(&error)) tray.showMessage(QStringLiteral("PacSmith"), error);
         });
-        QObject::connect(quitAction, &QAction::triggered, &application, &QApplication::quit);
+        QObject::connect(exitAction, &QAction::triggered, &application, &QApplication::quit);
         QTimer refreshTimer;
         refreshTimer.setInterval(5000);
         const auto refresh = [&] {
@@ -146,12 +148,18 @@ int main(int argc, char *argv[]) {
         return application.exec();
     }
 
-    pacsmith::gui::MainWindow window;
-    window.resize(1180, 760);
-    window.show();
     QString importPath;
     if (parser.isSet(importOption)) importPath = parser.value(importOption);
     else if (!parser.positionalArguments().isEmpty()) importPath = parser.positionalArguments().first();
+    if (pacsmith::gui::GuiInstanceServer::activateExisting(importPath)) return 0;
+
+    pacsmith::gui::MainWindow window;
+    window.resize(1180, 760);
+    pacsmith::gui::GuiInstanceServer instanceServer;
+    QObject::connect(&instanceServer, &pacsmith::gui::GuiInstanceServer::activated, &window,
+                     [&window](const QString &path) { window.activateExistingSession(path); });
+    static_cast<void>(instanceServer.listen());
+    window.show();
     if (!importPath.isEmpty()) {
         const QUrl url(importPath);
         window.importPackage(url.isValid() && url.scheme().startsWith(QStringLiteral("http"))

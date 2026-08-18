@@ -49,6 +49,12 @@ bool payloadPathCovers(const QString &parent, const QString &child) {
     return child == parent || child.startsWith(parent + QLatin1Char('/'));
 }
 
+bool releaseWasBuilt(const PackageRelease &release) {
+    return release.state == ReleaseState::Built ||
+           release.buildStatus == BuildStatus::Succeeded ||
+           !release.producedPackages.isEmpty();
+}
+
 bool writeBytes(const std::filesystem::path &path, const QByteArray &contents, QString *error) {
     QSaveFile file(qStringFromPath(path));
     if (!file.open(QIODevice::WriteOnly)) {
@@ -2241,58 +2247,87 @@ CleanupResult ProjectStore::cleanup(Project &project, const RetentionPolicy &pol
     CleanupResult result;
     static_cast<void>(reconcileInstalled(project, nullptr));
     const auto *installed = project.installedRelease();
-    if (installed == nullptr || project.externallyInstalled || project.installedVersion.isEmpty()) {
+    const bool haveInstalled = installed != nullptr && !project.externallyInstalled &&
+                               !project.installedVersion.isEmpty();
+    if (haveInstalled) {
+        QList<QString> olderIds;
+        for (const auto &release : project.releases) {
+            if (release.id != installed->id &&
+                compareReleaseVersions(release, *installed) < 0) {
+                olderIds.append(release.id);
+            }
+        }
+        std::sort(olderIds.begin(), olderIds.end(), [&](const auto &leftId, const auto &rightId) {
+            const auto *left = project.release(leftId);
+            const auto *right = project.release(rightId);
+            return compareReleaseVersions(*left, *right) > 0;
+        });
+
+        if (policy.packageVersions >= 0) {
+            int artifactReleaseIndex = 0;
+            for (const auto &id : olderIds) {
+                auto *release = project.release(id);
+                if (release == nullptr || release->producedPackages.isEmpty()) continue;
+                if (artifactReleaseIndex++ < policy.packageVersions) continue;
+                const auto base = std::filesystem::weakly_canonical(releasePath(*release));
+                for (const auto &package : std::as_const(release->producedPackages)) {
+                    std::error_code pathError;
+                    const auto path = std::filesystem::weakly_canonical(pathFromQString(package), pathError);
+                    if (!pathError && path.parent_path() == base && QFile::remove(package)) {
+                        result.removedArtifacts.append(package);
+                    }
+                }
+                release->producedPackages.clear();
+                for (auto &build : release->builds) build.artifacts.clear();
+            }
+        }
+
+        const auto completeLimit = policy.packageVersions < 0 || policy.completeReleases < 0
+                                       ? -1
+                                       : std::max(policy.completeReleases, policy.packageVersions);
+        if (completeLimit >= 0 && olderIds.size() > completeLimit) {
+            const auto removeIds = olderIds.sliced(completeLimit);
+            for (const auto &id : removeIds) {
+                if (!deleteRelease(project, id, error)) return result;
+                result.removedReleases.append(id);
+            }
+        } else if (!save(project, error)) {
+            return result;
+        }
+    } else {
         result.skipped = true;
         result.message = QStringLiteral("Cleanup skipped because no known PacSmith release is installed");
-        return result;
     }
-    QList<QString> olderIds;
-    for (const auto &release : project.releases) {
-        if (release.id != installed->id &&
-            compareReleaseVersions(release, *installed) < 0) {
-            olderIds.append(release.id);
-        }
-    }
-    std::sort(olderIds.begin(), olderIds.end(), [&](const auto &leftId, const auto &rightId) {
-        const auto *left = project.release(leftId);
-        const auto *right = project.release(rightId);
-        return compareReleaseVersions(*left, *right) > 0;
-    });
 
-    if (policy.packageVersions >= 0) {
-        int artifactReleaseIndex = 0;
-        for (const auto &id : olderIds) {
-            auto *release = project.release(id);
-            if (release == nullptr || release->producedPackages.isEmpty()) continue;
-            if (artifactReleaseIndex++ < policy.packageVersions) continue;
-            const auto base = std::filesystem::weakly_canonical(releasePath(*release));
-            for (const auto &package : std::as_const(release->producedPackages)) {
-                std::error_code pathError;
-                const auto path = std::filesystem::weakly_canonical(pathFromQString(package), pathError);
-                if (!pathError && path.parent_path() == base && QFile::remove(package)) {
-                    result.removedArtifacts.append(package);
-                }
+    if (policy.dropUnbuiltIntermediateUpdates) {
+        const auto *newest = project.newestRelease();
+        const bool hasAnchor = newest != nullptr &&
+            std::any_of(project.releases.cbegin(), project.releases.cend(),
+                        [&](const auto &release) {
+                            return release.id == project.installedReleaseId || releaseWasBuilt(release);
+                        });
+        if (hasAnchor && newest != nullptr) {
+            const auto newestId = newest->id;
+            const auto installedId = project.installedReleaseId;
+            QStringList dropIds;
+            for (const auto &release : project.releases) {
+                if (release.id == newestId || release.id == installedId) continue;
+                if (release.state == ReleaseState::Preparing || releaseWasBuilt(release)) continue;
+                dropIds.append(release.id);
             }
-            release->producedPackages.clear();
-            for (auto &build : release->builds) build.artifacts.clear();
+            for (const auto &id : dropIds) {
+                if (!deleteRelease(project, id, error)) return result;
+                result.removedReleases.append(id);
+            }
+            if (!dropIds.isEmpty()) result.skipped = false;
         }
     }
 
-    const auto completeLimit = policy.packageVersions < 0 || policy.completeReleases < 0
-                                   ? -1
-                                   : std::max(policy.completeReleases, policy.packageVersions);
-    if (completeLimit >= 0 && olderIds.size() > completeLimit) {
-        const auto removeIds = olderIds.sliced(completeLimit);
-        for (const auto &id : removeIds) {
-            if (!deleteRelease(project, id, error)) return result;
-            result.removedReleases.append(id);
-        }
-    } else if (!save(project, error)) {
-        return result;
+    if (!result.skipped || !result.removedReleases.isEmpty() || !result.removedArtifacts.isEmpty()) {
+        result.message = QStringLiteral("Removed %1 package artifact(s) and %2 complete release(s)")
+                             .arg(result.removedArtifacts.size())
+                             .arg(result.removedReleases.size());
     }
-    result.message = QStringLiteral("Removed %1 package artifact(s) and %2 complete release(s)")
-                         .arg(result.removedArtifacts.size())
-                         .arg(result.removedReleases.size());
     return result;
 }
 

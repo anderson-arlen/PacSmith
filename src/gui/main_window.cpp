@@ -31,9 +31,11 @@
 #include <QCloseEvent>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDesktopServices>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
@@ -66,6 +68,7 @@
 #include <QInputDialog>
 #include <QPlainTextEdit>
 #include <QPainter>
+#include <QProcess>
 #include <QProgressDialog>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -95,6 +98,7 @@
 #include <QTreeWidgetItemIterator>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QWindow>
 #include <QtConcurrentRun>
 
 #include <algorithm>
@@ -1797,6 +1801,7 @@ MainWindow::MainWindow(QWidget *parent)
     loadRepositoryPackageCatalog();
     refreshProjectList();
     QTimer::singleShot(0, this, [this] {
+        runOverdueBackgroundUpdateCheck();
         const auto providerName = aiProviderName(aiSettings_.provider);
         const auto defaultSource = aiSettings_.provider == AiProviderKind::ChatGpt
                                        ? CredentialSource::Keyring
@@ -3749,6 +3754,15 @@ void MainWindow::resetPreparationState() {
     preparationSpinnerFrame_ = 0;
 }
 
+void MainWindow::activateExistingSession(const QString &importPath) {
+    if (isMinimized()) setWindowState(windowState() & ~Qt::WindowMinimized);
+    show();
+    raise();
+    activateWindow();
+    if (auto *handle = windowHandle()) handle->requestActivate();
+    if (!importPath.isEmpty()) importPackage(importPath);
+}
+
 void MainWindow::importPackage(const QString &path) {
     const QUrl remote(path);
     if (remote.isValid() && remote.scheme() == QStringLiteral("https") &&
@@ -3837,6 +3851,7 @@ void MainWindow::importPackage(const QString &path) {
             currentReleaseId_ = releaseId;
             refreshCurrentProject();
         }
+        if (preparedUpdate) applyRetentionCleanup();
         const auto loaded = store_.load(projectId);
         statusBar()->showMessage(
             loaded ? QStringLiteral("Imported to %1").arg(projectDirectory(store_, *loaded))
@@ -8208,6 +8223,69 @@ void MainWindow::applyAiResolution(const AiResolution &resolution) {
         15000);
 }
 
+void MainWindow::applyRetentionCleanup() {
+    if (!project_ || !aiSettings_.updates.automaticallyPrepare) return;
+    QString error;
+    const auto result = store_.cleanup(
+        *project_,
+        {aiSettings_.updates.retainedPackageVersions,
+         aiSettings_.updates.retainedCompleteReleases, true},
+        &error);
+    if (result.removedReleases.isEmpty() && result.removedArtifacts.isEmpty()) return;
+    const auto projectId = project_->id;
+    const auto releaseId = currentReleaseId_;
+    refreshProjectList(projectId);
+    if (!project_ || project_->id != projectId) loadProject(projectId);
+    if (project_ && project_->release(releaseId) == nullptr) {
+        if (const auto *newest = project_->newestRelease()) currentReleaseId_ = newest->id;
+        else currentReleaseId_.clear();
+    }
+    refreshCurrentProject();
+}
+
+void MainWindow::runOverdueBackgroundUpdateCheck() {
+    if (!aiSettings_.updates.enabled || backgroundCheckProcess_ != nullptr) return;
+    const auto state = BackgroundUpdateStateStore::load();
+    if (state.checking || !BackgroundUpdateManager::isOverdue(aiSettings_.updates, state.lastRun)) {
+        return;
+    }
+    auto program = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith"));
+    if (!QFileInfo::exists(program)) program = QStandardPaths::findExecutable(QStringLiteral("pacsmith"));
+    if (program.isEmpty()) {
+        QString error;
+        if (!BackgroundUpdateManager::runNow(&error) && !error.isEmpty()) {
+            statusBar()->showMessage(error, 8000);
+        }
+        return;
+    }
+    backgroundCheckProcess_ = new QProcess(this);
+    backgroundCheckProcess_->setProgram(program);
+    backgroundCheckProcess_->setArguments({QStringLiteral("check"), QStringLiteral("--all")});
+    connect(backgroundCheckProcess_, &QProcess::finished, this, [this] {
+        if (backgroundCheckProcess_ != nullptr) {
+            backgroundCheckProcess_->deleteLater();
+            backgroundCheckProcess_ = nullptr;
+        }
+        const auto projectId = project_ ? project_->id : QString{};
+        refreshProjectList(projectId);
+        if (!projectId.isEmpty() && (!project_ || project_->id != projectId)) loadProject(projectId);
+        if (project_) refreshCurrentProject();
+        const auto finished = BackgroundUpdateStateStore::load();
+        statusBar()->showMessage(finished.message.isEmpty()
+                                     ? QStringLiteral("Update check finished")
+                                     : finished.message,
+                                 8000);
+    });
+    backgroundCheckProcess_->start();
+    if (!backgroundCheckProcess_->waitForStarted(3000)) {
+        backgroundCheckProcess_->deleteLater();
+        backgroundCheckProcess_ = nullptr;
+        statusBar()->showMessage(QStringLiteral("Could not start an overdue update check"), 8000);
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Running overdue update check…"), 8000);
+}
+
 void MainWindow::startUpdateCheck() {
     if (!project_ || aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
         githubUpdateService_.isRunning() ||
@@ -8308,6 +8386,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
     const auto projectId = project_->id;
     refreshProjectList(projectId);
     if (!project_ || project_->id != projectId) loadProject(projectId);
+    applyRetentionCleanup();
     if (remainInWorkbench && project_.has_value() &&
         project_->release(checkedReleaseId) != nullptr) {
         showReleaseWorkbench(checkedReleaseId);

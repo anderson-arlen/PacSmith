@@ -27,6 +27,12 @@ public:
 class BackgroundUpdateManager final {
 public:
     [[nodiscard]] static QString calendar(const BackgroundUpdateSettings &settings);
+    [[nodiscard]] static QDateTime lastScheduledOccurrence(
+        const BackgroundUpdateSettings &settings,
+        const QDateTime &now = QDateTime::currentDateTime());
+    [[nodiscard]] static bool isOverdue(const BackgroundUpdateSettings &settings,
+                                        const QDateTime &lastRun,
+                                        const QDateTime &now = QDateTime::currentDateTime());
     [[nodiscard]] static QString timerUnitPath();
     [[nodiscard]] static QString scheduleDropInPath();
     [[nodiscard]] static bool unitInstalled();

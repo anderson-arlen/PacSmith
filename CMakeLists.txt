@@ -99,6 +99,7 @@ add_executable(pacsmith-gui
     src/gui/ai_progress_dialog.cpp
     src/gui/command_progress_dialog.cpp
     src/gui/desktop_entry_highlighter.cpp
+    src/gui/gui_instance.cpp
     src/gui/import_worker.cpp
     src/gui/reanalyze_worker.cpp
     src/gui/main_window.cpp

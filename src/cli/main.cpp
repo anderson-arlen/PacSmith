@@ -595,7 +595,8 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
     if (auto reloaded = store.load(project.id, nullptr)) project = std::move(*reloaded);
     const auto cleanup = store.cleanup(
         project, {settings.updates.retainedPackageVersions,
-                  settings.updates.retainedCompleteReleases}, &saveError);
+                  settings.updates.retainedCompleteReleases,
+                  settings.updates.automaticallyPrepare}, &saveError);
     if (!cleanup.message.isEmpty()) errorStream << cleanup.message << '\n';
     if (!store.save(project, &saveError)) errorStream << "warning: " << saveError << '\n';
     if (!result.success && backgroundState != nullptr) ++backgroundState->failedChecks;

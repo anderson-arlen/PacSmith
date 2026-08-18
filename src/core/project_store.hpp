@@ -41,6 +41,7 @@ struct RetentionPolicy {
     // -1 means unlimited.
     int packageVersions{2};
     int completeReleases{3};
+    bool dropUnbuiltIntermediateUpdates{false};
 };
 
 struct CleanupResult {

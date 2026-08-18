@@ -33,6 +33,7 @@ class QNetworkAccessManager;
 class QNetworkReply;
 class QPlainTextEdit;
 class QProgressDialog;
+class QProcess;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
@@ -53,6 +54,7 @@ class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     void importPackage(const QString &path);
+    void activateExistingSession(const QString &importPath = {});
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -207,6 +209,8 @@ private:
     bool saveUpdateConfiguration();
     void startUpdateCheck();
     void applyUpdateCheckResult(const UpdateCheckResult &result, const QString &sourceName);
+    void applyRetentionCleanup();
+    void runOverdueBackgroundUpdateCheck();
     void startBuild();
     void startInstall();
     void startUninstall();
@@ -268,6 +272,7 @@ private:
     QString agePassword_;
     bool populating_{false};
     QThread *importThread_{nullptr};
+    QProcess *backgroundCheckProcess_{nullptr};
     QProgressDialog *importProgress_{nullptr};
     QProgressDialog *downloadProgress_{nullptr};
     QProgressDialog *signingKeyProgress_{nullptr};

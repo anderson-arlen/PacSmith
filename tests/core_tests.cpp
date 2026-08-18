@@ -34,6 +34,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QTimeZone>
 #include <QtTest>
 
 #include <algorithm>
@@ -72,9 +73,11 @@ private slots:
     void persistsAiSettingsOutsideProjectData();
     void persistsBackgroundUpdateSettings();
     void buildsSystemdCalendarSchedules();
+    void reportsOverdueBackgroundUpdateChecks();
     void persistsMultipleReleases();
     void selectsActiveTrackingRelease();
     void reportsInstalledUpdateStatus();
+    void dropsUnbuiltIntermediateUpdates();
     void recordsUninspectedGitHubDiscoveries();
     void carriesInstallMappingAcrossGitHubVersions();
     void preservesRepositoryFirstImportConfiguration();
@@ -1165,6 +1168,37 @@ void CoreTests::buildsSystemdCalendarSchedules() {
              QStringLiteral("Sun *-*-* 23:45:00"));
 }
 
+void CoreTests::reportsOverdueBackgroundUpdateChecks() {
+    pacsmith::BackgroundUpdateSettings settings;
+    settings.enabled = true;
+    settings.daily = true;
+    settings.localTime = QTime(2, 0);
+    const auto now = QDateTime(QDate(2026, 8, 18), QTime(16, 0), QTimeZone::systemTimeZone());
+
+    QVERIFY(pacsmith::BackgroundUpdateManager::isOverdue(settings, {}, now));
+
+    const auto lastDue = pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, now);
+    QCOMPARE(lastDue.date(), QDate(2026, 8, 18));
+    QCOMPARE(lastDue.time(), QTime(2, 0));
+    QVERIFY(!pacsmith::BackgroundUpdateManager::isOverdue(settings, lastDue, now));
+    QVERIFY(!pacsmith::BackgroundUpdateManager::isOverdue(settings, lastDue.addSecs(60), now));
+    QVERIFY(pacsmith::BackgroundUpdateManager::isOverdue(settings, lastDue.addSecs(-60), now));
+
+    const auto beforeSchedule = QDateTime(QDate(2026, 8, 18), QTime(1, 0), QTimeZone::systemTimeZone());
+    QCOMPARE(pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, beforeSchedule).date(),
+             QDate(2026, 8, 17));
+
+    settings.enabled = false;
+    QVERIFY(!pacsmith::BackgroundUpdateManager::isOverdue(settings, {}, now));
+
+    settings.enabled = true;
+    settings.daily = false;
+    settings.weekDay = 1;
+    const auto weekly = pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, now);
+    QCOMPARE(weekly.date(), QDate(2026, 8, 17));
+    QCOMPARE(weekly.time(), QTime(2, 0));
+}
+
 void CoreTests::persistsMultipleReleases() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
@@ -1253,6 +1287,49 @@ void CoreTests::reportsInstalledUpdateStatus() {
     project.installedReleaseId.clear();
     project.externallyInstalled = true;
     QVERIFY(!project.hasAvailableUpdate());
+}
+
+void CoreTests::dropsUnbuiltIntermediateUpdates() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    pacsmith::ProjectStore store(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::Project project;
+    project.id = QStringLiteral("stale-updates");
+    project.displayName = QStringLiteral("Stale Updates");
+    project.archPackageName = QStringLiteral("pacsmith-test-stale-updates-not-installed");
+    const QStringList versions{QStringLiteral("1.0"), QStringLiteral("1.1"),
+                               QStringLiteral("1.2"), QStringLiteral("1.3")};
+    for (int index = 0; index < versions.size(); ++index) {
+        pacsmith::PackageRelease release;
+        release.id = versions.at(index) + QStringLiteral("-aaaaaaaaaaaa");
+        release.projectId = project.id;
+        release.archPackageName = project.archPackageName;
+        release.debian.package = QStringLiteral("stale");
+        release.debian.version = versions.at(index);
+        release.sourceSha256 = QString(64, QChar(u'a' + static_cast<char16_t>(index)));
+        release.state = pacsmith::ReleaseState::Ready;
+        if (index == 0 || index == 1) {
+            release.buildStatus = pacsmith::BuildStatus::Succeeded;
+            release.state = pacsmith::ReleaseState::Built;
+        }
+        project.releases.append(release);
+    }
+    QString error;
+    QVERIFY2(store.save(project, &error), qPrintable(error));
+
+    auto kept = store.cleanup(project, {2, 3, false}, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(project.releases.size(), 4);
+
+    kept = store.cleanup(project, {2, 3, true}, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(project.releases.size(), 3);
+    QStringList remaining;
+    for (const auto &release : project.releases) remaining.append(release.debian.version);
+    remaining.sort();
+    QCOMPARE(remaining, (QStringList{QStringLiteral("1.0"), QStringLiteral("1.1"),
+                                     QStringLiteral("1.3")}));
 }
 
 void CoreTests::recordsUninspectedGitHubDiscoveries() {
