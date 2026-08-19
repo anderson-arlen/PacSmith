@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/import_progress.hpp"
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 
 #include <QObject>
 #include <QString>

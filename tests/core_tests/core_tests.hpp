@@ -1,0 +1,90 @@
+#pragma once
+
+#include <QObject>
+
+class CoreTests final : public QObject {
+    Q_OBJECT
+
+private slots:
+    void parsesControlFields();
+    void parsesMultilineControlFields();
+    void prefersApplicationNameOverPackageDescription();
+    void parsesDependencies();
+    void parsesAlternativesAndVersions();
+    void loadsVerifiedDependencyMappings();
+    void mapsChatGptDependencies();
+    void acknowledgesScriptContentSpecifically();
+    void extractsScriptResponsibilitiesAndAptEvidence();
+    void validatesLifecycleScriptsAndContentAcknowledgement();
+    void constrainsAiFindingResolutionFingerprints();
+    void appliesAiResolutionWithinTrustBoundaries();
+    void appliesAiAppRunRewriteForExtractedAppImage();
+    void appliesRequiredAiDependencyTreatment();
+    void requiresApprovalForUnclassifiedAiPayloadChanges();
+    void rejectsUnevidencedAiSigningKeysAndUnsafeInformationRequests();
+    void parsesAptSourceFormats();
+    void comparesDebianVersions();
+    void parsesAptRepositoryMetadata();
+    void extractsPayloadRpmRepositoryEvidence();
+    void parsesRpmRepositoryMetadata();
+    void comparesRpmVersions();
+    void verifiesPinnedAptRepositorySignatures();
+    void validatesRepositorySigningKeyUrls();
+    void tracksContentSpecificPayloadDecisions();
+    void serializesProjectsAndOverrides();
+    void persistsAiSettingsOutsideProjectData();
+    void persistsBackgroundUpdateSettings();
+    void writesLoginAutostartDesktopEntry();
+    void roundTripsBackgroundUpdateCheckActivity();
+    void recountsAvailableUpdatesFromInstalledState();
+    void buildsSystemdCalendarSchedules();
+    void reportsOverdueBackgroundUpdateChecks();
+    void persistsMultipleReleases();
+    void selectsActiveTrackingRelease();
+    void reportsInstalledUpdateStatus();
+    void dropsUnbuiltIntermediateUpdates();
+    void recordsUninspectedGitHubDiscoveries();
+    void carriesInstallMappingAcrossGitHubVersions();
+    void attachesPreparedGitHubDebToExistingProject();
+    void preservesRepositoryFirstImportConfiguration();
+    void parsesAiModelCatalog();
+    void parsesChatGptCredentialsAndCatalog();
+    void buildsExternalTerminalCommandsSafely();
+    void buildsNonInteractivePacmanArgumentsSafely();
+    void buildsRebuildableMakepkgArguments();
+    void validatesInstallSessionProtocol();
+    void encryptsCredentialsWithAge();
+    void usesInjectedGithubTokenWhenAgeIsLocked();
+    void migratesScriptEvidenceForExistingProjects();
+    void handlesProjectPaths();
+    void detectsManualPkgbuildEdits();
+    void roundTripsGuidedAndCustomPkgbuilds();
+    void detectsExternalLifecycleEdits();
+    void reanalyzesReleaseFromBlankPackageSetup();
+    void detectsDebDeclaredOptCommandWithoutExecutingScript();
+    void inspectsDebAndAppImagePayloadContents();
+    void deletesUninstalledProject();
+    void refusesToDeleteInstalledProject();
+    void allowsDeletingProjectThatDoesNotOwnInstalledPackage();
+    void generatesPkgbuild();
+    void generatesMultiSourcePkgbuilds();
+    void parsesPkgbuildInstallPlans();
+    void synchronizesIntegrationIconSource();
+    void parsesRpmHeadersWithoutExecutingScripts();
+    void inspectsArchiveIconsRepositoryEvidenceAndPrivilegedModes();
+    void reviewsUnsafeArchiveSymlinksWithoutFailingImport();
+    void mapsArchiveDesktopExecToUsrBinCommand();
+    void flagsMissingArchiveDesktopCommandForReview();
+    void detectsStandaloneElfWithoutExecutingIt();
+    void rejectsAppImagesBeforeElfDetection();
+    void acceptsStandardExternalAppImageRuntimeSymlinks();
+    void flagsAppRunFilenameDispatchForReview();
+    void selectsGitHubReleaseAssets();
+    void sanitizesPackageNames_data();
+    void sanitizesPackageNames();
+    void translatesVersions_data();
+    void translatesVersions();
+    void validatesArchivePaths();
+    void preservesUserMappingOverrides();
+};
+

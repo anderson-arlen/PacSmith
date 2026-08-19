@@ -1,6 +1,6 @@
 #include "core/package_artifact.hpp"
 
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 
 #include <QFileInfo>
 

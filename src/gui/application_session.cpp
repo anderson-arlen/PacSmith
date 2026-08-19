@@ -3,7 +3,7 @@
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/credential_store.hpp"
-#include "gui/main_window.hpp"
+#include "gui/main_window/main_window.hpp"
 
 #include <QAction>
 #include <QApplication>

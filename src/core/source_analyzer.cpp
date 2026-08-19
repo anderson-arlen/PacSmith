@@ -3,7 +3,7 @@
 #include "core/apt_sources.hpp"
 #include "core/path_safety.hpp"
 #include "core/pkgbuild_generator.hpp"
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 #include "core/rpm_analyzer.hpp"
 #include "core/script_evidence.hpp"
 

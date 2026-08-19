@@ -1,6 +1,6 @@
 #include "gui/import_worker.hpp"
 
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 
 #include <QElapsedTimer>
 #include <QFileInfo>

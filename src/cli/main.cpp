@@ -11,7 +11,7 @@
 #include "core/package_artifact.hpp"
 #include "core/pkgbuild_generator.hpp"
 #include "core/process_services.hpp"
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/repository_trust.hpp"
 #include "core/rpm_update_service.hpp"

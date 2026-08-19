@@ -9,7 +9,7 @@
 #include "core/deb_download_service.hpp"
 #include "core/github_update_service.hpp"
 #include "core/process_services.hpp"
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/rpm_update_service.hpp"
 

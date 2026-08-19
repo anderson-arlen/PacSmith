@@ -71,7 +71,9 @@ add_library(pacsmith_core STATIC
     src/core/deb_analyzer.cpp
     src/core/deb_download_service.cpp
     src/core/github_update_service.cpp
-    src/core/project_store.cpp
+    src/core/project_store/project_store.cpp
+    src/core/project_store/internal.cpp
+    src/core/project_store/import.cpp
     src/core/pkgbuild_generator.cpp
     src/core/pkgbuild_install_plan.cpp
     src/core/process_services.cpp
@@ -104,7 +106,18 @@ add_executable(pacsmith-gui
     src/gui/gui_instance.cpp
     src/gui/import_worker.cpp
     src/gui/reanalyze_worker.cpp
-    src/gui/main_window.cpp
+    src/gui/main_window/main_window.hpp
+    src/gui/main_window/main_window.cpp
+    src/gui/main_window/help_widgets.cpp
+    src/gui/main_window/support.cpp
+    src/gui/main_window/pages.cpp
+    src/gui/main_window/import.cpp
+    src/gui/main_window/dashboard.cpp
+    src/gui/main_window/source.cpp
+    src/gui/main_window/payload.cpp
+    src/gui/main_window/recipe.cpp
+    src/gui/main_window/settings.cpp
+    src/gui/main_window/actions.cpp
     src/gui/pkgbuild_highlighter.cpp
     src/gui/shell_highlighter.cpp)
 target_link_libraries(pacsmith-gui PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent)
@@ -134,7 +147,17 @@ install(FILES LICENSE README.md docs/ARCHITECTURE.md DESTINATION ${CMAKE_INSTALL
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(pacsmith-tests tests/core_tests.cpp)
+    add_executable(pacsmith-tests
+        tests/core_tests/core_tests.hpp
+        tests/core_tests/core_tests.cpp
+        tests/core_tests/parser.cpp
+        tests/core_tests/script_ai.cpp
+        tests/core_tests/repository.cpp
+        tests/core_tests/project_persistence.cpp
+        tests/core_tests/pkgbuild.cpp
+        tests/core_tests/analyzer.cpp
+        tests/core_tests/process_credentials.cpp)
+    target_include_directories(pacsmith-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/core_tests)
     target_link_libraries(pacsmith-tests PRIVATE pacsmith_core Qt6::Test)
     pacsmith_target_defaults(pacsmith-tests)
     add_test(NAME pacsmith-core-tests COMMAND pacsmith-tests)

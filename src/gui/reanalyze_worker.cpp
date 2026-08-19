@@ -1,6 +1,6 @@
 #include "gui/reanalyze_worker.hpp"
 
-#include "core/project_store.hpp"
+#include "core/project_store/project_store.hpp"
 
 #include <QElapsedTimer>
 
