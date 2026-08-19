@@ -12,8 +12,10 @@
 #include "core/path_safety.hpp"
 #include "core/managed_package.hpp"
 #include "gui/ai_progress_dialog.hpp"
+#include "gui/age_unlock.hpp"
 #include "gui/command_progress_dialog.hpp"
 #include "gui/desktop_entry_highlighter.hpp"
+#include "gui/gui_instance.hpp"
 #include "gui/import_worker.hpp"
 #include "gui/pkgbuild_highlighter.hpp"
 #include "gui/reanalyze_worker.hpp"
@@ -28,6 +30,7 @@
 #include <QComboBox>
 #include <QCompleter>
 #include <QCursor>
+#include <QDate>
 #include <QCloseEvent>
 #include <QCheckBox>
 #include <QClipboard>
@@ -68,6 +71,7 @@
 #include <QInputDialog>
 #include <QPlainTextEdit>
 #include <QPainter>
+#include <QPen>
 #include <QProcess>
 #include <QProgressDialog>
 #include <QRegularExpression>
@@ -90,6 +94,7 @@
 #include <QTimeEdit>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QSystemTrayIcon>
 #include <QTextCursor>
 #include <QThread>
 #include <QTimer>
@@ -114,9 +119,46 @@ QLabel *pageIntroduction(const QString &text, QWidget *parent);
 
 constexpr int projectSubtitleRole = Qt::UserRole + 1;
 constexpr int projectVisualStateRole = Qt::UserRole + 2;
+constexpr int projectCheckingRole = Qt::UserRole + 3;
+constexpr int projectActivityRole = Qt::UserRole + 4;
 constexpr int sectionBaseLabelRole = Qt::UserRole + 1;
 
 enum class ProjectVisualState { NotInstalled, Current, UpdateAvailable, Attention, Preparing };
+
+QString downloadActivityText(const QString &phase, const qint64 received, const qint64 total) {
+    if (phase.isEmpty() || phase == QStringLiteral("Downloading")) {
+        if (total > 0) {
+            return QStringLiteral("Downloading update · %1 / %2 MiB")
+                .arg(received / (1024 * 1024))
+                .arg(total / (1024 * 1024));
+        }
+        if (received > 0) {
+            return QStringLiteral("Downloading update · %1 MiB").arg(received / (1024 * 1024));
+        }
+        return QStringLiteral("Downloading update…");
+    }
+    return phase;
+}
+
+QString downloadStatusText(const QString &name, const QString &phase, const qint64 received,
+                           const qint64 total) {
+    const auto label = name.isEmpty() ? QStringLiteral("update") : name;
+    if (phase.isEmpty() || phase == QStringLiteral("Downloading")) {
+        if (total > 0) {
+            return QStringLiteral("Downloading %1 update… %2 / %3 MiB")
+                .arg(label)
+                .arg(received / (1024 * 1024))
+                .arg(total / (1024 * 1024));
+        }
+        if (received > 0) {
+            return QStringLiteral("Downloading %1 update… %2 MiB")
+                .arg(label)
+                .arg(received / (1024 * 1024));
+        }
+        return QStringLiteral("Downloading %1 update…").arg(label);
+    }
+    return QStringLiteral("Preparing %1: %2").arg(label, phase);
+}
 
 struct AiDependencyCandidate {
     int index{-1};
@@ -219,13 +261,15 @@ public:
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override {
         painter->save();
-        const auto state = static_cast<ProjectVisualState>(
-            index.data(projectVisualStateRole).toInt());
         const auto selected = option.state.testFlag(QStyle::State_Selected);
         const auto darkTheme = option.palette.color(QPalette::Base).lightness() < 128;
+        const auto activity = index.data(projectActivityRole).toString();
+        const auto state = activity.isEmpty()
+            ? static_cast<ProjectVisualState>(index.data(projectVisualStateRole).toInt())
+            : ProjectVisualState::Preparing;
         const auto row = option.rect.adjusted(2, 2, -2, -2);
 
-        if (selected) {
+        if (selected || !activity.isEmpty()) {
             QColor background;
             QColor border;
             switch (state) {
@@ -262,7 +306,8 @@ public:
                                                                 : QIcon::Disabled);
 
         const auto textLeft = iconRect.right() + 10;
-        const auto textWidth = std::max(0, row.right() - textLeft - 7);
+        const bool checking = index.data(projectCheckingRole).toBool() || !activity.isEmpty();
+        const auto textWidth = std::max(0, row.right() - textLeft - 7 - (checking ? 24 : 0));
         const QRect nameRect(textLeft, row.top() + 8, textWidth, 21);
         const QRect subtitleRect(textLeft, row.top() + 31, textWidth, 19);
         auto nameFont = option.font;
@@ -298,9 +343,28 @@ public:
         }
         painter->setPen(secondary);
         const QFontMetrics subtitleMetrics(subtitleFont);
+        const auto subtitle = activity.isEmpty() ? index.data(projectSubtitleRole).toString()
+                                                 : activity;
         painter->drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter,
-                          subtitleMetrics.elidedText(index.data(projectSubtitleRole).toString(),
-                                                     Qt::ElideRight, textWidth));
+                          subtitleMetrics.elidedText(subtitle, Qt::ElideRight, textWidth));
+        if (checking) {
+            int spinnerFrame = 0;
+            if (option.widget != nullptr) {
+                spinnerFrame = option.widget->property("pacsmithSpinnerFrame").toInt();
+                if (spinnerFrame == 0 && option.widget->parentWidget() != nullptr) {
+                    spinnerFrame = option.widget->parentWidget()->property("pacsmithSpinnerFrame").toInt();
+                }
+            }
+            const auto spinnerSize = 16;
+            const QRect spinnerRect(row.right() - spinnerSize - 6,
+                                    row.center().y() - spinnerSize / 2, spinnerSize, spinnerSize);
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            painter->setBrush(Qt::NoBrush);
+            auto spinnerPen = QPen(option.palette.link().color(), 2.25);
+            spinnerPen.setCapStyle(Qt::RoundCap);
+            painter->setPen(spinnerPen);
+            painter->drawArc(spinnerRect, (spinnerFrame % 4) * 90 * 16, 270 * 16);
+        }
         painter->restore();
     }
 };
@@ -761,6 +825,64 @@ QLabel *pageIntroduction(const QString &text, QWidget *parent) {
     return label;
 }
 
+QString formatLocalDateTime(const QDateTime &value) {
+    if (!value.isValid()) return QStringLiteral("never");
+    const auto local = value.toLocalTime();
+    const auto locale = QLocale::system();
+    const auto time = locale.toString(local.time(), QLocale::ShortFormat);
+    if (local.date() == QDate::currentDate()) return QStringLiteral("today at %1").arg(time);
+    if (local.date() == QDate::currentDate().addDays(-1)) {
+        return QStringLiteral("yesterday at %1").arg(time);
+    }
+    return QStringLiteral("%1 at %2").arg(locale.toString(local.date(), QLocale::ShortFormat), time);
+}
+
+QFrame *settingsStatusFrame(QWidget *parent) {
+    auto *frame = new QFrame(parent);
+    frame->setObjectName(QStringLiteral("settingsStatusPanel"));
+    frame->setFrameShape(QFrame::StyledPanel);
+    frame->setStyleSheet(QStringLiteral(
+        "QFrame#settingsStatusPanel { background-color: rgba(52, 152, 219, 28); "
+        "border: 1px solid rgba(52, 152, 219, 150); border-radius: 6px; } "
+        "QFrame#settingsStatusPanel QLabel { background: transparent; border: none; }"));
+    return frame;
+}
+
+void setSettingsSectionHelp(QLabel *label, const QString &summary, const QString &details) {
+    label->setProperty("helpDetails", details);
+    auto text = summary.toHtmlEscaped();
+    if (!details.isEmpty()) {
+        text += QStringLiteral(" <a href=\"learn-more\">Learn more</a>");
+    }
+    label->setText(text);
+}
+
+QLabel *settingsSectionHelp(QWidget *parent, const QString &summary, const QString &details) {
+    auto *label = new QLabel(parent);
+    label->setWordWrap(true);
+    label->setTextFormat(Qt::RichText);
+    label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    label->setOpenExternalLinks(false);
+    auto font = label->font();
+    if (font.pointSize() >= 10) font.setPointSize(font.pointSize() - 1);
+    label->setFont(font);
+    auto palette = label->palette();
+    const auto link = palette.color(QPalette::Link);
+    const auto muted = palette.color(QPalette::PlaceholderText);
+    palette.setColor(QPalette::WindowText, muted.isValid() ? muted : palette.color(QPalette::Mid));
+    palette.setColor(QPalette::Link, link);
+    palette.setColor(QPalette::LinkVisited, link);
+    label->setPalette(palette);
+    setSettingsSectionHelp(label, summary, details);
+    QObject::connect(label, &QLabel::linkActivated, label, [label](const QString &) {
+        const auto more = label->property("helpDetails").toString();
+        if (more.isEmpty()) return;
+        QMessageBox::information(label->window() != nullptr ? label->window() : static_cast<QWidget *>(label),
+                                 QStringLiteral("More information"), more);
+    });
+    return label;
+}
+
 QWidget *emptyPageHost(QWidget *parent) {
     auto *host = new QWidget(parent);
     auto *layout = new QVBoxLayout(host);
@@ -1167,9 +1289,10 @@ qsizetype pendingScriptFindings(const PackageRelease &project) {
 
 } // namespace
 
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), aiSettings_(settingsStore_.load()),
-      credentialStore_(settingsStore_.ageSecretsPath()), buildService_(this),
+MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credentials,
+                       QWidget *parent)
+    : QMainWindow(parent), settingsStore_(settingsStore), aiSettings_(settingsStore_.load()),
+      credentialStore_(credentials), buildService_(this),
       installService_(this), debDownloadService_(this), signingKeyDownloadService_(this),
       aptUpdateService_(this), rpmUpdateService_(this),
       githubUpdateService_(this), aiService_(this),
@@ -1206,6 +1329,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(preparationSpinnerTimer_, &QTimer::timeout, this, [this] {
         preparationSpinnerFrame_ = (preparationSpinnerFrame_ + 1) % 4;
         updatePreparationIndicators();
+        updateUpdateCheckIndicators();
+        syncActivityTimer();
     });
     deleteProjectButton_ = new QPushButton(QStringLiteral("Delete"), leftPanel);
     deleteProjectButton_->setEnabled(false);
@@ -1550,7 +1675,12 @@ MainWindow::MainWindow(QWidget *parent)
             ? QStringLiteral("Downloading vendor artifact: %1 / %2 MiB")
                   .arg(received / (1024 * 1024)).arg(total / (1024 * 1024))
             : QStringLiteral("Downloading vendor artifact: %1 MiB").arg(received / (1024 * 1024)));
+        if (!lastPreparationPublish_.isValid() || lastPreparationPublish_.elapsed() >= 150) {
+            publishPreparationActivity();
+            lastPreparationPublish_.restart();
+        }
         updatePreparationIndicators();
+        updateUpdateCheckIndicators();
     });
     connect(&debDownloadService_, &DebDownloadService::failed, this, [this](const QString &message) {
         const auto projectId = preparingProjectId_;
@@ -1568,6 +1698,7 @@ MainWindow::MainWindow(QWidget *parent)
             downloadProgress_ = nullptr;
         }
         updatePreparationIndicators();
+        publishPreparationActivity();
         statusBar()->showMessage(QStringLiteral("Vendor artifact downloaded; importing release"));
         pendingDownloadedImport_ = path;
         importPackage(path);
@@ -1741,7 +1872,7 @@ MainWindow::MainWindow(QWidget *parent)
         }
         QString error;
         if (!credentialStore_.store(QStringLiteral("chatgpt"), source, serialized,
-                                    source == CredentialSource::Age ? agePassword_ : QString{}, &error)) {
+                                    QString{}, &error)) {
             statusBar()->showMessage(
                 QStringLiteral("Could not persist the refreshed ChatGPT session: %1").arg(error), 10000);
         }
@@ -1801,7 +1932,6 @@ MainWindow::MainWindow(QWidget *parent)
     loadRepositoryPackageCatalog();
     refreshProjectList();
     QTimer::singleShot(0, this, [this] {
-        runOverdueBackgroundUpdateCheck();
         const auto providerName = aiProviderName(aiSettings_.provider);
         const auto defaultSource = aiSettings_.provider == AiProviderKind::ChatGpt
                                        ? CredentialSource::Keyring
@@ -1813,6 +1943,7 @@ MainWindow::MainWindow(QWidget *parent)
             source == CredentialSource::Age && credentialStore_.hasAgeFile()) {
             static_cast<void>(unlockAgeCredentials());
         }
+        syncActivityTimer();
     });
 }
 
@@ -3105,6 +3236,7 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
             downloadProgress_->raise();
             downloadProgress_->activateWindow();
             repositoryImportRunning_ = false;
+            startListDownloadActivity(PkgbuildGenerator::sanitizePackageName(packageName));
             debDownloadService_.start(
                 QUrl(result.downloadUrl), result.sha256,
                 std::filesystem::path(target.toUtf8().constData()));
@@ -3698,38 +3830,44 @@ void MainWindow::updatePreparationIndicators() {
     static const QStringList frames{QStringLiteral("⠋"), QStringLiteral("⠙"),
                                     QStringLiteral("⠹"), QStringLiteral("⠸")};
     const auto frame = frames.at(preparationSpinnerFrame_ % frames.size());
+    QString preparingId = preparingProjectId_;
+    QString phase = preparationPhase_;
+    qint64 received = preparationBytesReceived_;
+    qint64 total = preparationBytesTotal_;
+    if (preparingId.isEmpty()) {
+        const auto updateState = BackgroundUpdateStateStore::load();
+        preparingId = updateState.preparingProjectId;
+        phase = updateState.preparationPhase;
+        received = updateState.preparationBytesReceived;
+        total = updateState.preparationBytesTotal;
+    }
+    const auto activityText = preparingId.isEmpty()
+        ? QString{}
+        : downloadActivityText(phase, received, total);
     for (int row = 0; projectList_ != nullptr && row < projectList_->count(); ++row) {
         auto *item = projectList_->item(row);
         const auto projectId = item->data(Qt::UserRole).toString();
-        if (projectId != preparingProjectId_) continue;
-        item->setData(projectVisualStateRole,
-                      static_cast<int>(ProjectVisualState::Preparing));
-        QString activity;
-        if (preparationPhase_.isEmpty() || preparationPhase_ == QStringLiteral("Downloading")) {
-            activity = preparationBytesTotal_ > 0
-                ? QStringLiteral("%1 Downloading update · %2 / %3 MiB")
-                      .arg(frame)
-                      .arg(preparationBytesReceived_ / (1024 * 1024))
-                      .arg(preparationBytesTotal_ / (1024 * 1024))
-                : QStringLiteral("%1 Downloading update…").arg(frame);
-        } else {
-            activity = QStringLiteral("%1 %2").arg(frame, preparationPhase_);
+        const auto currentActivity = item->data(projectActivityRole).toString();
+        if (projectId == preparingId && !preparingId.isEmpty()) {
+            if (currentActivity != activityText) item->setData(projectActivityRole, activityText);
+            projectList_->viewport()->update(projectList_->visualItemRect(item));
+        } else if (!currentActivity.isEmpty()) {
+            item->setData(projectActivityRole, QString{});
+            projectList_->viewport()->update(projectList_->visualItemRect(item));
         }
-        item->setData(projectSubtitleRole, activity);
-        projectList_->viewport()->update(projectList_->visualItemRect(item));
     }
     if (!project_ || project_->id != preparingProjectId_ || releaseTable_ == nullptr) return;
     for (int row = 0; row < releaseTable_->rowCount(); ++row) {
         auto *versionItem = releaseTable_->item(row, 0);
         if (versionItem == nullptr ||
             versionItem->data(Qt::UserRole).toString() != preparingReleaseId_) continue;
-        const auto phase = preparationPhase_.isEmpty() ? QStringLiteral("Downloading")
-                                                       : preparationPhase_;
+        const auto tablePhase = preparationPhase_.isEmpty() ? QStringLiteral("Downloading")
+                                                            : preparationPhase_;
         if (auto *status = releaseTable_->item(row, 1); status != nullptr) {
-            status->setText(QStringLiteral("%1 %2").arg(frame, phase));
+            status->setText(QStringLiteral("%1 %2").arg(frame, tablePhase));
         }
         if (auto *review = releaseTable_->item(row, 4); review != nullptr) {
-            review->setText(preparationBytesTotal_ > 0 && phase == QStringLiteral("Downloading")
+            review->setText(preparationBytesTotal_ > 0 && tablePhase == QStringLiteral("Downloading")
                 ? QStringLiteral("%1 / %2 MiB")
                       .arg(preparationBytesReceived_ / (1024 * 1024))
                       .arg(preparationBytesTotal_ / (1024 * 1024))
@@ -3739,19 +3877,209 @@ void MainWindow::updatePreparationIndicators() {
     }
 }
 
+void MainWindow::updateUpdateCheckIndicators() {
+    if (projectList_ == nullptr) return;
+    const auto updateState = BackgroundUpdateStateStore::load();
+    QString checkingId = updateState.checkingProjectId;
+    QString checkingName = updateState.checkingProjectName;
+    const bool inProcess = aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
+                           githubUpdateService_.isRunning();
+    if (checkingId.isEmpty() && inProcess && project_) {
+        checkingId = project_->id;
+        checkingName = project_->displayName.isEmpty() ? project_->archPackageName
+                                                       : project_->displayName;
+    }
+    const bool checkBusy = updateState.checking || inProcess;
+    const bool checking = checkBusy && !checkingId.isEmpty();
+    QString preparingId = preparingProjectId_;
+    QString preparingName;
+    QString phase = preparationPhase_;
+    qint64 received = preparationBytesReceived_;
+    qint64 total = preparationBytesTotal_;
+    if (preparingId.isEmpty()) {
+        preparingId = updateState.preparingProjectId;
+        preparingName = updateState.preparingProjectName;
+        phase = updateState.preparationPhase;
+        received = updateState.preparationBytesReceived;
+        total = updateState.preparationBytesTotal;
+    } else {
+        preparingName = displayNameForProject(preparingId);
+    }
+    const bool prepareBusy = !preparingId.isEmpty();
+    projectList_->setProperty("pacsmithSpinnerFrame", preparationSpinnerFrame_);
+    projectList_->viewport()->setProperty("pacsmithSpinnerFrame", preparationSpinnerFrame_);
+    for (int row = 0; row < projectList_->count(); ++row) {
+        auto *item = projectList_->item(row);
+        const auto projectId = item->data(Qt::UserRole).toString();
+        const bool itemPreparing = prepareBusy && projectId == preparingId;
+        const bool itemChecking = checking && projectId == checkingId && !itemPreparing;
+        const bool itemBusy = itemPreparing || itemChecking;
+        if (item->data(projectCheckingRole).toBool() != itemBusy) {
+            item->setData(projectCheckingRole, itemBusy);
+        }
+        if (itemBusy) projectList_->viewport()->update(projectList_->visualItemRect(item));
+    }
+    if (prepareBusy && canShowUpdateCheckStatus()) {
+        updateCheckStatusActive_ = true;
+        statusBar()->showMessage(downloadStatusText(preparingName, phase, received, total));
+    } else if (checkBusy && canShowUpdateCheckStatus()) {
+        updateCheckStatusActive_ = true;
+        statusBar()->showMessage(checkingName.isEmpty()
+                                     ? QStringLiteral("Checking for updates…")
+                                     : QStringLiteral("Checking %1 for updates…").arg(checkingName));
+    } else if (!checkBusy && !prepareBusy && updateCheckStatusActive_) {
+        updateCheckStatusActive_ = false;
+        if (canShowUpdateCheckStatus()) {
+            statusBar()->showMessage(updateState.message.isEmpty()
+                                         ? QStringLiteral("Update check finished")
+                                         : updateState.message,
+                                     8000);
+        }
+    }
+    if (checkBusy || prepareBusy) projectList_->viewport()->update();
+}
+
+void MainWindow::syncActivityTimer() {
+    if (preparationSpinnerTimer_ == nullptr) return;
+    const bool busy = !preparingProjectId_.isEmpty() || listActivityInProgress();
+    if (busy) {
+        if (!preparationSpinnerTimer_->isActive()) preparationSpinnerTimer_->start();
+        return;
+    }
+    if (preparationSpinnerTimer_->isActive()) preparationSpinnerTimer_->stop();
+}
+
+bool MainWindow::updateCheckInProgress() const {
+    if (aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
+        githubUpdateService_.isRunning()) {
+        return true;
+    }
+    return BackgroundUpdateStateStore::load().checking;
+}
+
+bool MainWindow::listActivityInProgress() const {
+    if (!preparingProjectId_.isEmpty()) return true;
+    if (aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
+        githubUpdateService_.isRunning()) {
+        return true;
+    }
+    const auto updateState = BackgroundUpdateStateStore::load();
+    return updateState.checking || !updateState.preparingProjectId.isEmpty();
+}
+
+bool MainWindow::canShowUpdateCheckStatus() const {
+    return importThread_ == nullptr && importProgress_ == nullptr &&
+           !buildService_.isRunning() && !installService_.isRunning();
+}
+
+void MainWindow::publishUpdateCheckActivity(const bool running, const QString &projectId,
+                                            const QString &projectName) {
+    auto updateState = BackgroundUpdateStateStore::load();
+    if (running) {
+        updateState.checking = true;
+        updateState.checkingProjectId = projectId;
+        updateState.checkingProjectName = projectName;
+        updateState.message = projectName.isEmpty()
+            ? QStringLiteral("Checking for updates")
+            : QStringLiteral("Checking %1 for updates").arg(projectName);
+        static_cast<void>(BackgroundUpdateStateStore::save(updateState));
+        syncActivityTimer();
+        updateUpdateCheckIndicators();
+        return;
+    }
+    if (!projectId.isEmpty() && !updateState.checkingProjectId.isEmpty() &&
+        updateState.checkingProjectId != projectId) {
+        return;
+    }
+    updateState.checking = false;
+    updateState.checkingProjectId.clear();
+    updateState.checkingProjectName.clear();
+    static_cast<void>(BackgroundUpdateStateStore::save(updateState));
+    updateUpdateCheckIndicators();
+    syncActivityTimer();
+}
+
+QString MainWindow::displayNameForProject(const QString &projectId) const {
+    if (project_ && project_->id == projectId) {
+        return project_->displayName.isEmpty() ? project_->archPackageName : project_->displayName;
+    }
+    const auto cached = projectCache_.constFind(projectId);
+    if (cached != projectCache_.cend()) {
+        return cached->displayName.isEmpty() ? cached->archPackageName : cached->displayName;
+    }
+    return projectId;
+}
+
+void MainWindow::publishPreparationActivity() {
+    if (preparingProjectId_.isEmpty()) return;
+    auto updateState = BackgroundUpdateStateStore::load();
+    updateState.preparingProjectId = preparingProjectId_;
+    updateState.preparingProjectName = displayNameForProject(preparingProjectId_);
+    updateState.preparationPhase = preparationPhase_;
+    updateState.preparationBytesReceived = preparationBytesReceived_;
+    updateState.preparationBytesTotal = preparationBytesTotal_;
+    updateState.message = downloadStatusText(updateState.preparingProjectName, preparationPhase_,
+                                             preparationBytesReceived_, preparationBytesTotal_);
+    static_cast<void>(BackgroundUpdateStateStore::save(updateState));
+}
+
+void MainWindow::clearPublishedPreparationActivity(const QString &projectId) {
+    auto updateState = BackgroundUpdateStateStore::load();
+    if (!projectId.isEmpty() && !updateState.preparingProjectId.isEmpty() &&
+        updateState.preparingProjectId != projectId) {
+        return;
+    }
+    if (updateState.preparingProjectId.isEmpty() && updateState.preparingProjectName.isEmpty()) {
+        return;
+    }
+    updateState.preparingProjectId.clear();
+    updateState.preparingProjectName.clear();
+    updateState.preparationPhase.clear();
+    updateState.preparationBytesReceived = 0;
+    updateState.preparationBytesTotal = -1;
+    static_cast<void>(BackgroundUpdateStateStore::save(updateState));
+}
+
+void MainWindow::startListDownloadActivity(const QString &projectId, const QString &releaseId) {
+    if (projectId.isEmpty()) return;
+    const bool known = (project_ && project_->id == projectId) || projectCache_.contains(projectId);
+    if (!known && !store_.load(projectId, nullptr)) return;
+    preparingProjectId_ = projectId;
+    preparingReleaseId_ = releaseId;
+    preparationPhase_ = QStringLiteral("Downloading");
+    preparationBytesReceived_ = 0;
+    preparationBytesTotal_ = -1;
+    lastPreparationPublish_.invalidate();
+    publishPreparationActivity();
+    syncActivityTimer();
+    updatePreparationIndicators();
+    updateUpdateCheckIndicators();
+}
+
+void MainWindow::noteBackgroundCheckStarted() {
+    syncActivityTimer();
+    updatePreparationIndicators();
+    updateUpdateCheckIndicators();
+}
+
 void MainWindow::resetPreparationState() {
-    if (preparationSpinnerTimer_ != nullptr) preparationSpinnerTimer_->stop();
     if (downloadProgress_ != nullptr) {
         downloadProgress_->close();
         downloadProgress_->deleteLater();
         downloadProgress_ = nullptr;
     }
+    const auto projectId = preparingProjectId_;
+    if (!projectId.isEmpty()) clearPublishedPreparationActivity(projectId);
     preparingProjectId_.clear();
     preparingReleaseId_.clear();
     preparationPhase_.clear();
     preparationBytesReceived_ = 0;
     preparationBytesTotal_ = -1;
-    preparationSpinnerFrame_ = 0;
+    lastPreparationPublish_.invalidate();
+    if (!listActivityInProgress()) preparationSpinnerFrame_ = 0;
+    syncActivityTimer();
+    updatePreparationIndicators();
+    updateUpdateCheckIndicators();
 }
 
 void MainWindow::activateExistingSession(const QString &importPath) {
@@ -3761,6 +4089,20 @@ void MainWindow::activateExistingSession(const QString &importPath) {
     activateWindow();
     if (auto *handle = windowHandle()) handle->requestActivate();
     if (!importPath.isEmpty()) importPackage(importPath);
+    syncActivityTimer();
+    updateUpdateCheckIndicators();
+}
+
+void MainWindow::setKeepRunningInTray(const bool enabled) {
+    keepRunningInTray_ = enabled;
+}
+
+void MainWindow::reloadVisibleProjects() {
+    const auto projectId = project_ ? project_->id : QString{};
+    refreshProjectList(projectId);
+    if (!projectId.isEmpty() && (!project_ || project_->id != projectId)) loadProject(projectId);
+    if (project_) refreshCurrentProject();
+    syncActivityTimer();
 }
 
 void MainWindow::importPackage(const QString &path) {
@@ -4078,7 +4420,7 @@ void MainWindow::startGitHubChooserAi(const PackageRelease &probe,
             [this, providerName, source](const QString &serialized) {
         QString error;
         if (!credentialStore_.store(providerName, source, serialized,
-                                    source == CredentialSource::Age ? agePassword_ : QString{},
+                                    QString{},
                                     &error)) {
             statusBar()->showMessage(
                 QStringLiteral("Could not persist refreshed AI credentials: %1").arg(error),
@@ -4186,6 +4528,7 @@ void MainWindow::downloadGitHubAsset(const PackageRelease &probe,
     downloadProgress_->show();
     downloadProgress_->raise();
     downloadProgress_->activateWindow();
+    startListDownloadActivity(projectId);
 
     debDownloadService_.start(QUrl(result.downloadUrl), result.sha256,
                               std::filesystem::path(target.toUtf8().constData()));
@@ -4204,11 +4547,15 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         event->ignore();
         return;
     }
+    if (keepRunningInTray_) {
+        event->ignore();
+        hide();
+        return;
+    }
     if (aiService_.isRunning()) aiService_.cancel();
     if (aptUpdateService_.isRunning()) aptUpdateService_.cancel();
     if (rpmUpdateService_.isRunning()) rpmUpdateService_.cancel();
     if (githubUpdateService_.isRunning()) githubUpdateService_.cancel();
-    agePassword_.fill(QChar::Null);
     QMainWindow::closeEvent(event);
 }
 
@@ -4221,6 +4568,7 @@ void MainWindow::refreshProjectList(const QString &selectId) {
     projectCache_.reserve(projects.size());
     for (const auto &project : projects) projectCache_.insert(project.id, project);
     QSet<QString> projectIds;
+    const auto updateState = BackgroundUpdateStateStore::load();
     for (const auto &project : projects) {
         projectIds.insert(project.id);
         const auto *release = project.activeTrackingRelease();
@@ -4258,15 +4606,18 @@ void MainWindow::refreshProjectList(const QString &selectId) {
                 statusDescription = QStringLiteral("Installed and up to date");
             }
         }
-        if (project.id == preparingProjectId_) {
-            visualState = ProjectVisualState::Preparing;
-            subtitle = QStringLiteral("⠋ Preparing update…");
-        }
+        const bool checking = project.id == updateState.checkingProjectId && updateState.checking &&
+                              project.id != preparingProjectId_ &&
+                              project.id != updateState.preparingProjectId;
+        const bool preparing = project.id == preparingProjectId_ ||
+                               project.id == updateState.preparingProjectId;
         auto *item = new QListWidgetItem(project.displayName, projectList_);
         item->setIcon(projectIcon(store_, project));
         item->setData(Qt::UserRole, project.id);
         item->setData(projectSubtitleRole, subtitle);
         item->setData(projectVisualStateRole, static_cast<int>(visualState));
+        item->setData(projectCheckingRole, checking || preparing);
+        item->setData(projectActivityRole, QString{});
         item->setSizeHint(QSize(0, 60));
         item->setToolTip(QStringLiteral("%1 · %2%3")
             .arg(project.archPackageName, statusDescription,
@@ -4289,7 +4640,11 @@ void MainWindow::refreshProjectList(const QString &selectId) {
     if (projectList_->currentItem() == nullptr && projectList_->count() > 0) projectList_->setCurrentRow(0);
     if (!error.isEmpty()) statusBar()->showMessage(error, 8000);
     if (!managedError.isEmpty()) statusBar()->showMessage(managedError, 8000);
-    if (!preparingProjectId_.isEmpty()) updatePreparationIndicators();
+    if (!preparingProjectId_.isEmpty() || !updateState.preparingProjectId.isEmpty()) {
+        updatePreparationIndicators();
+    }
+    syncActivityTimer();
+    if (listActivityInProgress()) updateUpdateCheckIndicators();
     if (projects.isEmpty()) {
         project_.reset();
         projectCache_.clear();
@@ -4446,10 +4801,14 @@ void MainWindow::updateDeleteButton() {
                                      currentRelease()->state != ReleaseState::Discovered &&
                                      currentRelease()->state != ReleaseState::Preparing && !busy);
     }
-    deleteProjectButton_->setEnabled(project_->installedVersion.isEmpty() && !busy);
-    if (!project_->installedVersion.isEmpty()) {
+    deleteProjectButton_->setEnabled(!project_->ownsInstalledPackage() && !busy);
+    if (project_->ownsInstalledPackage()) {
         deleteProjectButton_->setToolTip(
             QStringLiteral("Uninstall %1 with pacman before deleting this project").arg(project_->archPackageName));
+    } else if (!project_->installedVersion.isEmpty()) {
+        deleteProjectButton_->setToolTip(
+            QStringLiteral("Delete this extra project. Installed %1 is managed by another PacSmith project or an external install")
+                .arg(project_->archPackageName));
     } else if (busy) {
         deleteProjectButton_->setToolTip(QStringLiteral("Wait for the current operation to finish"));
     } else {
@@ -4459,7 +4818,7 @@ void MainWindow::updateDeleteButton() {
 
 void MainWindow::deleteCurrentProject() {
     if (!project_) return;
-    if (!project_->installedVersion.isEmpty()) {
+    if (project_->ownsInstalledPackage()) {
         QMessageBox::warning(this, QStringLiteral("Project cannot be deleted"),
                              QStringLiteral("%1 is installed. Uninstall it with pacman before deleting its PacSmith project.")
                                  .arg(project_->archPackageName));
@@ -4477,8 +4836,10 @@ void MainWindow::deleteCurrentProject() {
     QMessageBox confirmation(QMessageBox::Warning, QStringLiteral("Delete project"),
                              QStringLiteral("Delete “%1”?").arg(project_->displayName),
                              QMessageBox::NoButton, this);
-    confirmation.setInformativeText(QStringLiteral(
-        "This permanently removes the local vendor artifact, PKGBUILD, mappings, patches, build output, and history. This cannot be undone."));
+    confirmation.setInformativeText(project_->installedVersion.isEmpty()
+        ? QStringLiteral("This permanently removes the local vendor artifact, PKGBUILD, mappings, patches, build output, and history. This cannot be undone.")
+        : QStringLiteral("This permanently removes the local vendor artifact, PKGBUILD, mappings, patches, build output, and history. The installed %1 package will be left in place. This cannot be undone.")
+              .arg(project_->archPackageName));
     auto *deleteButton = confirmation.addButton(QStringLiteral("Delete Project"), QMessageBox::DestructiveRole);
     confirmation.addButton(QMessageBox::Cancel);
     confirmation.setDefaultButton(QMessageBox::Cancel);
@@ -6906,264 +7267,381 @@ void MainWindow::importSigningKey() {
 }
 
 bool MainWindow::unlockAgeCredentials() {
-    if (credentialStore_.ageUnlocked()) return true;
-    const bool creating = !credentialStore_.hasAgeFile();
-    bool accepted = false;
-    auto password = QInputDialog::getText(this,
-                                          creating ? QStringLiteral("Create PacSmith credential store")
-                                                   : QStringLiteral("Unlock PacSmith credentials"),
-                                          creating
-                                              ? QStringLiteral("Set a password for PacSmith's encrypted credential store:")
-                                              : QStringLiteral("Password for %1:").arg(settingsStore_.ageSecretsPath()),
-                                          QLineEdit::Password, {}, &accepted);
-    if (!accepted || password.isEmpty()) {
-        password.fill(QChar::Null);
-        return false;
-    }
-    if (creating) {
-        bool confirmationAccepted = false;
-        auto confirmation = QInputDialog::getText(
-            this, QStringLiteral("Confirm credential-store password"),
-            QStringLiteral("Enter the same password again:"), QLineEdit::Password, {},
-            &confirmationAccepted);
-        const bool matches = confirmationAccepted && confirmation == password;
-        confirmation.fill(QChar::Null);
-        if (!matches) {
-            password.fill(QChar::Null);
-            if (confirmationAccepted) {
-                QMessageBox::warning(this, QStringLiteral("Passwords do not match"),
-                                     QStringLiteral("The encrypted credential store was not created."));
-            }
-            return false;
-        }
-    }
-    QString error;
-    const bool ready = creating ? credentialStore_.createAge(password, &error)
-                                : credentialStore_.unlockAge(password, &error);
-    if (!ready) {
-        password.fill(QChar::Null);
-        QMessageBox::critical(this,
-                              creating ? QStringLiteral("Could not create credential store")
-                                       : QStringLiteral("Could not unlock credentials"),
-                              error);
-        return false;
-    }
-    agePassword_ = password;
-    password.fill(QChar::Null);
-    return true;
+    return promptUnlockAge(credentialStore_, settingsStore_.ageSecretsPath(), this);
 }
 
 void MainWindow::showSettings() {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("PacSmith Settings"));
-    dialog.setMinimumSize(740, 650);
+    dialog.setMinimumSize(680, 620);
     auto *rootLayout = new QVBoxLayout(&dialog);
     auto *settingsTabs = new QTabWidget(&dialog);
+
+    auto *generalPage = new QWidget(settingsTabs);
+    auto *generalLayout = new QVBoxLayout(generalPage);
+    auto *sessionGroup = new QGroupBox(QStringLiteral("Session"), generalPage);
+    auto *sessionLayout = new QVBoxLayout(sessionGroup);
+    sessionLayout->addWidget(settingsSectionHelp(
+        sessionGroup,
+        QStringLiteral("Closing the window quits PacSmith unless it stays in the tray."),
+        QStringLiteral("Closing the main window quits PacSmith unless it is kept running in the tray. "
+                       "Open it again from the tray icon, or choose Quit there to exit completely.\n\n"
+                       "Start at login can also start PacSmith minimized to the tray.")));
+    auto *keepInTray = new QCheckBox(QStringLiteral("Keep PacSmith running in the tray"), sessionGroup);
+    keepInTray->setChecked(aiSettings_.updates.keepInTray || aiSettings_.updates.startMinimized);
+    auto *startAtLogin = new QCheckBox(QStringLiteral("Start PacSmith at login"), sessionGroup);
+    startAtLogin->setChecked(aiSettings_.updates.startAtLogin);
+    auto *startMinimized = new QCheckBox(QStringLiteral("Start minimized to the tray"), sessionGroup);
+    startMinimized->setChecked(aiSettings_.updates.startMinimized);
+    sessionLayout->addWidget(keepInTray);
+    sessionLayout->addWidget(startAtLogin);
+    sessionLayout->addWidget(startMinimized);
+    generalLayout->addWidget(sessionGroup);
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        auto *trayNotice = new QLabel(
+            QStringLiteral("No system tray is available, so PacSmith cannot stay running after the window closes."),
+            generalPage);
+        trayNotice->setWordWrap(true);
+        keepInTray->setEnabled(false);
+        keepInTray->setChecked(false);
+        startMinimized->setEnabled(false);
+        startMinimized->setChecked(false);
+        generalLayout->addWidget(trayNotice);
+    }
+
+    auto *credentialSource = new QComboBox(generalPage);
+    credentialSource->addItems({QStringLiteral("Process environment (read-only)"),
+                                QStringLiteral("Desktop keyring"),
+                                QStringLiteral("Age-encrypted file")});
+    credentialSource->setPlaceholderText(QStringLiteral("Choose how PacSmith stores secrets…"));
+    credentialSource->setCurrentIndex(-1);
+    const auto configuredSource = [&]() -> std::optional<CredentialSource> {
+        if (aiSettings_.provider != AiProviderKind::None) {
+            const auto providerSource = aiSettings_.credentialSources.constFind(
+                aiProviderName(aiSettings_.provider));
+            if (providerSource != aiSettings_.credentialSources.cend()) return providerSource.value();
+        }
+        const auto githubSource = aiSettings_.credentialSources.constFind(QStringLiteral("github"));
+        if (githubSource != aiSettings_.credentialSources.cend()) return githubSource.value();
+        if (!aiSettings_.credentialSources.isEmpty()) return aiSettings_.credentialSources.first();
+        return std::nullopt;
+    }();
+    if (configuredSource) credentialSource->setCurrentIndex(static_cast<int>(*configuredSource));
+    auto *ageStoreAction = new QPushButton(generalPage);
+    auto *storeNotice = new QLabel(generalPage);
+    storeNotice->setWordWrap(true);
+    auto *secretsGroup = new QGroupBox(QStringLiteral("Secret store"), generalPage);
+    auto *secretsForm = new QFormLayout(secretsGroup);
+    secretsForm->addRow(settingsSectionHelp(
+        secretsGroup,
+        QStringLiteral("Choose a store before PacSmith will accept a GitHub token or AI credentials."),
+        QStringLiteral("The same store is used for GitHub tokens and AI credentials.\n\n"
+                       "Process environment is read-only and must be set before PacSmith starts. Desktop launches "
+                       "usually do not inherit variables set in a terminal.\n\n"
+                       "Desktop keyring stores secrets in your session keyring.\n\n"
+                       "Age-encrypted file stores secrets in a password-protected file.")));
+    secretsForm->addRow(QStringLiteral("Storage"), credentialSource);
+    secretsForm->addRow(QString{}, ageStoreAction);
+    secretsForm->addRow(storeNotice);
+    generalLayout->addWidget(secretsGroup);
+
+    auto *githubGroup = new QGroupBox(QStringLiteral("GitHub"), generalPage);
+    auto *githubForm = new QFormLayout(githubGroup);
+    auto *githubToken = new QLineEdit(githubGroup);
+    githubToken->setEchoMode(QLineEdit::Password);
+    githubToken->setPlaceholderText(QStringLiteral("Optional; leave blank to keep a saved token"));
+    auto *githubLockNotice = new QLabel(githubGroup);
+    githubLockNotice->setWordWrap(true);
+    githubForm->addRow(settingsSectionHelp(
+        githubGroup,
+        QStringLiteral("Optional. Used when adding GitHub packages and checking for updates."),
+        QStringLiteral("A token is optional for public repositories but raises GitHub API rate limits. "
+                       "PacSmith uses it when adding packages from GitHub URLs and when checking for updates.\n\n"
+                       "Leave the field blank to keep a saved token. Environment storage reads "
+                       "PACSMITH_GITHUB_TOKEN when PacSmith starts and never displays its value.")));
+    githubForm->addRow(QStringLiteral("Personal access token"), githubToken);
+    githubForm->addRow(githubLockNotice);
+    generalLayout->addWidget(githubGroup);
+    generalLayout->addStretch(1);
+    settingsTabs->addTab(generalPage, QStringLiteral("General"));
+
     auto *aiPage = new QWidget(settingsTabs);
     auto *layout = new QVBoxLayout(aiPage);
     settingsTabs->addTab(aiPage, QStringLiteral("AI Advisor"));
     rootLayout->addWidget(settingsTabs, 1);
-    auto *description = pageIntroduction(
-        QStringLiteral("AI is optional. PacSmith always performs local deterministic inspection first and sends only a bounded package-evidence bundle. Package binaries and unrelated files are never sent."),
-        &dialog);
-    description->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    layout->addWidget(description);
+    auto *aiGroup = new QGroupBox(QStringLiteral("AI Advisor"), aiPage);
+    auto *aiGroupLayout = new QVBoxLayout(aiGroup);
+    auto *aiSectionHelp = settingsSectionHelp(
+        aiGroup,
+        QStringLiteral("AI is optional. Local inspection always runs first."),
+        QStringLiteral("PacSmith always performs local deterministic inspection first and sends only a bounded "
+                       "package-evidence bundle. Package binaries and unrelated files are never sent."));
+    aiGroupLayout->addWidget(aiSectionHelp);
     auto *form = new QFormLayout;
-    auto *provider = new QComboBox(&dialog);
+    auto *provider = new QComboBox(aiPage);
     provider->addItems({QStringLiteral("None"), QStringLiteral("ChatGPT subscription"),
                         QStringLiteral("OpenAI API"),
                         QStringLiteral("xAI / Grok API")});
     provider->setCurrentIndex(static_cast<int>(aiSettings_.provider));
-    auto *model = new QComboBox(&dialog);
+    if (!configuredSource && aiSettings_.provider != AiProviderKind::None) {
+        provider->setCurrentIndex(static_cast<int>(AiProviderKind::None));
+    }
+    auto *model = new QComboBox(aiPage);
     model->setEditable(true);
     model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     model->setMinimumContentsLength(36);
     model->lineEdit()->setPlaceholderText(QStringLiteral("Provider model ID"));
     model->setEditText(aiSettings_.model);
-    auto *reasoningEffort = new QComboBox(&dialog);
-    auto *executionMode = new QComboBox(&dialog);
+    auto *reasoningEffort = new QComboBox(aiPage);
+    auto *executionMode = new QComboBox(aiPage);
     executionMode->addItem(QStringLiteral("Standard"),
                            static_cast<int>(AiExecutionMode::Standard));
     executionMode->addItem(QStringLiteral("Fast (priority)"),
                            static_cast<int>(AiExecutionMode::Fast));
     executionMode->setCurrentIndex(
         executionMode->findData(static_cast<int>(aiSettings_.executionMode)));
-    executionMode->setToolTip(
-        QStringLiteral("Fast requests priority processing. API providers may charge premium rates."));
-    auto *executionModeNotice = new QLabel(&dialog);
-    executionModeNotice->setWordWrap(true);
-    executionModeNotice->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    auto *automatic = new QCheckBox(QStringLiteral("Automatically resolve items flagged for review with AI"), &dialog);
+    auto *automatic = new QCheckBox(QStringLiteral("Automatically resolve items flagged for review with AI"), aiPage);
     automatic->setChecked(aiSettings_.automaticallyResolveReviewItems);
-    auto *credentialSource = new QComboBox(&dialog);
-    credentialSource->addItems({QStringLiteral("Process environment (read-only)"), QStringLiteral("Desktop keyring"),
-                                QStringLiteral("Age-encrypted file")});
-    credentialSource->setPlaceholderText(QStringLiteral("Choose credential source…"));
-    credentialSource->setCurrentIndex(-1);
-    const auto configuredSource = aiSettings_.credentialSources.constFind(
-        aiProviderName(aiSettings_.provider));
-    if (configuredSource != aiSettings_.credentialSources.cend()) {
-        credentialSource->setCurrentIndex(static_cast<int>(configuredSource.value()));
-    } else if (aiSettings_.provider != AiProviderKind::None) {
-        provider->setCurrentIndex(static_cast<int>(AiProviderKind::None));
-    }
-    auto *apiKey = new QLineEdit(&dialog);
+    auto *secretsHint = new QLabel(aiPage);
+    secretsHint->setWordWrap(true);
+    auto *apiKey = new QLineEdit(aiPage);
     apiKey->setEchoMode(QLineEdit::Password);
     apiKey->setPlaceholderText(QStringLiteral("Leave blank to keep an existing stored key"));
-    auto *environmentCredentialNotice = new QLabel(&dialog);
-    environmentCredentialNotice->setWordWrap(true);
-    environmentCredentialNotice->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    environmentCredentialNotice->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto *credentialStatus = new QLabel(&dialog);
-    credentialStatus->setWordWrap(true);
-    auto *credentialExplanation = pageIntroduction(
-        {}, &dialog);
-    auto *ageStoreAction = new QPushButton(&dialog);
-    auto *chatGptSignIn = new QPushButton(QStringLiteral("Sign in with ChatGPT…"), &dialog);
-    auto *loadModels = new QPushButton(QStringLiteral("Load Available Models"), &dialog);
-    form->addRow(QStringLiteral("Credential source"), credentialSource);
-    form->addRow(QString{}, ageStoreAction);
+    auto *aiEnvironmentNotice = new QLabel(aiPage);
+    aiEnvironmentNotice->setWordWrap(true);
+    aiEnvironmentNotice->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    aiEnvironmentNotice->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *chatGptSignIn = new QPushButton(QStringLiteral("Sign in with ChatGPT…"), aiPage);
+    auto *loadModels = new QPushButton(QStringLiteral("Load Available Models"), aiPage);
+    form->addRow(secretsHint);
     form->addRow(QStringLiteral("Provider"), provider);
-    form->addRow(environmentCredentialNotice);
     form->addRow(QStringLiteral("API key"), apiKey);
     form->addRow(QString{}, chatGptSignIn);
+    form->addRow(aiEnvironmentNotice);
     form->addRow(QStringLiteral("Model"), model);
     form->addRow(QString{}, loadModels);
     form->addRow(QStringLiteral("Reasoning effort"), reasoningEffort);
     form->addRow(QStringLiteral("Execution speed"), executionMode);
-    form->addRow(executionModeNotice);
     form->addRow(QString{}, automatic);
-    form->addRow(QString{}, credentialExplanation);
-    layout->addLayout(form);
-    auto *statusPanel = new QFrame(&dialog);
-    statusPanel->setObjectName(QStringLiteral("settingsStatusPanel"));
-    statusPanel->setFrameShape(QFrame::StyledPanel);
-    statusPanel->setStyleSheet(QStringLiteral(
-        "QFrame#settingsStatusPanel { background-color: rgba(52, 152, 219, 28); "
-        "border: 1px solid rgba(52, 152, 219, 150); border-radius: 6px; } "
-        "QFrame#settingsStatusPanel QLabel { background: transparent; border: none; }"));
-    auto *statusLayout = new QVBoxLayout(statusPanel);
-    statusLayout->setContentsMargins(12, 8, 12, 9);
-    statusLayout->setSpacing(4);
-    auto *statusTitle = new QLabel(QStringLiteral("●  STATUS"), statusPanel);
-    statusTitle->setStyleSheet(QStringLiteral("color: #3498db; font-weight: 600;"));
-    credentialStatus->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    credentialStatus->setMinimumHeight(42);
-    credentialStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    credentialStatus->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse);
-    statusLayout->addWidget(statusTitle);
-    statusLayout->addWidget(credentialStatus);
+    aiGroupLayout->addLayout(form);
+    layout->addWidget(aiGroup);
     layout->addStretch(1);
-    layout->addWidget(statusPanel);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
-    auto *saveButton = buttons->button(QDialogButtonBox::Save);
-    layout->addWidget(buttons);
+    auto *aiStatusPanel = settingsStatusFrame(aiPage);
+    auto *aiStatusLayout = new QVBoxLayout(aiStatusPanel);
+    aiStatusLayout->setContentsMargins(12, 8, 12, 9);
+    aiStatusLayout->setSpacing(4);
+    auto *aiStatusTitle = new QLabel(QStringLiteral("●  STATUS"), aiStatusPanel);
+    aiStatusTitle->setStyleSheet(QStringLiteral("color: #3498db; font-weight: 600;"));
+    auto *aiCredentialStatus = new QLabel(aiStatusPanel);
+    aiCredentialStatus->setWordWrap(true);
+    aiCredentialStatus->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    aiCredentialStatus->setMinimumHeight(42);
+    aiCredentialStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    aiCredentialStatus->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse);
+    aiStatusLayout->addWidget(aiStatusTitle);
+    aiStatusLayout->addWidget(aiCredentialStatus);
+    layout->addWidget(aiStatusPanel);
 
     auto *updatesPage = new QWidget(settingsTabs);
     auto *updatesLayout = new QVBoxLayout(updatesPage);
-    updatesLayout->addWidget(pageIntroduction(
-        QStringLiteral("PacSmith uses a systemd user timer. Each release owns its update configuration. The installed known release is active; before installation, the newest analyzed release is active. Checks pause when an external installed version cannot be matched safely."),
-        updatesPage));
-    auto *updatesForm = new QFormLayout;
-    auto *backgroundEnabled = new QCheckBox(QStringLiteral("Enable automatic update checks"), updatesPage);
+    auto *scheduleGroup = new QGroupBox(QStringLiteral("Updates"), updatesPage);
+    auto *updatesForm = new QFormLayout(scheduleGroup);
+    updatesForm->addRow(settingsSectionHelp(
+        scheduleGroup,
+        QStringLiteral("Checks run while PacSmith is open, including in the tray."),
+        QStringLiteral("Periodic checks run while PacSmith is open, including while it is kept in the tray. "
+                       "Each project release owns its own update source. The installed known release is the "
+                       "active tracker; before installation, the newest analyzed release is. Checks pause when "
+                       "an external installed version cannot be matched safely.")));
+    auto *backgroundEnabled = new QCheckBox(QStringLiteral("Check for updates periodically"), scheduleGroup);
     backgroundEnabled->setChecked(aiSettings_.updates.enabled);
-    auto *schedule = new QComboBox(updatesPage);
+    auto *schedule = new QComboBox(scheduleGroup);
     schedule->addItems({QStringLiteral("Every day"), QStringLiteral("Selected weekday")});
     schedule->setCurrentIndex(aiSettings_.updates.daily ? 0 : 1);
-    auto *weekday = new QComboBox(updatesPage);
+    auto *weekday = new QComboBox(scheduleGroup);
     weekday->addItems({QStringLiteral("Monday"), QStringLiteral("Tuesday"),
                        QStringLiteral("Wednesday"), QStringLiteral("Thursday"),
                        QStringLiteral("Friday"), QStringLiteral("Saturday"),
                        QStringLiteral("Sunday")});
     weekday->setCurrentIndex(std::clamp(aiSettings_.updates.weekDay, 1, 7) - 1);
-    weekday->setEnabled(schedule->currentIndex() == 1);
-    auto *checkTime = new QTimeEdit(aiSettings_.updates.localTime, updatesPage);
+    auto *checkTime = new QTimeEdit(aiSettings_.updates.localTime, scheduleGroup);
     checkTime->setDisplayFormat(QStringLiteral("HH:mm"));
-    auto *automaticPrepare = new QCheckBox(
-        QStringLiteral("Download and prepare newly discovered vendor artifacts automatically"), updatesPage);
-    automaticPrepare->setChecked(aiSettings_.updates.automaticallyPrepare);
-    automaticPrepare->setToolTip(QStringLiteral(
-        "APT artifacts require their signed repository SHA256. GitHub artifacts use the publisher digest when available and otherwise remain visibly unsigned. Every artifact is re-inspected; unchanged fingerprinted decisions may carry forward."));
-    auto *retainedPackages = new QSpinBox(updatesPage);
-    retainedPackages->setRange(-1, 50);
-    retainedPackages->setSpecialValueText(QStringLiteral("Unlimited"));
-    retainedPackages->setValue(aiSettings_.updates.retainedPackageVersions);
-    auto *retainedReleases = new QSpinBox(updatesPage);
-    retainedReleases->setRange(-1, 50);
-    retainedReleases->setSpecialValueText(QStringLiteral("Unlimited"));
-    retainedReleases->setValue(aiSettings_.updates.retainedCompleteReleases);
-    auto *trayMode = new QComboBox(updatesPage);
-    trayMode->addItem(QStringLiteral("Always show; badge available updates"), static_cast<int>(TrayMode::Always));
-    trayMode->addItem(QStringLiteral("Show only while checking or when updates exist"), static_cast<int>(TrayMode::ActivityOrUpdates));
-    trayMode->addItem(QStringLiteral("Do not show a tray icon"), static_cast<int>(TrayMode::Disabled));
-    trayMode->setCurrentIndex(trayMode->findData(static_cast<int>(aiSettings_.updates.trayMode)));
-    auto *githubCredentialSource = new QComboBox(updatesPage);
-    githubCredentialSource->addItems({QStringLiteral("Process environment (read-only)"),
-                                      QStringLiteral("Desktop keyring"),
-                                      QStringLiteral("Age-encrypted file")});
-    githubCredentialSource->setCurrentIndex(static_cast<int>(
-        aiSettings_.credentialSources.value(QStringLiteral("github"), CredentialSource::Environment)));
-    auto *githubToken = new QLineEdit(updatesPage);
-    githubToken->setEchoMode(QLineEdit::Password);
-    githubToken->setPlaceholderText(QStringLiteral("Optional; leave blank to keep a saved token"));
-    auto *githubCredentialNotice = new QLabel(updatesPage);
-    githubCredentialNotice->setWordWrap(true);
     updatesForm->addRow(QString{}, backgroundEnabled);
-    updatesForm->addRow(QStringLiteral("Schedule"), schedule);
+    updatesForm->addRow(QStringLiteral("Frequency"), schedule);
     updatesForm->addRow(QStringLiteral("Weekday"), weekday);
     updatesForm->addRow(QStringLiteral("Local time"), checkTime);
-    updatesForm->addRow(QString{}, automaticPrepare);
-    updatesForm->addRow(QStringLiteral("Old package artifacts"), retainedPackages);
-    updatesForm->addRow(QStringLiteral("Old complete releases"), retainedReleases);
-    updatesForm->addRow(QStringLiteral("Tray icon"), trayMode);
-    updatesForm->addRow(QStringLiteral("GitHub credential source"), githubCredentialSource);
-    updatesForm->addRow(QStringLiteral("GitHub PAT"), githubToken);
-    updatesForm->addRow(QString{}, githubCredentialNotice);
-    updatesLayout->addLayout(updatesForm);
-    auto *cleanupNotice = new QLabel(
-        QStringLiteral("Cleanup runs after update checks. Counts are versions older than the currently installed release; newer releases are never removed. Rolling back moves that anchor. Complete-release retention cannot be lower than artifact retention."), updatesPage);
-    cleanupNotice->setWordWrap(true);
-    updatesLayout->addWidget(cleanupNotice);
+    updatesLayout->addWidget(scheduleGroup);
+
+    auto *behaviorGroup = new QGroupBox(QStringLiteral("When updates are found"), updatesPage);
+    auto *behaviorForm = new QFormLayout(behaviorGroup);
+    behaviorForm->addRow(settingsSectionHelp(
+        behaviorGroup,
+        QStringLiteral("Newly discovered vendor artifacts can be downloaded and prepared automatically."),
+        QStringLiteral("APT artifacts require their signed repository SHA256. GitHub artifacts use the publisher "
+                       "digest when available and otherwise remain visibly unsigned. Every artifact is re-inspected; "
+                       "unchanged fingerprinted decisions may carry forward.")));
+    auto *automaticPrepare = new QCheckBox(
+        QStringLiteral("Download and prepare newly discovered vendor artifacts automatically"), behaviorGroup);
+    automaticPrepare->setChecked(aiSettings_.updates.automaticallyPrepare);
+    behaviorForm->addRow(QString{}, automaticPrepare);
+    updatesLayout->addWidget(behaviorGroup);
+
+    auto *checkStatusPanel = settingsStatusFrame(updatesPage);
+    auto *checkStatusLayout = new QVBoxLayout(checkStatusPanel);
+    checkStatusLayout->setContentsMargins(12, 8, 12, 9);
+    checkStatusLayout->setSpacing(4);
+    auto *checkStatusTitle = new QLabel(QStringLiteral("●  LAST CHECK"), checkStatusPanel);
+    checkStatusTitle->setStyleSheet(QStringLiteral("color: #3498db; font-weight: 600;"));
+    auto *lastCheckStatus = new QLabel(checkStatusPanel);
+    lastCheckStatus->setWordWrap(true);
+    lastCheckStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    lastCheckStatus->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    checkStatusLayout->addWidget(checkStatusTitle);
+    checkStatusLayout->addWidget(lastCheckStatus);
+    updatesLayout->addWidget(checkStatusPanel);
+
     auto *serviceStatus = new QLabel(updatesPage);
     serviceStatus->setWordWrap(true);
     serviceStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto *updateButtons = new QHBoxLayout;
-    auto *applyUpdateSettings = new QPushButton(QStringLiteral("Install / Update User Service"), updatesPage);
     auto *checkNow = new QPushButton(QStringLiteral("Check Now"), updatesPage);
-    updateButtons->addWidget(applyUpdateSettings);
     updateButtons->addWidget(checkNow);
     updateButtons->addStretch();
     updatesLayout->addLayout(updateButtons);
     updatesLayout->addWidget(serviceStatus);
     updatesLayout->addStretch();
-    settingsTabs->addTab(updatesPage, QStringLiteral("Updates & Cleanup"));
+    settingsTabs->addTab(updatesPage, QStringLiteral("Updates"));
 
-    auto refreshServiceStatus = [&, this] {
-        QString statusError;
-        const auto installed = BackgroundUpdateManager::unitInstalled();
-        const auto enabled = installed && BackgroundUpdateManager::isEnabled(&statusError);
-        serviceStatus->setText(!installed
-            ? QStringLiteral("⚠ User service files are not installed. Run make install for the current user first.")
-            : enabled ? QStringLiteral("✓ pacsmith-update.timer is enabled for this user. Schedule: %1")
-                            .arg(BackgroundUpdateManager::calendar(aiSettings_.updates))
-                      : QStringLiteral("○ User timer is installed but disabled.%1")
-                            .arg(statusError.isEmpty() ? QString{} : QStringLiteral(" %1").arg(statusError)));
+    auto *cleanupPage = new QWidget(settingsTabs);
+    auto *cleanupLayout = new QVBoxLayout(cleanupPage);
+    auto *cleanupGroup = new QGroupBox(QStringLiteral("Cleanup"), cleanupPage);
+    auto *cleanupForm = new QFormLayout(cleanupGroup);
+    cleanupForm->addRow(settingsSectionHelp(
+        cleanupGroup,
+        QStringLiteral("Older artifacts and complete releases are removed after update checks."),
+        QStringLiteral("These counts apply to versions older than the currently installed PacSmith release. "
+                       "Rolling back moves that retention anchor.\n\n"
+                       "Complete-release retention cannot be lower than artifact retention. When automatic "
+                       "download is enabled, unbuilt intermediate updates between the installed or last-built "
+                       "version and the latest download are dropped entirely.")));
+    auto *retainedPackages = new QSpinBox(cleanupPage);
+    retainedPackages->setRange(-1, 50);
+    retainedPackages->setSpecialValueText(QStringLiteral("Unlimited"));
+    retainedPackages->setValue(aiSettings_.updates.retainedPackageVersions);
+    auto *retainedReleases = new QSpinBox(cleanupPage);
+    retainedReleases->setRange(-1, 50);
+    retainedReleases->setSpecialValueText(QStringLiteral("Unlimited"));
+    retainedReleases->setValue(aiSettings_.updates.retainedCompleteReleases);
+    cleanupForm->addRow(QStringLiteral("Old package artifacts"), retainedPackages);
+    cleanupForm->addRow(QStringLiteral("Old complete releases"), retainedReleases);
+    cleanupLayout->addWidget(cleanupGroup);
+    cleanupLayout->addStretch();
+    settingsTabs->addTab(cleanupPage, QStringLiteral("Cleanup"));
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    auto *saveButton = buttons->button(QDialogButtonBox::Save);
+    rootLayout->addWidget(buttons);
+
+    auto currentUpdateSettings = [&] {
+        BackgroundUpdateSettings settings = aiSettings_.updates;
+        settings.enabled = backgroundEnabled->isChecked();
+        settings.startAtLogin = startAtLogin->isChecked();
+        settings.startMinimized = startMinimized->isChecked();
+        settings.keepInTray = keepInTray->isChecked();
+        settings.daily = schedule->currentIndex() == 0;
+        settings.weekDay = weekday->currentIndex() + 1;
+        settings.localTime = checkTime->time();
+        settings.automaticallyPrepare = automaticPrepare->isChecked();
+        settings.retainedPackageVersions = retainedPackages->value();
+        settings.retainedCompleteReleases = retainedPackages->value() < 0 ||
+                                            retainedReleases->value() < 0
+            ? -1 : std::max(retainedReleases->value(), retainedPackages->value());
+        return settings;
     };
+    auto refreshScheduleControls = [&] {
+        const bool periodic = backgroundEnabled->isChecked();
+        schedule->setEnabled(periodic);
+        weekday->setEnabled(periodic && schedule->currentIndex() == 1);
+        checkTime->setEnabled(periodic);
+    };
+    auto refreshCheckStatus = [&] {
+        const auto state = BackgroundUpdateStateStore::load();
+        const auto pending = currentUpdateSettings();
+        QStringList lines;
+        if (state.checking) {
+            lines.append(QStringLiteral("Update check in progress…"));
+        } else if (!state.lastRun.isValid()) {
+            lines.append(QStringLiteral("Last check: never"));
+        } else {
+            lines.append(QStringLiteral("Last check: %1").arg(formatLocalDateTime(state.lastRun)));
+            if (!state.message.isEmpty()) lines.append(state.message);
+            if (pending.enabled && BackgroundUpdateManager::isOverdue(pending, state.lastRun)) {
+                lines.append(QStringLiteral("This check is overdue."));
+            }
+        }
+        if (pending.enabled) {
+            lines.append(QStringLiteral("Next scheduled check: %1")
+                             .arg(formatLocalDateTime(
+                                 BackgroundUpdateManager::nextScheduledOccurrence(pending))));
+        } else {
+            lines.append(QStringLiteral("Automatic checks are disabled."));
+        }
+        lastCheckStatus->setText(lines.join(QLatin1Char('\n')));
+    };
+    auto persistBackgroundSettings = [&, this](QString *error) {
+        aiSettings_.updates = currentUpdateSettings();
+        if (credentialSource->currentIndex() >= 0) {
+            const auto source = static_cast<CredentialSource>(credentialSource->currentIndex());
+            aiSettings_.credentialSources.insert(QStringLiteral("github"), source);
+            if (source == CredentialSource::Environment) {
+                aiSettings_.githubTokenConfigured = false;
+            } else if (!githubToken->text().isEmpty()) {
+                if (source == CredentialSource::Age && !credentialStore_.ageUnlocked() &&
+                    !unlockAgeCredentials()) {
+                    if (error != nullptr) *error = QStringLiteral("The age credential store is locked");
+                    return false;
+                }
+                if (!credentialStore_.store(QStringLiteral("github"), source,
+                                            githubToken->text(), {}, error)) {
+                    return false;
+                }
+                aiSettings_.githubTokenConfigured = true;
+            }
+        }
+        return settingsStore_.save(aiSettings_, error) &&
+               BackgroundUpdateManager::apply(aiSettings_.updates,
+                                              QCoreApplication::applicationFilePath(), error);
+    };
+    auto refreshSessionControls = [&] {
+        const bool trayOk = QSystemTrayIcon::isSystemTrayAvailable();
+        keepInTray->setEnabled(trayOk);
+        if (!trayOk) {
+            keepInTray->setChecked(false);
+            startMinimized->setChecked(false);
+        } else if (!keepInTray->isChecked()) {
+            startMinimized->setChecked(false);
+        }
+        startMinimized->setEnabled(trayOk && keepInTray->isChecked() &&
+                                   startAtLogin->isChecked());
+    };
+    connect(keepInTray, &QCheckBox::toggled, &dialog, [&](bool) { refreshSessionControls(); });
+    connect(startAtLogin, &QCheckBox::toggled, &dialog, [&](bool) { refreshSessionControls(); });
+    connect(startMinimized, &QCheckBox::toggled, &dialog, [&](const bool checked) {
+        if (checked) keepInTray->setChecked(true);
+        refreshSessionControls();
+    });
+    refreshSessionControls();
     connect(schedule, &QComboBox::currentIndexChanged, &dialog,
-            [weekday](const int index) { weekday->setEnabled(index == 1); });
-    const auto updateGitHubCredentialUi = [=](const int index) {
-        const bool environment = index == static_cast<int>(CredentialSource::Environment);
-        githubToken->setEnabled(!environment);
-        githubCredentialNotice->setText(
-            environment
-                ? QStringLiteral("Set PACSMITH_GITHUB_TOKEN before PacSmith starts. A token is optional for public repositories but raises GitHub API rate limits.")
-                : index == static_cast<int>(CredentialSource::Keyring)
-                    ? QStringLiteral("The optional PAT is stored only in PacSmith's desktop-keyring entry.")
-                    : QStringLiteral("The optional PAT is stored only in PacSmith's age-encrypted credential file."));
-    };
-    connect(githubCredentialSource, &QComboBox::currentIndexChanged, &dialog,
-            updateGitHubCredentialUi);
-    updateGitHubCredentialUi(githubCredentialSource->currentIndex());
+            [&](const int) {
+                refreshScheduleControls();
+                refreshCheckStatus();
+            });
+    connect(backgroundEnabled, &QCheckBox::toggled, &dialog, [&](bool) {
+        refreshScheduleControls();
+        refreshCheckStatus();
+    });
+    connect(weekday, &QComboBox::currentIndexChanged, &dialog, [&](int) { refreshCheckStatus(); });
+    connect(checkTime, &QTimeEdit::timeChanged, &dialog, [&](const QTime &) { refreshCheckStatus(); });
     connect(retainedPackages, &QSpinBox::valueChanged, &dialog, [retainedReleases](const int value) {
         if (value < 0) {
             retainedReleases->setValue(-1);
@@ -7171,46 +7649,20 @@ void MainWindow::showSettings() {
             retainedReleases->setValue(value);
         }
     });
-    connect(applyUpdateSettings, &QPushButton::clicked, &dialog, [&, this] {
-        aiSettings_.updates.enabled = backgroundEnabled->isChecked();
-        aiSettings_.updates.daily = schedule->currentIndex() == 0;
-        aiSettings_.updates.weekDay = weekday->currentIndex() + 1;
-        aiSettings_.updates.localTime = checkTime->time();
-        aiSettings_.updates.automaticallyPrepare = automaticPrepare->isChecked();
-        aiSettings_.updates.retainedPackageVersions = retainedPackages->value();
-        aiSettings_.updates.retainedCompleteReleases = retainedPackages->value() < 0 ||
-                                                       retainedReleases->value() < 0
-            ? -1 : std::max(retainedReleases->value(), retainedPackages->value());
-        aiSettings_.updates.trayMode = static_cast<TrayMode>(trayMode->currentData().toInt());
-        const auto githubSource = static_cast<CredentialSource>(githubCredentialSource->currentIndex());
-        aiSettings_.credentialSources.insert(QStringLiteral("github"), githubSource);
-        QString error;
-        if (githubSource != CredentialSource::Environment && !githubToken->text().isEmpty()) {
-            QString password;
-            if (githubSource == CredentialSource::Age) {
-                if (!credentialStore_.ageUnlocked() && !unlockAgeCredentials()) return;
-                password = agePassword_;
-            }
-            if (!credentialStore_.store(QStringLiteral("github"), githubSource,
-                                        githubToken->text(), password, &error)) {
-                serviceStatus->setText(QStringLiteral("⚠ Could not store GitHub token: %1").arg(error));
-                return;
-            }
+    connect(checkNow, &QPushButton::clicked, &dialog, [&] {
+        if (GuiInstanceServer::requestCheck()) {
+            serviceStatus->setText(QStringLiteral("✓ Update check started."));
+        } else {
+            serviceStatus->setText(QStringLiteral("⚠ Could not reach the running PacSmith session to start a check."));
         }
-        if (!settingsStore_.save(aiSettings_, &error) ||
-            !BackgroundUpdateManager::apply(aiSettings_.updates, &error)) {
-            serviceStatus->setText(QStringLiteral("⚠ %1").arg(error));
-            return;
-        }
-        refreshServiceStatus();
+        refreshCheckStatus();
     });
-    connect(checkNow, &QPushButton::clicked, &dialog, [=] {
-        QString error;
-        serviceStatus->setText(BackgroundUpdateManager::runNow(&error)
-            ? QStringLiteral("✓ Background update check started.")
-            : QStringLiteral("⚠ %1").arg(error));
-    });
-    refreshServiceStatus();
+    auto *checkStatusTimer = new QTimer(&dialog);
+    checkStatusTimer->setInterval(2000);
+    connect(checkStatusTimer, &QTimer::timeout, &dialog, refreshCheckStatus);
+    checkStatusTimer->start();
+    refreshScheduleControls();
+    refreshCheckStatus();
 
     QHash<int, QString> modelSelections;
     modelSelections.insert(provider->currentIndex(), aiSettings_.model);
@@ -7246,6 +7698,10 @@ void MainWindow::showSettings() {
         return QStringLiteral("✓ Signed in as %1").arg(identity);
     };
 
+    auto setCredentialStatus = [&](const QString &text) {
+        aiCredentialStatus->setText(text);
+    };
+
     AiReasoningEffort desiredReasoningEffort = aiSettings_.reasoningEffort;
     auto refreshReasoningEfforts = [&] {
         const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
@@ -7279,24 +7735,44 @@ void MainWindow::showSettings() {
         credentialSource->setEnabled(!operationRunning);
         apiKey->setVisible(api);
         if (auto *label = form->labelForField(apiKey); label != nullptr) label->setVisible(api);
-        environmentCredentialNotice->setVisible(false);
-        executionModeNotice->setVisible(false);
+        form->setRowVisible(secretsHint, !storageSelected);
+        form->setRowVisible(apiKey, api);
+        form->setRowVisible(chatGptSignIn, subscription);
+        form->setRowVisible(aiEnvironmentNotice, false);
+        secretsForm->setRowVisible(storeNotice, false);
+        secretsForm->setRowVisible(ageStoreAction, false);
+        githubForm->setRowVisible(githubLockNotice, false);
         ageStoreAction->setVisible(false);
         chatGptSignIn->setVisible(subscription);
+        secretsHint->setVisible(!storageSelected);
+
+        const auto aiHelpSummary = QStringLiteral("AI is optional. Local inspection always runs first.");
+        auto aiHelpDetails = QStringLiteral(
+            "PacSmith always performs local deterministic inspection first and sends only a bounded "
+            "package-evidence bundle. Package binaries and unrelated files are never sent.\n\n"
+            "Standard uses the provider's normal processing. Fast requests priority processing. "
+            "API providers may charge premium per-token rates. ChatGPT availability and usage "
+            "limits depend on the subscription.");
+        setSettingsSectionHelp(aiSectionHelp, aiHelpSummary, aiHelpDetails);
 
         if (!storageSelected) {
             apiKey->setEnabled(false);
             ageStoreAction->setEnabled(false);
             chatGptSignIn->setEnabled(false);
+            githubToken->setEnabled(false);
             model->setEnabled(false);
             loadModels->setEnabled(false);
             reasoningEffort->setEnabled(false);
             executionMode->setEnabled(false);
-            saveButton->setEnabled(false);
-            credentialStatus->setText(
-                QStringLiteral("1. Choose a credential source first. Provider and model selection remain locked until you do."));
-            credentialExplanation->setText(
-                QStringLiteral("Credentials are configured before a provider so PacSmith knows where that provider's login or API key may be stored."));
+            automatic->setEnabled(false);
+            saveButton->setEnabled(!operationRunning);
+            secretsHint->setText(
+                QStringLiteral("Choose how PacSmith stores secrets on the General tab before enabling AI."));
+            githubLockNotice->setText(
+                QStringLiteral("Choose a secret store above first."));
+            githubForm->setRowVisible(githubLockNotice, true);
+            setCredentialStatus(
+                QStringLiteral("Choose a secret store on the General tab before enabling AI."));
             return;
         }
 
@@ -7316,10 +7792,15 @@ void MainWindow::showSettings() {
         provider->setEnabled(storagePrepared && !operationRunning);
         if (source == CredentialSource::Age && !credentialStore_.ageUnlocked()) {
             ageStoreAction->setVisible(true);
+            secretsForm->setRowVisible(ageStoreAction, true);
             ageStoreAction->setText(
                 credentialStore_.hasAgeFile() ? QStringLiteral("Unlock Credential Store…")
                                               : QStringLiteral("Create Encrypted Store…"));
             ageStoreAction->setEnabled(storageAvailable && !operationRunning);
+        }
+        if (!storageAvailable) {
+            storeNotice->setText(QStringLiteral("⚠ Credential storage unavailable: %1").arg(storageError));
+            secretsForm->setRowVisible(storeNotice, true);
         }
 
         if (subscription) loadChatGptSession();
@@ -7334,7 +7815,17 @@ void MainWindow::showSettings() {
                 apiCredentialAvailable = stored.has_value();
             }
         }
-        if (api && source == CredentialSource::Environment) {
+        const auto githubEnvironment = source == CredentialSource::Environment;
+        githubToken->setEnabled(!githubEnvironment && storagePrepared && !operationRunning);
+        githubToken->setPlaceholderText(
+            githubEnvironment
+                ? QStringLiteral("Read from PACSMITH_GITHUB_TOKEN when PacSmith starts; value is never displayed")
+                : QStringLiteral("Optional; leave blank to keep a saved token"));
+        if (!storagePrepared) {
+            githubLockNotice->setText(QStringLiteral("Unlock or create the secret store first."));
+            githubForm->setRowVisible(githubLockNotice, true);
+        }
+        if (source == CredentialSource::Environment && api) {
             const auto variable = kind == AiProviderKind::Xai ? QStringLiteral("XAI_API_KEY")
                                                                : QStringLiteral("OPENAI_API_KEY");
             apiKey->setPlaceholderText(
@@ -7344,17 +7835,13 @@ void MainWindow::showSettings() {
                 QStringLiteral("This is a read-only process credential. Set %1 before launching "
                                "pacsmith-gui. PacSmith intentionally does not reveal its value.")
                     .arg(variable));
-            environmentCredentialNotice->setVisible(true);
-            environmentCredentialNotice->setText(
+            aiEnvironmentNotice->setVisible(true);
+            form->setRowVisible(aiEnvironmentNotice, true);
+            aiEnvironmentNotice->setText(
                 apiCredentialAvailable
-                    ? QStringLiteral("\u2713 %1 is available in PacSmith's process environment. Its "
-                                     "value is intentionally hidden and cannot be edited here.")
+                    ? QStringLiteral("\u2713 %1 is available in PacSmith's process environment.")
                           .arg(variable)
-                    : QStringLiteral("\u26a0 %1 was not found in PacSmith's process environment. "
-                                     "Set it in the environment that starts PacSmith, then restart "
-                                     "PacSmith. PacSmith cannot see variables added after it starts, "
-                                     "and desktop launches usually do not inherit variables set in "
-                                     "a terminal.")
+                    : QStringLiteral("\u26a0 %1 was not found in PacSmith's process environment.")
                           .arg(variable));
         } else {
             apiKey->setPlaceholderText(QStringLiteral("Leave blank to keep an existing stored key"));
@@ -7368,19 +7855,12 @@ void MainWindow::showSettings() {
 
         apiKey->setEnabled(api && source != CredentialSource::Environment && storagePrepared &&
                            !operationRunning);
+        automatic->setEnabled(storagePrepared && !operationRunning);
         model->setEnabled(kind != AiProviderKind::None && credentialReady && !operationRunning);
         loadModels->setEnabled((api || subscription) && credentialReady && !operationRunning);
         reasoningEffort->setEnabled(modelReady && reasoningEffort->count() > 1 &&
                                     !operationRunning);
         executionMode->setEnabled(modelReady && !operationRunning);
-        const bool fast = static_cast<AiExecutionMode>(executionMode->currentData().toInt()) ==
-                          AiExecutionMode::Fast;
-        executionModeNotice->setVisible(fast && kind != AiProviderKind::None);
-        if (fast) {
-            executionModeNotice->setText(
-                api ? QStringLiteral("⚠ Fast uses priority processing and may be billed by the API provider at premium per-token rates.")
-                    : QStringLiteral("⚠ Fast requests priority processing; availability and usage limits depend on the ChatGPT subscription."));
-        }
         saveButton->setEnabled(
             !operationRunning && storagePrepared &&
             (kind == AiProviderKind::None ||
@@ -7390,48 +7870,57 @@ void MainWindow::showSettings() {
         chatGptSignIn->setEnabled(subscription && sourceCompatible && storagePrepared &&
                                   !operationRunning);
 
-        credentialExplanation->setText(
-            subscription
-                ? QStringLiteral("PacSmith opens OpenAI's browser sign-in and never receives your password. "
-                                 "The OAuth session is stored only in PacSmith's selected credential store; "
-                                 "PacSmith does not read Codex, OpenClaw, or any other application's files.")
-                : api
-                    ? QStringLiteral("Enter or provide the selected API provider's credential before model selection is unlocked.")
-                    : QStringLiteral("AI integration is disabled."));
+        if (subscription) {
+            aiHelpDetails += QStringLiteral(
+                "\n\nPacSmith opens OpenAI's browser sign-in and never receives your password. "
+                "The OAuth session is stored only in PacSmith's selected credential store; "
+                "PacSmith does not read Codex, OpenClaw, or any other application's files.");
+        } else if (api) {
+            aiHelpDetails += QStringLiteral(
+                "\n\nEnter or provide the selected API provider's credential before model selection is unlocked.");
+            if (source == CredentialSource::Environment) {
+                const auto variable = kind == AiProviderKind::Xai ? QStringLiteral("XAI_API_KEY")
+                                                                   : QStringLiteral("OPENAI_API_KEY");
+                aiHelpDetails += QStringLiteral(
+                    "\n\n%1 is read from the process environment when PacSmith starts. "
+                    "Desktop launches usually do not inherit variables set in a terminal.")
+                                    .arg(variable);
+            }
+        }
+        setSettingsSectionHelp(aiSectionHelp, aiHelpSummary, aiHelpDetails);
 
         if (!storageAvailable) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("⚠ Credential storage unavailable: %1").arg(storageError));
         } else if (!storagePrepared) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 credentialStore_.hasAgeFile()
-                    ? QStringLiteral("2. Unlock PacSmith's encrypted credential store before choosing a provider.")
-                    : QStringLiteral("2. Create PacSmith's encrypted credential store and set its password before choosing a provider."));
+                    ? QStringLiteral("Unlock PacSmith's encrypted credential store on the General tab before entering secrets.")
+                    : QStringLiteral("Create PacSmith's encrypted credential store on the General tab before entering secrets."));
         } else if (kind == AiProviderKind::None) {
-            credentialStatus->setText(
-                QStringLiteral("2. Choose an AI provider, or save with AI disabled."));
+            setCredentialStatus(QStringLiteral("Secret store is ready. Choose an AI provider or save."));
         } else if (!sourceCompatible) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("⚠ ChatGPT browser login cannot use environment-variable storage. Choose Desktop keyring or Age-encrypted file."));
         } else if (credentialReady && subscription) {
-            credentialStatus->setText(chatGptIdentity() +
+            setCredentialStatus(chatGptIdentity() +
                                       QStringLiteral(". Model selection is unlocked."));
         } else if (credentialReady) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("✓ Provider credential is available. Model selection is unlocked."));
         } else if (subscription) {
-            credentialStatus->setText(
-                QStringLiteral("3. Sign in with ChatGPT before selecting a model."));
+            setCredentialStatus(
+                QStringLiteral("Sign in with ChatGPT before selecting a model."));
         } else if (source == CredentialSource::Environment) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("Waiting for %1 before model selection can be unlocked.")
                     .arg(kind == AiProviderKind::Xai ? QStringLiteral("XAI_API_KEY")
                                                      : QStringLiteral("OPENAI_API_KEY")));
         } else {
-            credentialStatus->setText(
+            setCredentialStatus(
                 apiCredentialError.isEmpty()
-                    ? QStringLiteral("3. Enter an API key before selecting a model.")
-                    : QStringLiteral("3. Enter an API key before selecting a model. %1")
+                    ? QStringLiteral("Enter an API key before selecting a model.")
+                    : QStringLiteral("Enter an API key before selecting a model. %1")
                           .arg(apiCredentialError));
         }
     };
@@ -7465,15 +7954,15 @@ void MainWindow::showSettings() {
         updateControls();
         const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
         if (chatGptSession) {
-            credentialStatus->setText(chatGptIdentity() + QStringLiteral(". Model selection is unlocked."));
+            setCredentialStatus(chatGptIdentity() + QStringLiteral(". Model selection is unlocked."));
         } else if (kind == AiProviderKind::ChatGpt) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("✓ Encrypted credential store is ready. Sign in with ChatGPT next."));
         } else if (kind == AiProviderKind::OpenAi || kind == AiProviderKind::Xai) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("✓ Encrypted credential store is ready. Enter the API key next."));
         } else {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("✓ Encrypted credential store is ready. Choose an AI provider next."));
         }
     });
@@ -7491,7 +7980,7 @@ void MainWindow::showSettings() {
             }
             QString error;
             if (!credentialStore_.remove(QStringLiteral("chatgpt"), source,
-                                         source == CredentialSource::Age ? agePassword_ : QString{},
+                                         QString{},
                                          &error)) {
                 QMessageBox::critical(&dialog, QStringLiteral("Could not sign out"), error);
                 return;
@@ -7504,7 +7993,7 @@ void MainWindow::showSettings() {
 
         const auto source = selectedCredentialSource();
         if (source == CredentialSource::Environment) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("ChatGPT sessions must be stored in PacSmith's keyring or age file"));
             return;
         }
@@ -7513,48 +8002,48 @@ void MainWindow::showSettings() {
             loadChatGptSession();
             updateControls();
             if (chatGptSession) {
-                credentialStatus->setText(
+                setCredentialStatus(
                     chatGptIdentity() + QStringLiteral(". Loading available models…"));
                 aiModelCatalogService_.fetch(AiProviderKind::ChatGpt, chatGptSerialized);
                 return;
             }
         }
-        credentialStatus->setText(QStringLiteral("Starting secure ChatGPT browser sign-in…"));
+        setCredentialStatus(QStringLiteral("Starting secure ChatGPT browser sign-in…"));
         chatGptSignIn->setEnabled(false);
         chatGptLoginService_.start();
     });
     connect(&chatGptLoginService_, &ChatGptLoginService::authorizationUrlReady, &dialog,
             [&, this](const QUrl &url) {
         if (!QDesktopServices::openUrl(url)) {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("Open this OpenAI sign-in URL in your browser: %1").arg(url.toString()));
-            credentialStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            aiCredentialStatus->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse);
         }
     });
     connect(&chatGptLoginService_, &ChatGptLoginService::progressChanged, &dialog,
             [&](const QString &message) {
         updateControls();
-        credentialStatus->setText(message);
+        setCredentialStatus(message);
     });
     connect(&chatGptLoginService_, &ChatGptLoginService::failed, &dialog,
             [&, this](const QString &message) {
         updateControls();
-        credentialStatus->setText(QStringLiteral("⚠ %1").arg(message));
+        setCredentialStatus(QStringLiteral("⚠ %1").arg(message));
     });
     connect(&chatGptLoginService_, &ChatGptLoginService::succeeded, &dialog,
             [&, this](const QString &serialized) {
         const auto source = selectedCredentialSource();
         QString error;
         if (!credentialStore_.store(QStringLiteral("chatgpt"), source, serialized,
-                                    source == CredentialSource::Age ? agePassword_ : QString{}, &error)) {
-            credentialStatus->setText(
+                                    QString{}, &error)) {
+            setCredentialStatus(
                 QStringLiteral("⚠ Signed in, but PacSmith could not save the session: %1").arg(error));
             return;
         }
         chatGptSerialized = serialized;
         chatGptSession = ChatGptCredentials::fromSerialized(serialized, &error);
         if (!chatGptSession) {
-            credentialStatus->setText(QStringLiteral("⚠ %1").arg(error));
+            setCredentialStatus(QStringLiteral("⚠ %1").arg(error));
             return;
         }
         updateControls();
@@ -7578,7 +8067,7 @@ void MainWindow::showSettings() {
             QString error;
             const auto existing = credentialStore_.load(name, source, &error);
             if (!existing) {
-                credentialStatus->setText(QStringLiteral("⚠ %1").arg(error));
+                setCredentialStatus(QStringLiteral("⚠ %1").arg(error));
                 return;
             }
             credential = *existing;
@@ -7589,18 +8078,18 @@ void MainWindow::showSettings() {
     connect(&aiModelCatalogService_, &AiModelCatalogService::progressChanged, &dialog,
             [&](const QString &message) {
                 updateControls();
-                credentialStatus->setText(message);
+                setCredentialStatus(message);
             });
     connect(&aiModelCatalogService_, &AiModelCatalogService::credentialUpdated, &dialog,
             [&, this](const QString &serialized) {
         const auto source = selectedCredentialSource();
         QString error;
         if (credentialStore_.store(QStringLiteral("chatgpt"), source, serialized,
-                                   source == CredentialSource::Age ? agePassword_ : QString{}, &error)) {
+                                   QString{}, &error)) {
             chatGptSerialized = serialized;
             chatGptSession = ChatGptCredentials::fromSerialized(serialized);
         } else {
-            credentialStatus->setText(
+            setCredentialStatus(
                 QStringLiteral("⚠ Could not save the refreshed ChatGPT session: %1").arg(error));
         }
     });
@@ -7617,7 +8106,7 @@ void MainWindow::showSettings() {
                     model->setCurrentIndex(0);
                 }
                 updateControls();
-                credentialStatus->setText(
+                setCredentialStatus(
                     QStringLiteral("✓ Loaded %1 model(s) directly from %2")
                         .arg(models.size()).arg(aiProviderName(
                             static_cast<AiProviderKind>(provider->currentIndex()))));
@@ -7625,7 +8114,7 @@ void MainWindow::showSettings() {
     connect(&aiModelCatalogService_, &AiModelCatalogService::failed, &dialog,
             [&](const QString &message) {
                 updateControls();
-                credentialStatus->setText(QStringLiteral("⚠ %1").arg(message));
+                setCredentialStatus(QStringLiteral("⚠ %1").arg(message));
             });
     connect(&dialog, &QDialog::finished, &aiModelCatalogService_, &AiModelCatalogService::cancel);
     connect(&dialog, &QDialog::finished, &chatGptLoginService_, &ChatGptLoginService::cancel);
@@ -7636,20 +8125,37 @@ void MainWindow::showSettings() {
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
         const auto name = aiProviderName(kind);
+        if (credentialSource->currentIndex() < 0) {
+            aiSettings_.provider = AiProviderKind::None;
+            aiSettings_.model.clear();
+            aiSettings_.reasoningEffort = AiReasoningEffort::ProviderDefault;
+            aiSettings_.executionMode = AiExecutionMode::Standard;
+            aiSettings_.automaticallyResolveReviewItems = automatic->isChecked();
+            QString error;
+            if (!persistBackgroundSettings(&error)) {
+                QMessageBox::critical(&dialog, QStringLiteral("Could not save settings"), error);
+                return;
+            }
+            const bool runInTray = aiSettings_.updates.keepInTray &&
+                                   QSystemTrayIcon::isSystemTrayAvailable();
+            setKeepRunningInTray(runInTray);
+            QApplication::setQuitOnLastWindowClosed(!runInTray);
+            static_cast<void>(GuiInstanceServer::requestTray());
+            dialog.accept();
+            return;
+        }
         const auto source = static_cast<CredentialSource>(credentialSource->currentIndex());
         if ((kind == AiProviderKind::OpenAi || kind == AiProviderKind::Xai) &&
             source != CredentialSource::Environment && !apiKey->text().isEmpty()) {
-            QString password;
-            if (source == CredentialSource::Age) {
-                if (!credentialStore_.ageUnlocked() && !unlockAgeCredentials()) return;
-                password = agePassword_;
+            if (source == CredentialSource::Age && !credentialStore_.ageUnlocked() &&
+                !unlockAgeCredentials()) {
+                return;
             }
             QString error;
-            if (!credentialStore_.store(name, source, apiKey->text(), password, &error)) {
+            if (!credentialStore_.store(name, source, apiKey->text(), {}, &error)) {
                 QMessageBox::critical(&dialog, QStringLiteral("Could not store API key"), error);
                 return;
             }
-            if (source == CredentialSource::Age) agePassword_ = password;
         }
         if (kind == AiProviderKind::ChatGpt && !chatGptSession) {
             QMessageBox::warning(&dialog, QStringLiteral("ChatGPT sign-in required"),
@@ -7672,10 +8178,15 @@ void MainWindow::showSettings() {
             aiSettings_.credentialSources.insert(name, source);
         }
         QString error;
-        if (!settingsStore_.save(aiSettings_, &error)) {
+        if (!persistBackgroundSettings(&error)) {
             QMessageBox::critical(&dialog, QStringLiteral("Could not save settings"), error);
             return;
         }
+        const bool runInTray = aiSettings_.updates.keepInTray &&
+                               QSystemTrayIcon::isSystemTrayAvailable();
+        setKeepRunningInTray(runInTray);
+        QApplication::setQuitOnLastWindowClosed(!runInTray);
+        static_cast<void>(GuiInstanceServer::requestTray());
         dialog.accept();
     });
     dialog.exec();
@@ -8243,49 +8754,6 @@ void MainWindow::applyRetentionCleanup() {
     refreshCurrentProject();
 }
 
-void MainWindow::runOverdueBackgroundUpdateCheck() {
-    if (!aiSettings_.updates.enabled || backgroundCheckProcess_ != nullptr) return;
-    const auto state = BackgroundUpdateStateStore::load();
-    if (state.checking || !BackgroundUpdateManager::isOverdue(aiSettings_.updates, state.lastRun)) {
-        return;
-    }
-    auto program = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith"));
-    if (!QFileInfo::exists(program)) program = QStandardPaths::findExecutable(QStringLiteral("pacsmith"));
-    if (program.isEmpty()) {
-        QString error;
-        if (!BackgroundUpdateManager::runNow(&error) && !error.isEmpty()) {
-            statusBar()->showMessage(error, 8000);
-        }
-        return;
-    }
-    backgroundCheckProcess_ = new QProcess(this);
-    backgroundCheckProcess_->setProgram(program);
-    backgroundCheckProcess_->setArguments({QStringLiteral("check"), QStringLiteral("--all")});
-    connect(backgroundCheckProcess_, &QProcess::finished, this, [this] {
-        if (backgroundCheckProcess_ != nullptr) {
-            backgroundCheckProcess_->deleteLater();
-            backgroundCheckProcess_ = nullptr;
-        }
-        const auto projectId = project_ ? project_->id : QString{};
-        refreshProjectList(projectId);
-        if (!projectId.isEmpty() && (!project_ || project_->id != projectId)) loadProject(projectId);
-        if (project_) refreshCurrentProject();
-        const auto finished = BackgroundUpdateStateStore::load();
-        statusBar()->showMessage(finished.message.isEmpty()
-                                     ? QStringLiteral("Update check finished")
-                                     : finished.message,
-                                 8000);
-    });
-    backgroundCheckProcess_->start();
-    if (!backgroundCheckProcess_->waitForStarted(3000)) {
-        backgroundCheckProcess_->deleteLater();
-        backgroundCheckProcess_ = nullptr;
-        statusBar()->showMessage(QStringLiteral("Could not start an overdue update check"), 8000);
-        return;
-    }
-    statusBar()->showMessage(QStringLiteral("Running overdue update check…"), 8000);
-}
-
 void MainWindow::startUpdateCheck() {
     if (!project_ || aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
         githubUpdateService_.isRunning() ||
@@ -8298,6 +8766,12 @@ void MainWindow::startUpdateCheck() {
         strategy != UpdateStrategy::GitHubRelease) {
         QMessageBox::information(this, QStringLiteral("Update check"),
                                  QStringLiteral("Select an APT repository, RPM repository, or GitHub releases to run an automatic metadata check."));
+        return;
+    }
+    const auto backgroundState = BackgroundUpdateStateStore::load();
+    if (backgroundState.checking && !aptUpdateService_.isRunning() &&
+        !rpmUpdateService_.isRunning() && !githubUpdateService_.isRunning()) {
+        statusBar()->showMessage(QStringLiteral("An update check is already running"), 6000);
         return;
     }
     updateCheckButton_->setEnabled(false);
@@ -8329,6 +8803,9 @@ void MainWindow::startUpdateCheck() {
         githubUpdateService_.start(*tracker, token);
         token.fill(QChar::Null);
     }
+    const auto projectName = project_->displayName.isEmpty() ? project_->archPackageName
+                                                             : project_->displayName;
+    publishUpdateCheckActivity(true, project_->id, projectName);
     updateDeleteButton();
 }
 
@@ -8336,6 +8813,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
                                         const QString &sourceName) {
     projectList_->setEnabled(true);
     updateDeleteButton();
+    publishUpdateCheckActivity(false, project_ ? project_->id : QString{});
     if (!project_) return;
     const auto checkedReleaseId = updateCheckReleaseId_;
     const bool remainInWorkbench = updateCheckFromWorkbench_;
@@ -8707,12 +9185,14 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
     preparationBytesReceived_ = 0;
     preparationBytesTotal_ = -1;
     preparationSpinnerFrame_ = 0;
+    lastPreparationPublish_.invalidate();
     const auto target = defaultDownloadPath(project_->id, release->id, release->originalSourceFilename);
     pendingImportOptions_ = {};
     pendingImportOptions_.version = release->debian.version;
     pendingImportOptions_.acquisition = release->acquisition;
     pendingImportOptions_.githubAssetRegex = release->update.githubAssetRegex;
     pendingImportOptions_.githubIncludePrereleases = release->update.githubIncludePrereleases;
+    pendingImportOptions_.existingProjectId = project_->id;
 
     downloadProgress_ = new QProgressDialog(
         QStringLiteral("Downloading vendor artifact…\nYou may hide this window; the download will continue."),
@@ -8727,7 +9207,9 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
     downloadProgress_->show();
     preparationSpinnerTimer_->start();
     populateOverview();
+    publishPreparationActivity();
     updatePreparationIndicators();
+    updateUpdateCheckIndicators();
     debDownloadService_.start(QUrl(release->sourceUrl), release->sourceSha256,
                               std::filesystem::path(target.toUtf8().constData()));
 }

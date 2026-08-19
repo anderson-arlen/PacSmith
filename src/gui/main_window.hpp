@@ -14,6 +14,7 @@
 #include "core/rpm_update_service.hpp"
 
 #include <QHash>
+#include <QElapsedTimer>
 #include <QMainWindow>
 
 #include <optional>
@@ -33,7 +34,6 @@ class QNetworkAccessManager;
 class QNetworkReply;
 class QPlainTextEdit;
 class QProgressDialog;
-class QProcess;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
@@ -52,9 +52,13 @@ class CommandProgressDialog;
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    MainWindow(AppSettingsStore &settingsStore, CredentialStore &credentials,
+               QWidget *parent = nullptr);
     void importPackage(const QString &path);
     void activateExistingSession(const QString &importPath = {});
+    void setKeepRunningInTray(bool enabled);
+    void reloadVisibleProjects();
+    void noteBackgroundCheckStarted();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -210,7 +214,6 @@ private:
     void startUpdateCheck();
     void applyUpdateCheckResult(const UpdateCheckResult &result, const QString &sourceName);
     void applyRetentionCleanup();
-    void runOverdueBackgroundUpdateCheck();
     void startBuild();
     void startInstall();
     void startUninstall();
@@ -224,6 +227,17 @@ private:
     void beginReleasePreparation(const QString &releaseId, bool askForConfirmation);
     void selectDashboardRelease(const QString &releaseId);
     void updatePreparationIndicators();
+    void updateUpdateCheckIndicators();
+    void syncActivityTimer();
+    [[nodiscard]] bool updateCheckInProgress() const;
+    [[nodiscard]] bool listActivityInProgress() const;
+    [[nodiscard]] bool canShowUpdateCheckStatus() const;
+    void publishUpdateCheckActivity(bool running, const QString &projectId = {},
+                                    const QString &projectName = {});
+    void publishPreparationActivity();
+    void clearPublishedPreparationActivity(const QString &projectId);
+    void startListDownloadActivity(const QString &projectId, const QString &releaseId = {});
+    [[nodiscard]] QString displayNameForProject(const QString &projectId) const;
     void resetPreparationState();
     void beginGitHubImport(const QUrl &url);
     void continueGitHubImport(const QString &owner, const QString &repository,
@@ -251,9 +265,9 @@ private:
     [[nodiscard]] PackageRelease *updateEditorRelease();
 
     ProjectStore store_;
-    AppSettingsStore settingsStore_;
+    AppSettingsStore &settingsStore_;
     AiSettings aiSettings_;
-    CredentialStore credentialStore_;
+    CredentialStore &credentialStore_;
     std::optional<Project> project_;
     QHash<QString, Project> projectCache_;
     QString currentReleaseId_;
@@ -269,10 +283,9 @@ private:
     AiAnalysisService aiService_;
     AiModelCatalogService aiModelCatalogService_;
     ChatGptLoginService chatGptLoginService_;
-    QString agePassword_;
+    bool keepRunningInTray_{false};
     bool populating_{false};
     QThread *importThread_{nullptr};
-    QProcess *backgroundCheckProcess_{nullptr};
     QProgressDialog *importProgress_{nullptr};
     QProgressDialog *downloadProgress_{nullptr};
     QProgressDialog *signingKeyProgress_{nullptr};
@@ -285,6 +298,8 @@ private:
     qint64 preparationBytesReceived_{0};
     qint64 preparationBytesTotal_{-1};
     int preparationSpinnerFrame_{0};
+    bool updateCheckStatusActive_{false};
+    QElapsedTimer lastPreparationPublish_;
     AiProgressDialog *aiProgress_{nullptr};
     CommandProgressDialog *commandProgress_{nullptr};
     bool aiProgressCanceled_{false};

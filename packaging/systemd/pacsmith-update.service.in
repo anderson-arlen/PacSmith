@@ -1,6 +1,0 @@
-[Unit]
-Description=Check PacSmith projects for upstream updates
-
-[Service]
-Type=oneshot
-ExecStart="@CMAKE_INSTALL_FULL_BINDIR@/pacsmith" check --all

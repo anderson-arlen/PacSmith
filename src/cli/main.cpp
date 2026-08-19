@@ -19,6 +19,7 @@
 #include "core/update_source.hpp"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QEventLoop>
@@ -71,6 +72,53 @@ std::optional<pacsmith::Project> requireProject(const pacsmith::ProjectStore &st
     auto project = store.load(name, &error);
     if (!project) errorStream << "error: " << error << '\n';
     return project;
+}
+
+QString projectActivityName(const pacsmith::Project &project) {
+    return project.displayName.isEmpty() ? project.archPackageName : project.displayName;
+}
+
+QString downloadStatusMessage(const QString &name, const QString &phase, const qint64 received,
+                              const qint64 total) {
+    if (!phase.isEmpty() && phase != QStringLiteral("Downloading")) {
+        return QStringLiteral("Preparing %1: %2").arg(name, phase);
+    }
+    if (total > 0) {
+        return QStringLiteral("Downloading %1 update… %2 / %3 MiB")
+            .arg(name)
+            .arg(received / (1024 * 1024))
+            .arg(total / (1024 * 1024));
+    }
+    if (received > 0) {
+        return QStringLiteral("Downloading %1 update… %2 MiB")
+            .arg(name)
+            .arg(received / (1024 * 1024));
+    }
+    return QStringLiteral("Downloading %1 update…").arg(name);
+}
+
+void savePreparation(pacsmith::BackgroundUpdateState *state, const QString &projectId,
+                     const QString &projectName, const QString &phase, const qint64 received,
+                     const qint64 total) {
+    if (state == nullptr) return;
+    state->preparingProjectId = projectId;
+    state->preparingProjectName = projectName;
+    state->preparationPhase = phase;
+    state->preparationBytesReceived = received;
+    state->preparationBytesTotal = total;
+    state->message = downloadStatusMessage(projectName, phase, received, total);
+    static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(*state));
+}
+
+void clearPreparation(pacsmith::BackgroundUpdateState *state) {
+    if (state == nullptr) return;
+    if (state->preparingProjectId.isEmpty() && state->preparingProjectName.isEmpty()) return;
+    state->preparingProjectId.clear();
+    state->preparingProjectName.clear();
+    state->preparationPhase.clear();
+    state->preparationBytesReceived = 0;
+    state->preparationBytesTotal = -1;
+    static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(*state));
 }
 
 QString scriptFriendly(const QString &value) {
@@ -488,10 +536,8 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
         const auto settings = settingsStore.load();
         const auto source = settings.credentialSources.value(
             QStringLiteral("github"), pacsmith::CredentialSource::Environment);
-        if (source != pacsmith::CredentialSource::Age) {
-            pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
-            token = credentials.load(QStringLiteral("github"), source, nullptr).value_or(QString{});
-        }
+        pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
+        token = credentials.load(QStringLiteral("github"), source, nullptr).value_or(QString{});
         QObject::connect(&service, &pacsmith::GitHubUpdateService::progressChanged,
                          [&errorStream](const QString &message) { errorStream << message << '\n'; });
         QObject::connect(&service, &pacsmith::GitHubUpdateService::finished,
@@ -546,10 +592,37 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
         !discoveredId.isEmpty()) {
         const auto *discovered = project.release(discoveredId);
         if (discovered != nullptr) {
+            pacsmith::BackgroundUpdateState ownedActivity;
+            pacsmith::BackgroundUpdateState *activity = backgroundState;
+            if (activity == nullptr) {
+                ownedActivity = pacsmith::BackgroundUpdateStateStore::load();
+                activity = &ownedActivity;
+            }
+            const auto projectName = projectActivityName(project);
+            savePreparation(activity, project.id, projectName, QStringLiteral("Downloading"), 0, -1);
             pacsmith::DebDownloadService downloader;
             QString downloadedPath;
             QString downloadError;
             QEventLoop downloadLoop;
+            QElapsedTimer lastSave;
+            lastSave.start();
+            QObject::connect(&downloader, &pacsmith::DebDownloadService::progress,
+                             [activity, &lastSave, projectId = project.id, projectName](
+                                 const qint64 received, const qint64 total) {
+                                 activity->preparingProjectId = projectId;
+                                 activity->preparingProjectName = projectName;
+                                 activity->preparationPhase = QStringLiteral("Downloading");
+                                 activity->preparationBytesReceived = received;
+                                 activity->preparationBytesTotal = total;
+                                 activity->message =
+                                     downloadStatusMessage(projectName, QStringLiteral("Downloading"),
+                                                           received, total);
+                                 if (lastSave.elapsed() >= 150) {
+                                     static_cast<void>(
+                                         pacsmith::BackgroundUpdateStateStore::save(*activity));
+                                     lastSave.restart();
+                                 }
+                             });
             QObject::connect(&downloader, &pacsmith::DebDownloadService::finished,
                              [&downloadedPath, &downloadLoop](const QString &path) {
                                  downloadedPath = path;
@@ -567,6 +640,8 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
                                      .toUtf8().constData()));
             if (downloader.isRunning()) downloadLoop.exec();
             if (!downloadedPath.isEmpty()) {
+                savePreparation(activity, project.id, projectName, QStringLiteral("Inspecting"),
+                                0, -1);
                 QString importError;
                 pacsmith::ImportOptions importOptions;
                 importOptions.version = discovered->debian.version;
@@ -574,6 +649,7 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
                 importOptions.githubAssetRegex = discovered->update.githubAssetRegex;
                 importOptions.githubIncludePrereleases =
                     discovered->update.githubIncludePrereleases;
+                importOptions.existingProjectId = project.id;
                 const auto imported = store.importSource(
                     std::filesystem::path(downloadedPath.toUtf8().constData()), importOptions,
                     &importError);
@@ -590,6 +666,7 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
             } else if (!downloadError.isEmpty()) {
                 errorStream << "warning: automatic download failed: " << downloadError << '\n';
             }
+            clearPreparation(activity);
         }
     }
     if (auto reloaded = store.load(project.id, nullptr)) project = std::move(*reloaded);
@@ -805,12 +882,12 @@ int main(int argc, char *argv[]) {
             const auto settings = settingsStore.load();
             const auto source = settings.credentialSources.value(
                 QStringLiteral("github"), pacsmith::CredentialSource::Environment);
-            if (source == pacsmith::CredentialSource::Age) {
-                errorStream << "error: an age-stored GitHub PAT cannot be unlocked by non-interactive add; use the GUI or environment source\n";
-                return 1;
-            }
             pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
             auto token = credentials.load(QStringLiteral("github"), source, nullptr).value_or(QString{});
+            if (token.isEmpty() && source == pacsmith::CredentialSource::Age) {
+                errorStream << "error: an age-stored GitHub PAT cannot be unlocked by non-interactive add; use the GUI or PACSMITH_GITHUB_TOKEN\n";
+                return 1;
+            }
             pacsmith::GitHubUpdateService githubService;
             pacsmith::UpdateCheckResult githubResult;
             QEventLoop githubLoop;
@@ -991,9 +1068,21 @@ int main(int argc, char *argv[]) {
         static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
         int exitCode = 0;
         for (auto project : store.list()) {
+            state.checkingProjectId = project.id;
+            state.checkingProjectName = project.displayName.isEmpty() ? project.archPackageName
+                                                                      : project.displayName;
+            state.message = QStringLiteral("Checking %1 for updates").arg(state.checkingProjectName);
+            static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
             exitCode = std::max(exitCode, runCheck(store, project, out, errorStream, &state));
         }
         state.checking = false;
+        state.checkingProjectId.clear();
+        state.checkingProjectName.clear();
+        state.preparingProjectId.clear();
+        state.preparingProjectName.clear();
+        state.preparationPhase.clear();
+        state.preparationBytesReceived = 0;
+        state.preparationBytesTotal = -1;
         state.lastRun = QDateTime::currentDateTimeUtc();
         state.message = state.availableUpdates > 0
             ? QStringLiteral("%1 update(s) available").arg(state.availableUpdates)

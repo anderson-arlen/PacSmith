@@ -72,6 +72,8 @@ private slots:
     void serializesProjectsAndOverrides();
     void persistsAiSettingsOutsideProjectData();
     void persistsBackgroundUpdateSettings();
+    void writesLoginAutostartDesktopEntry();
+    void roundTripsBackgroundUpdateCheckActivity();
     void buildsSystemdCalendarSchedules();
     void reportsOverdueBackgroundUpdateChecks();
     void persistsMultipleReleases();
@@ -80,6 +82,7 @@ private slots:
     void dropsUnbuiltIntermediateUpdates();
     void recordsUninspectedGitHubDiscoveries();
     void carriesInstallMappingAcrossGitHubVersions();
+    void attachesPreparedGitHubDebToExistingProject();
     void preservesRepositoryFirstImportConfiguration();
     void parsesAiModelCatalog();
     void parsesChatGptCredentialsAndCatalog();
@@ -88,6 +91,7 @@ private slots:
     void buildsRebuildableMakepkgArguments();
     void validatesInstallSessionProtocol();
     void encryptsCredentialsWithAge();
+    void usesInjectedGithubTokenWhenAgeIsLocked();
     void migratesScriptEvidenceForExistingProjects();
     void handlesProjectPaths();
     void detectsManualPkgbuildEdits();
@@ -98,6 +102,7 @@ private slots:
     void inspectsDebAndAppImagePayloadContents();
     void deletesUninstalledProject();
     void refusesToDeleteInstalledProject();
+    void allowsDeletingProjectThatDoesNotOwnInstalledPackage();
     void generatesPkgbuild();
     void generatesMultiSourcePkgbuilds();
     void parsesPkgbuildInstallPlans();
@@ -1073,6 +1078,8 @@ void CoreTests::persistsAiSettingsOutsideProjectData() {
     settings.executionMode = pacsmith::AiExecutionMode::Fast;
     settings.automaticallyResolveReviewItems = true;
     settings.credentialSources.insert(QStringLiteral("xai"), pacsmith::CredentialSource::Age);
+    settings.credentialSources.insert(QStringLiteral("github"), pacsmith::CredentialSource::Age);
+    settings.githubTokenConfigured = true;
     QString error;
     QVERIFY2(store.save(settings, &error), qPrintable(error));
     const auto restored = store.load(&error);
@@ -1117,11 +1124,27 @@ void CoreTests::persistsAiSettingsOutsideProjectData() {
     QVERIFY(restored.automaticallyResolveReviewItems);
     QCOMPARE(restored.credentialSources.value(QStringLiteral("xai")),
              pacsmith::CredentialSource::Age);
+    QCOMPARE(restored.credentialSources.value(QStringLiteral("github")),
+             pacsmith::CredentialSource::Age);
+    QVERIFY(restored.githubTokenConfigured);
+    QVERIFY(pacsmith::githubTokenUsesAge(restored));
     QVERIFY(store.ageSecretsPath().startsWith(temporary.path()));
     QCOMPARE(pacsmith::aiProviderFromName(QStringLiteral("codex")),
              pacsmith::AiProviderKind::None);
     QCOMPARE(pacsmith::aiProviderFromName(QStringLiteral("chatgpt")),
              pacsmith::AiProviderKind::ChatGpt);
+
+    QTemporaryDir legacyDir;
+    QVERIFY(legacyDir.isValid());
+    QFile legacy(QDir(legacyDir.path()).filePath(QStringLiteral("settings.json")));
+    QVERIFY(legacy.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QVERIFY(legacy.write(QByteArrayLiteral(
+                R"({"formatVersion":4,"credentialSources":{"github":"age"}})")) > 0);
+    legacy.close();
+    pacsmith::AppSettingsStore legacyStore(legacyDir.path());
+    const auto migrated = legacyStore.load();
+    QVERIFY(migrated.githubTokenConfigured);
+    QVERIFY(pacsmith::githubTokenUsesAge(migrated));
 }
 
 void CoreTests::persistsBackgroundUpdateSettings() {
@@ -1136,7 +1159,9 @@ void CoreTests::persistsBackgroundUpdateSettings() {
     settings.updates.automaticallyPrepare = true;
     settings.updates.retainedPackageVersions = 5;
     settings.updates.retainedCompleteReleases = 3;
-    settings.updates.trayMode = pacsmith::TrayMode::ActivityOrUpdates;
+    settings.updates.startAtLogin = true;
+    settings.updates.startMinimized = true;
+    settings.updates.keepInTray = true;
     settings.debAssociationPrompted = true;
     settings.selfTrackingPrompted = true;
     QString error;
@@ -1150,9 +1175,81 @@ void CoreTests::persistsBackgroundUpdateSettings() {
     QVERIFY(restored.updates.automaticallyPrepare);
     QCOMPARE(restored.updates.retainedPackageVersions, 5);
     QCOMPARE(restored.updates.retainedCompleteReleases, 5);
-    QCOMPARE(restored.updates.trayMode, pacsmith::TrayMode::ActivityOrUpdates);
+    QVERIFY(restored.updates.startAtLogin);
+    QVERIFY(restored.updates.startMinimized);
+    QVERIFY(restored.updates.keepInTray);
     QVERIFY(restored.debAssociationPrompted);
     QVERIFY(restored.selfTrackingPrompted);
+}
+
+void CoreTests::writesLoginAutostartDesktopEntry() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto previous = qgetenv("XDG_CONFIG_HOME");
+    QVERIFY(qputenv("XDG_CONFIG_HOME", QFile::encodeName(temporary.path())));
+    pacsmith::BackgroundUpdateSettings settings;
+    settings.startAtLogin = true;
+    settings.startMinimized = true;
+    QString error;
+    const auto executable = QStringLiteral("/tmp/pacsmith-gui");
+    QVERIFY2(pacsmith::BackgroundUpdateManager::apply(settings, executable, &error),
+             qPrintable(error));
+    QFile file(pacsmith::BackgroundUpdateManager::autostartPath());
+    QVERIFY(file.exists());
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto contents = QString::fromUtf8(file.readAll());
+    QVERIFY(contents.contains(QStringLiteral("Exec=/tmp/pacsmith-gui --tray")));
+    settings.startAtLogin = false;
+    QVERIFY2(pacsmith::BackgroundUpdateManager::apply(settings, executable, &error),
+             qPrintable(error));
+    QVERIFY(!QFile::exists(pacsmith::BackgroundUpdateManager::autostartPath()));
+    if (previous.isEmpty()) qunsetenv("XDG_CONFIG_HOME");
+    else QVERIFY(qputenv("XDG_CONFIG_HOME", previous));
+}
+
+void CoreTests::roundTripsBackgroundUpdateCheckActivity() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto previous = qgetenv("XDG_STATE_HOME");
+    QVERIFY(qputenv("XDG_STATE_HOME", QFile::encodeName(temporary.path())));
+    pacsmith::BackgroundUpdateState state;
+    state.checking = true;
+    state.checkingProjectId = QStringLiteral("cursor");
+    state.checkingProjectName = QStringLiteral("Cursor");
+    state.preparingProjectId = QStringLiteral("cursor");
+    state.preparingProjectName = QStringLiteral("Cursor");
+    state.preparationPhase = QStringLiteral("Downloading");
+    state.preparationBytesReceived = 12 * 1024 * 1024;
+    state.preparationBytesTotal = 40 * 1024 * 1024;
+    state.message = QStringLiteral("Checking Cursor for updates");
+    QString error;
+    QVERIFY2(pacsmith::BackgroundUpdateStateStore::save(state, &error), qPrintable(error));
+    const auto restored = pacsmith::BackgroundUpdateStateStore::load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(restored.checking);
+    QCOMPARE(restored.checkingProjectId, QStringLiteral("cursor"));
+    QCOMPARE(restored.checkingProjectName, QStringLiteral("Cursor"));
+    QCOMPARE(restored.preparingProjectId, QStringLiteral("cursor"));
+    QCOMPARE(restored.preparingProjectName, QStringLiteral("Cursor"));
+    QCOMPARE(restored.preparationPhase, QStringLiteral("Downloading"));
+    QCOMPARE(restored.preparationBytesReceived, static_cast<qint64>(12 * 1024 * 1024));
+    QCOMPARE(restored.preparationBytesTotal, static_cast<qint64>(40 * 1024 * 1024));
+    QCOMPARE(restored.message, QStringLiteral("Checking Cursor for updates"));
+    if (previous.isEmpty()) qunsetenv("XDG_STATE_HOME");
+    else QVERIFY(qputenv("XDG_STATE_HOME", previous));
+}
+
+void CoreTests::usesInjectedGithubTokenWhenAgeIsLocked() {
+    const auto previous = qgetenv("PACSMITH_GITHUB_TOKEN");
+    QVERIFY(qputenv("PACSMITH_GITHUB_TOKEN", QByteArrayLiteral("injected-github-token")));
+    pacsmith::CredentialStore store(QStringLiteral("/nonexistent/pacsmith-secrets.age"));
+    QVERIFY(!store.ageUnlocked());
+    QString error;
+    const auto token = store.load(QStringLiteral("github"), pacsmith::CredentialSource::Age, &error);
+    QVERIFY2(token.has_value(), qPrintable(error));
+    QCOMPARE(*token, QStringLiteral("injected-github-token"));
+    if (previous.isEmpty()) qunsetenv("PACSMITH_GITHUB_TOKEN");
+    else QVERIFY(qputenv("PACSMITH_GITHUB_TOKEN", previous));
 }
 
 void CoreTests::buildsSystemdCalendarSchedules() {
@@ -1197,6 +1294,11 @@ void CoreTests::reportsOverdueBackgroundUpdateChecks() {
     const auto weekly = pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, now);
     QCOMPARE(weekly.date(), QDate(2026, 8, 17));
     QCOMPARE(weekly.time(), QTime(2, 0));
+    QCOMPARE(pacsmith::BackgroundUpdateManager::nextScheduledOccurrence(settings, now).date(),
+             QDate(2026, 8, 24));
+    settings.daily = true;
+    QCOMPARE(pacsmith::BackgroundUpdateManager::nextScheduledOccurrence(settings, now).date(),
+             QDate(2026, 8, 19));
 }
 
 void CoreTests::persistsMultipleReleases() {
@@ -1455,6 +1557,107 @@ void CoreTests::carriesInstallMappingAcrossGitHubVersions() {
     QCOMPARE(QString::fromUtf8(lifecycle.readAll()), updated->lifecycleScript.contents);
 }
 
+void CoreTests::attachesPreparedGitHubDebToExistingProject() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto writeFixture = [&](const std::filesystem::path &path, const QByteArray &contents) {
+        std::filesystem::create_directories(path.parent_path());
+        QFile file(QString::fromUtf8(path.string().c_str()));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(contents), contents.size());
+    };
+    const auto makeDeb = [&](const QString &version, const QByteArray &payload) -> QString {
+        const auto root = std::filesystem::path(
+            (temporary.path() + QStringLiteral("/deb-") + version).toUtf8().constData());
+        writeFixture(root / "control/control",
+                     QByteArray("Package: affine\nVersion: ") + version.toUtf8() +
+                         "\nArchitecture: amd64\nDescription: AFFiNE fixture\n");
+        writeFixture(root / "data/usr/share/applications/affine.desktop",
+                     QByteArrayLiteral("[Desktop Entry]\nType=Application\nName=AFFiNE\nExec=affine\n"));
+        writeFixture(root / "data/opt/AFFiNE/affine", payload);
+        writeFixture(root / "debian-binary", QByteArrayLiteral("2.0\n"));
+        const auto makeTar = [&](const QString &output, const std::filesystem::path &directory) -> bool {
+            QProcess tar;
+            tar.setProgram(QStringLiteral("/usr/bin/bsdtar"));
+            tar.setArguments({QStringLiteral("-cf"), output, QStringLiteral("-C"),
+                              QString::fromUtf8(directory.string().c_str()), QStringLiteral(".")});
+            tar.start();
+            return tar.waitForFinished(10000) && tar.exitCode() == 0;
+        };
+        const auto work = QString::fromUtf8(root.string().c_str());
+        if (!makeTar(work + QStringLiteral("/control.tar"), root / "control")) return {};
+        if (!makeTar(work + QStringLiteral("/data.tar"), root / "data")) return {};
+        const auto deb = temporary.filePath(QStringLiteral("affine_%1_amd64.deb").arg(version));
+        QProcess ar;
+        ar.setWorkingDirectory(work);
+        ar.setProgram(QStringLiteral("/usr/bin/ar"));
+        ar.setArguments({QStringLiteral("r"), deb, QStringLiteral("control.tar"),
+                         QStringLiteral("data.tar"), QStringLiteral("debian-binary")});
+        ar.start();
+        if (!ar.waitForFinished(10000) || ar.exitCode() != 0) return {};
+        return deb;
+    };
+    const auto firstDeb = makeDeb(QStringLiteral("0.27.3"), QByteArrayLiteral("old-payload\n"));
+    const auto secondDeb = makeDeb(QStringLiteral("0.27.4"), QByteArrayLiteral("new-payload\n"));
+    QVERIFY(!firstDeb.isEmpty());
+    QVERIFY(!secondDeb.isEmpty());
+
+    pacsmith::ProjectStore store(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::ImportOptions firstOptions;
+    firstOptions.acquisition.kind = pacsmith::AcquisitionKind::LocalFile;
+    firstOptions.acquisition.canonicalIdentity = QStringLiteral("deb:affine:amd64");
+    firstOptions.acquisition.originalUrl = firstDeb;
+    QString error;
+    auto first = store.importSource(
+        std::filesystem::path(firstDeb.toUtf8().constData()), firstOptions, &error);
+    QVERIFY2(first.has_value(), qPrintable(error));
+    QCOMPARE(store.list().size(), 1);
+    auto *tracker = first->project.release(first->releaseId);
+    QVERIFY(tracker != nullptr);
+    tracker->update.strategy = pacsmith::UpdateStrategy::GitHubRelease;
+    tracker->update.githubOwner = QStringLiteral("toeverything");
+    tracker->update.githubRepository = QStringLiteral("AFFiNE");
+    tracker->update.githubAssetRegex = QStringLiteral("affine-.*-stable-linux-x64\\.deb");
+    const auto trackerSnapshot = *tracker;
+    QVERIFY2(store.save(first->project, &error), qPrintable(error));
+
+    const auto *discovered = store.recordDiscoveredRelease(
+        first->project, trackerSnapshot, QStringLiteral("0.27.4"),
+        QStringLiteral("affine-0.27.4-stable-linux-x64.deb"), {},
+        QStringLiteral("https://github.com/toeverything/AFFiNE/releases/download/v0.27.4/"
+                       "affine-0.27.4-stable-linux-x64.deb"),
+        &error, 274, 275, QStringLiteral("v0.27.4"), {});
+    QVERIFY2(discovered != nullptr, qPrintable(error));
+    QCOMPARE(discovered->acquisition.canonicalIdentity,
+             QStringLiteral("github:toeverything/affine"));
+
+    pacsmith::ImportOptions prepareOptions;
+    prepareOptions.version = QStringLiteral("0.27.4");
+    prepareOptions.acquisition = discovered->acquisition;
+    prepareOptions.githubAssetRegex = trackerSnapshot.update.githubAssetRegex;
+    prepareOptions.existingProjectId = first->project.id;
+    auto prepared = store.importSource(
+        std::filesystem::path(secondDeb.toUtf8().constData()), prepareOptions, &error);
+    QVERIFY2(prepared.has_value(), qPrintable(error));
+    QVERIFY(!prepared->projectCreated);
+    QCOMPARE(prepared->project.id, first->project.id);
+    QCOMPARE(store.list().size(), 1);
+    QCOMPARE(prepared->project.sourceIdentity, QStringLiteral("github:toeverything/affine"));
+    QCOMPARE(prepared->project.releases.size(), 2);
+
+    pacsmith::ProjectStore siblingStore(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::ImportOptions unmatched = prepareOptions;
+    unmatched.existingProjectId.clear();
+    auto attached = siblingStore.importSource(
+        std::filesystem::path(secondDeb.toUtf8().constData()), unmatched, &error);
+    QVERIFY2(attached.has_value(), qPrintable(error));
+    QVERIFY(!attached->projectCreated);
+    QCOMPARE(attached->project.id, first->project.id);
+    QCOMPARE(siblingStore.list().size(), 1);
+}
+
 void CoreTests::preservesRepositoryFirstImportConfiguration() {
     const auto executable = QStandardPaths::findExecutable(QStringLiteral("true"));
     QVERIFY(!executable.isEmpty());
@@ -1682,8 +1885,13 @@ void CoreTests::encryptsCredentialsWithAge() {
         const auto secret = store.load(QStringLiteral("openai"), pacsmith::CredentialSource::Age, &error);
         QVERIFY2(secret.has_value(), qPrintable(error));
         QCOMPARE(*secret, QStringLiteral("test-secret-value"));
+        QVERIFY2(store.store(QStringLiteral("github"), pacsmith::CredentialSource::Age,
+                             QStringLiteral("gh-token"), {}, &error), qPrintable(error));
+        const auto github = store.load(QStringLiteral("github"), pacsmith::CredentialSource::Age, &error);
+        QVERIFY2(github.has_value(), qPrintable(error));
+        QCOMPARE(*github, QStringLiteral("gh-token"));
         QVERIFY2(store.remove(QStringLiteral("openai"), pacsmith::CredentialSource::Age,
-                              password, &error), qPrintable(error));
+                              {}, &error), qPrintable(error));
         QVERIFY(!store.load(QStringLiteral("openai"), pacsmith::CredentialSource::Age, &error));
         store.lockAge();
         QVERIFY(!store.load(QStringLiteral("openai"), pacsmith::CredentialSource::Age, &error));
@@ -2193,15 +2401,44 @@ void CoreTests::refusesToDeleteInstalledProject() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     pacsmith::ProjectStore store(std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    QString queryError;
+    const auto installed = pacsmith::ProjectStore::queryInstalledVersion(QStringLiteral("pacman"),
+                                                                         &queryError);
+    QVERIFY2(installed.has_value() && !installed->isEmpty(), qPrintable(queryError));
     pacsmith::Project project;
     project.id = QStringLiteral("installed-project");
     project.displayName = QStringLiteral("Installed Project");
     project.archPackageName = QStringLiteral("pacman");
+    pacsmith::PackageRelease release;
+    release.id = QStringLiteral("installed");
+    release.archPackageName = project.archPackageName;
+    pacsmith::BuildRecord build;
+    pacsmith::PackageArtifact artifact;
+    artifact.packageName = project.archPackageName;
+    artifact.packageVersion = *installed;
+    build.artifacts.append(artifact);
+    release.builds.append(build);
+    project.releases.append(release);
     QString error;
     QVERIFY2(store.save(project, &error), qPrintable(error));
     QVERIFY(!store.deleteProject(project, &error));
     QVERIFY(error.contains(QStringLiteral("is installed")));
     QVERIFY(std::filesystem::exists(store.projectPath(project.id)));
+}
+
+void CoreTests::allowsDeletingProjectThatDoesNotOwnInstalledPackage() {
+    if (!QFileInfo::exists(QStringLiteral("/usr/bin/pacman"))) QSKIP("pacman is required for this Arch-specific test");
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    pacsmith::ProjectStore store(std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::Project project;
+    project.id = QStringLiteral("sibling-project");
+    project.displayName = QStringLiteral("Sibling Project");
+    project.archPackageName = QStringLiteral("pacman");
+    QString error;
+    QVERIFY2(store.save(project, &error), qPrintable(error));
+    QVERIFY2(store.deleteProject(project, &error), qPrintable(error));
+    QVERIFY(!std::filesystem::exists(store.projectPath(project.id)));
 }
 
 void CoreTests::generatesPkgbuild() {

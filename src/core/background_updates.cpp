@@ -8,7 +8,6 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QSaveFile>
-#include <QStandardPaths>
 #include <QTime>
 #include <QTimeZone>
 
@@ -65,6 +64,15 @@ BackgroundUpdateState BackgroundUpdateStateStore::load(QString *error) {
     }
     const auto object = document.object();
     result.checking = object.value(QStringLiteral("checking")).toBool();
+    result.checkingProjectId = object.value(QStringLiteral("checkingProjectId")).toString();
+    result.checkingProjectName = object.value(QStringLiteral("checkingProjectName")).toString();
+    result.preparingProjectId = object.value(QStringLiteral("preparingProjectId")).toString();
+    result.preparingProjectName = object.value(QStringLiteral("preparingProjectName")).toString();
+    result.preparationPhase = object.value(QStringLiteral("preparationPhase")).toString();
+    result.preparationBytesReceived =
+        object.value(QStringLiteral("preparationBytesReceived")).toInteger();
+    result.preparationBytesTotal =
+        object.value(QStringLiteral("preparationBytesTotal")).toInteger(-1);
     result.availableUpdates = object.value(QStringLiteral("availableUpdates")).toInt();
     result.failedChecks = object.value(QStringLiteral("failedChecks")).toInt();
     result.lastRun = QDateTime::fromString(object.value(QStringLiteral("lastRun")).toString(), Qt::ISODateWithMs);
@@ -84,6 +92,14 @@ bool BackgroundUpdateStateStore::save(const BackgroundUpdateState &state, QStrin
     for (const auto &project : state.projectsWithUpdates) projects.append(project);
     const QJsonObject object{{QStringLiteral("formatVersion"), 1},
                              {QStringLiteral("checking"), state.checking},
+                             {QStringLiteral("checkingProjectId"), state.checkingProjectId},
+                             {QStringLiteral("checkingProjectName"), state.checkingProjectName},
+                             {QStringLiteral("preparingProjectId"), state.preparingProjectId},
+                             {QStringLiteral("preparingProjectName"), state.preparingProjectName},
+                             {QStringLiteral("preparationPhase"), state.preparationPhase},
+                             {QStringLiteral("preparationBytesReceived"),
+                              state.preparationBytesReceived},
+                             {QStringLiteral("preparationBytesTotal"), state.preparationBytesTotal},
                              {QStringLiteral("availableUpdates"), state.availableUpdates},
                              {QStringLiteral("failedChecks"), state.failedChecks},
                              {QStringLiteral("lastRun"), state.lastRun.toString(Qt::ISODateWithMs)},
@@ -131,6 +147,12 @@ QDateTime BackgroundUpdateManager::lastScheduledOccurrence(const BackgroundUpdat
     return candidate;
 }
 
+QDateTime BackgroundUpdateManager::nextScheduledOccurrence(const BackgroundUpdateSettings &settings,
+                                                           const QDateTime &now) {
+    const auto last = lastScheduledOccurrence(settings, now);
+    return settings.daily ? last.addDays(1) : last.addDays(7);
+}
+
 bool BackgroundUpdateManager::isOverdue(const BackgroundUpdateSettings &settings,
                                         const QDateTime &lastRun, const QDateTime &now) {
     if (!settings.enabled) return false;
@@ -138,68 +160,92 @@ bool BackgroundUpdateManager::isOverdue(const BackgroundUpdateSettings &settings
     return lastRun.toUTC() < lastScheduledOccurrence(settings, now).toUTC();
 }
 
-QString BackgroundUpdateManager::timerUnitPath() {
-    const auto locations = QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation);
-    for (const auto &location : locations) {
-        const auto candidate = QDir(location).filePath(QStringLiteral("systemd/user/pacsmith-update.timer"));
-        if (QFile::exists(candidate)) return candidate;
-    }
-    return {};
+QString BackgroundUpdateManager::autostartPath() {
+    const auto config = qEnvironmentVariable("XDG_CONFIG_HOME");
+    const auto base = !config.isEmpty() && QDir::isAbsolutePath(config)
+        ? config : QDir::home().filePath(QStringLiteral(".config"));
+    return QDir(base).filePath(QStringLiteral("autostart/pacsmith.desktop"));
 }
 
-QString BackgroundUpdateManager::scheduleDropInPath() {
+namespace {
+
+QString quotedDesktopExec(const QString &path) {
+    if (path.isEmpty()) return {};
+    const bool needsQuotes = path.contains(QLatin1Char(' ')) || path.contains(QLatin1Char('\t')) ||
+                             path.contains(QLatin1Char('"')) || path.contains(QLatin1Char('\\'));
+    if (!needsQuotes) return path;
+    auto escaped = path;
+    escaped.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+    escaped.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+    return QStringLiteral("\"%1\"").arg(escaped);
+}
+
+QString legacyScheduleDropInPath() {
     const auto config = qEnvironmentVariable("XDG_CONFIG_HOME");
     const auto base = !config.isEmpty() && QDir::isAbsolutePath(config)
         ? config : QDir::home().filePath(QStringLiteral(".config"));
     return QDir(base).filePath(QStringLiteral("systemd/user/pacsmith-update.timer.d/schedule.conf"));
 }
 
-bool BackgroundUpdateManager::unitInstalled() { return !timerUnitPath().isEmpty(); }
-
-bool BackgroundUpdateManager::isEnabled(QString *error) {
-    QByteArray output;
-    return runSystemctl({QStringLiteral("is-enabled"), QStringLiteral("pacsmith-update.timer")}, error, &output) &&
-           output.trimmed() == QByteArrayLiteral("enabled");
+void disableLegacySystemdUnits() {
+    static bool completed = false;
+    if (completed) return;
+    completed = true;
+    if (!QFileInfo::exists(QStringLiteral("/usr/bin/systemctl"))) return;
+    static_cast<void>(runSystemctl({QStringLiteral("disable"), QStringLiteral("--now"),
+                                    QStringLiteral("pacsmith-update.timer")}, nullptr));
+    static_cast<void>(runSystemctl({QStringLiteral("disable"), QStringLiteral("--now"),
+                                    QStringLiteral("pacsmith-tray.service")}, nullptr));
+    static_cast<void>(runSystemctl({QStringLiteral("stop"), QStringLiteral("pacsmith-update.service")},
+                                   nullptr));
+    QFile::remove(legacyScheduleDropInPath());
 }
 
-bool BackgroundUpdateManager::apply(const BackgroundUpdateSettings &settings, QString *error) {
-    if (!unitInstalled()) {
-        if (error != nullptr) *error = QStringLiteral("PacSmith's systemd user units are not installed. Run 'make install' first.");
+}
+
+bool BackgroundUpdateManager::apply(const BackgroundUpdateSettings &settings,
+                                    const QString &executablePath, QString *error) {
+    disableLegacySystemdUnits();
+    const auto path = autostartPath();
+    if (!settings.startAtLogin) {
+        if (QFile::exists(path) && !QFile::remove(path) && error != nullptr) {
+            *error = QStringLiteral("Could not remove PacSmith's login autostart entry");
+            return false;
+        }
+        return true;
+    }
+    if (executablePath.isEmpty()) {
+        if (error != nullptr) *error = QStringLiteral("PacSmith's executable path is unknown");
         return false;
     }
-    const auto dropIn = scheduleDropInPath();
-    if (!QDir{}.mkpath(QFileInfo(dropIn).absolutePath())) {
-        if (error != nullptr) *error = QStringLiteral("Could not create the systemd user drop-in directory");
+    if (!QDir{}.mkpath(QFileInfo(path).absolutePath())) {
+        if (error != nullptr) *error = QStringLiteral("Could not create the autostart directory");
         return false;
     }
-    QSaveFile file(dropIn);
+    auto exec = quotedDesktopExec(executablePath);
+    if (settings.startMinimized) exec += QStringLiteral(" --tray");
+    const auto contents = QStringLiteral(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=PacSmith\n"
+        "Comment=Start PacSmith with the current session\n"
+        "Exec=%1\n"
+        "Icon=pacsmith\n"
+        "Terminal=false\n"
+        "Hidden=false\n"
+        "X-GNOME-Autostart-enabled=true\n")
+                              .arg(exec)
+                              .toUtf8();
+    QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         if (error != nullptr) *error = file.errorString();
         return false;
     }
-    const auto contents = QStringLiteral("[Timer]\nOnCalendar=\nOnCalendar=%1\nPersistent=true\nRandomizedDelaySec=0\n")
-                              .arg(calendar(settings)).toUtf8();
     if (file.write(contents) != contents.size() || !file.commit()) {
         if (error != nullptr) *error = file.errorString();
         return false;
     }
-    if (!runSystemctl({QStringLiteral("daemon-reload")}, error)) return false;
-    const auto timerReady = settings.enabled
-        ? runSystemctl({QStringLiteral("enable"), QStringLiteral("--now"), QStringLiteral("pacsmith-update.timer")}, error)
-        : runSystemctl({QStringLiteral("disable"), QStringLiteral("--now"), QStringLiteral("pacsmith-update.timer")}, error);
-    if (!timerReady) return false;
-    const auto showTray = settings.enabled && settings.trayMode != TrayMode::Disabled;
-    return showTray
-        ? runSystemctl({QStringLiteral("enable"), QStringLiteral("--now"), QStringLiteral("pacsmith-tray.service")}, error)
-        : runSystemctl({QStringLiteral("disable"), QStringLiteral("--now"), QStringLiteral("pacsmith-tray.service")}, error);
-}
-
-bool BackgroundUpdateManager::runNow(QString *error) {
-    if (!unitInstalled()) {
-        if (error != nullptr) *error = QStringLiteral("PacSmith's systemd user service is not installed");
-        return false;
-    }
-    return runSystemctl({QStringLiteral("start"), QStringLiteral("pacsmith-update.service")}, error);
+    return true;
 }
 
 } // namespace pacsmith

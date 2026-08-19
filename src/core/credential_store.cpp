@@ -202,7 +202,10 @@ bool CredentialStore::createAge(const QString &password, QString *error) {
     }
     ageSecrets_.clear();
     ageUnlocked_ = true;
-    if (saveAge(password, error)) return true;
+    if (saveAge(password, error)) {
+        rememberAgePassword(password);
+        return true;
+    }
     ageUnlocked_ = false;
     return false;
 }
@@ -234,6 +237,7 @@ bool CredentialStore::unlockAge(const QString &password, QString *error) {
         ageSecrets_.insert(iterator.key(), iterator.value().toString());
     }
     ageUnlocked_ = true;
+    rememberAgePassword(password);
     return true;
 }
 
@@ -242,7 +246,18 @@ void CredentialStore::lockAge() {
         iterator.value().fill(QChar::Null);
     }
     ageSecrets_.clear();
+    rememberedAgePassword_.fill(QChar::Null);
+    rememberedAgePassword_.clear();
     ageUnlocked_ = false;
+}
+
+QString CredentialStore::effectiveAgePassword(const QString &provided) const {
+    return provided.isEmpty() ? rememberedAgePassword_ : provided;
+}
+
+void CredentialStore::rememberAgePassword(const QString &password) {
+    rememberedAgePassword_.fill(QChar::Null);
+    rememberedAgePassword_ = password;
 }
 
 bool CredentialStore::saveAge(const QString &password, QString *error) {
@@ -283,13 +298,14 @@ bool CredentialStore::store(const QString &provider, const CredentialSource sour
         return false;
     }
     if (source == CredentialSource::Age) {
+        const auto password = effectiveAgePassword(agePassword);
         if (!ageUnlocked_) {
-            const auto ready = hasAgeFile() ? unlockAge(agePassword, error)
-                                            : createAge(agePassword, error);
+            const auto ready = hasAgeFile() ? unlockAge(password, error)
+                                            : createAge(password, error);
             if (!ready) return false;
         }
         ageSecrets_.insert(provider, secret);
-        return saveAge(agePassword, error);
+        return saveAge(effectiveAgePassword(password), error);
     }
 #ifdef PACSMITH_HAS_LIBSECRET
     GError *failure = nullptr;
@@ -320,10 +336,11 @@ bool CredentialStore::remove(const QString &provider, const CredentialSource sou
         return false;
     }
     if (source == CredentialSource::Age) {
-        if (!ageUnlocked_ && !unlockAge(agePassword, error)) return false;
+        const auto password = effectiveAgePassword(agePassword);
+        if (!ageUnlocked_ && !unlockAge(password, error)) return false;
         auto removed = ageSecrets_.take(provider);
         removed.fill(QChar::Null);
-        return saveAge(agePassword, error);
+        return saveAge(effectiveAgePassword(password), error);
     }
 #ifdef PACSMITH_HAS_LIBSECRET
     GError *failure = nullptr;
@@ -353,6 +370,10 @@ std::optional<QString> CredentialStore::load(const QString &provider, const Cred
     }
     if (source == CredentialSource::Age) {
         if (!ageUnlocked_) {
+            if (provider == QStringLiteral("github")) {
+                const auto injected = qEnvironmentVariable("PACSMITH_GITHUB_TOKEN");
+                if (!injected.isEmpty()) return injected;
+            }
             if (error != nullptr) *error = QStringLiteral("Age-encrypted credentials are locked");
             return std::nullopt;
         }
@@ -383,6 +404,15 @@ std::optional<QString> CredentialStore::load(const QString &provider, const Cred
     if (error != nullptr) *error = QStringLiteral("PacSmith was built without libsecret support");
     return std::nullopt;
 #endif
+}
+
+QProcessEnvironment CredentialStore::environmentWithGithubToken(const CredentialSource source) const {
+    auto environment = QProcessEnvironment::systemEnvironment();
+    const auto token = load(QStringLiteral("github"), source, nullptr);
+    if (token && !token->isEmpty()) {
+        environment.insert(QStringLiteral("PACSMITH_GITHUB_TOKEN"), *token);
+    }
+    return environment;
 }
 
 } // namespace pacsmith

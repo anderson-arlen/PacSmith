@@ -305,6 +305,93 @@ QString sourceIdentity(const DebianMetadata &metadata) {
     return QStringLiteral("deb:%1:%2").arg(metadata.package.toLower(), metadata.architecture.toLower());
 }
 
+QString githubSourceIdentity(const QString &owner, const QString &repository) {
+    return QStringLiteral("github:%1/%2").arg(owner.toLower(), repository.toLower());
+}
+
+QString normalizedSourceIdentity(const QString &identity) {
+    const auto trimmed = identity.trimmed();
+    if (trimmed.startsWith(QStringLiteral("github:"), Qt::CaseInsensitive)) {
+        const auto rest = trimmed.mid(7);
+        const auto slash = rest.indexOf(QLatin1Char('/'));
+        if (slash > 0) {
+            return githubSourceIdentity(rest.left(slash), rest.mid(slash + 1));
+        }
+    }
+    return trimmed;
+}
+
+QString githubIdentityFromProject(const Project &project) {
+    const auto fromSource = normalizedSourceIdentity(project.sourceIdentity);
+    if (fromSource.startsWith(QStringLiteral("github:"))) return fromSource;
+    for (const auto &release : project.releases) {
+        if (!release.update.githubOwner.isEmpty() && !release.update.githubRepository.isEmpty()) {
+            return githubSourceIdentity(release.update.githubOwner, release.update.githubRepository);
+        }
+        if (!release.acquisition.githubOwner.isEmpty() &&
+            !release.acquisition.githubRepository.isEmpty()) {
+            return githubSourceIdentity(release.acquisition.githubOwner,
+                                        release.acquisition.githubRepository);
+        }
+    }
+    return {};
+}
+
+QString requestedSourceIdentity(const ImportOptions &options, const DebianMetadata *metadata) {
+    if (!options.acquisition.githubOwner.isEmpty() &&
+        !options.acquisition.githubRepository.isEmpty()) {
+        return githubSourceIdentity(options.acquisition.githubOwner,
+                                    options.acquisition.githubRepository);
+    }
+    if (!options.acquisition.canonicalIdentity.isEmpty()) {
+        return normalizedSourceIdentity(options.acquisition.canonicalIdentity);
+    }
+    if (options.acquisition.kind == AcquisitionKind::GitHubRelease) {
+        return githubSourceIdentity(options.acquisition.githubOwner,
+                                    options.acquisition.githubRepository);
+    }
+    if (metadata != nullptr) return sourceIdentity(*metadata);
+    return {};
+}
+
+std::optional<Project> findMatchingProject(const QList<Project> &projects,
+                                           const ImportOptions &options,
+                                           const DebianMetadata *metadata) {
+    const auto wanted = requestedSourceIdentity(options, metadata);
+    if (!wanted.isEmpty()) {
+        for (const auto &existing : projects) {
+            if (normalizedSourceIdentity(existing.sourceIdentity) == wanted) return existing;
+        }
+        if (wanted.startsWith(QStringLiteral("github:"))) {
+            for (const auto &existing : projects) {
+                if (githubIdentityFromProject(existing) == wanted) return existing;
+            }
+        }
+    }
+    if (metadata != nullptr) {
+        const auto debIdentity = sourceIdentity(*metadata);
+        for (const auto &existing : projects) {
+            if (normalizedSourceIdentity(existing.sourceIdentity) == debIdentity) return existing;
+            for (const auto &release : existing.releases) {
+                if (!release.debian.package.isEmpty() &&
+                    sourceIdentity(release.debian) == debIdentity) {
+                    return existing;
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+void adoptCanonicalIdentity(Project &project, const QString &identity) {
+    if (identity.isEmpty()) return;
+    if (normalizedSourceIdentity(project.sourceIdentity) == identity) {
+        project.sourceIdentity = identity;
+        return;
+    }
+    if (identity.startsWith(QStringLiteral("github:"))) project.sourceIdentity = identity;
+}
+
 QString releaseId(const QString &version, const QString &sha256) {
     QString safe = version.toLower();
     safe.replace(QRegularExpression(QStringLiteral("[^a-z0-9@._+-]+")), QStringLiteral("-"));
@@ -330,6 +417,31 @@ QString repackagedPkgrel(const QString &upstream) {
     const auto major = match.captured(1).toInt();
     const auto minor = match.captured(2).isEmpty() ? 1 : match.captured(2).toInt() + 1;
     return QStringLiteral("%1.%2").arg(std::max(1, major)).arg(std::max(1, minor));
+}
+
+bool releaseMatchesInstalledVersion(const Project &project, const QString &installedVersion) {
+    for (const auto &release : project.releases) {
+        if (expectedArchVersion(release) == installedVersion) return true;
+        for (const auto &build : release.builds) {
+            if (std::any_of(build.artifacts.cbegin(), build.artifacts.cend(),
+                            [&](const auto &artifact) {
+                                return artifact.packageName == project.archPackageName &&
+                                       artifact.packageVersion == installedVersion;
+                            })) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool projectOwnsInstalledPackage(const Project &project, const QString &installedVersion) {
+    if (installedVersion.isEmpty()) return false;
+    if (const auto managed = ManagedPackageRegistry::find(project.archPackageName, nullptr);
+        managed && !managed->projectId().isEmpty()) {
+        return managed->projectId() == project.id;
+    }
+    return releaseMatchesInstalledVersion(project, installedVersion);
 }
 
 FieldProvenance detected(const QString &fingerprint, const QString &rationale) {
@@ -1313,27 +1425,33 @@ bool ProjectStore::reconcileInstalled(Project &project, QString *error) const {
     project.installedReleaseId.clear();
     project.externallyInstalled = false;
     if (!installed->isEmpty()) {
+        bool xdataOwned = false;
         if (const auto managed = ManagedPackageRegistry::find(project.archPackageName, nullptr);
-            managed && managed->projectId() == project.id &&
-            project.release(managed->releaseId()) != nullptr) {
-            project.installedReleaseId = managed->releaseId();
-        }
-        for (const auto &release : project.releases) {
-            if (!project.installedReleaseId.isEmpty()) break;
-            bool matches = expectedArchVersion(release) == *installed;
-            for (const auto &build : release.builds) {
-                matches = matches || std::any_of(build.artifacts.cbegin(), build.artifacts.cend(),
-                                                  [&](const auto &artifact) {
-                                                      return artifact.packageName == project.archPackageName &&
-                                                             artifact.packageVersion == *installed;
-                                                  });
+            managed && !managed->projectId().isEmpty()) {
+            if (managed->projectId() == project.id) {
+                xdataOwned = true;
+                if (project.release(managed->releaseId()) != nullptr) {
+                    project.installedReleaseId = managed->releaseId();
+                }
             }
-            if (matches) {
-                project.installedReleaseId = release.id;
-                break;
+        } else {
+            for (const auto &release : project.releases) {
+                if (!project.installedReleaseId.isEmpty()) break;
+                bool matches = expectedArchVersion(release) == *installed;
+                for (const auto &build : release.builds) {
+                    matches = matches || std::any_of(build.artifacts.cbegin(), build.artifacts.cend(),
+                                                      [&](const auto &artifact) {
+                                                          return artifact.packageName == project.archPackageName &&
+                                                                 artifact.packageVersion == *installed;
+                                                      });
+                }
+                if (matches) {
+                    project.installedReleaseId = release.id;
+                    break;
+                }
             }
         }
-        project.externallyInstalled = project.installedReleaseId.isEmpty();
+        project.externallyInstalled = project.installedReleaseId.isEmpty() && !xdataOwned;
     }
     return previousVersion != project.installedVersion ||
            previousRelease != project.installedReleaseId ||
@@ -1347,7 +1465,7 @@ bool ProjectStore::deleteProject(const Project &project, QString *error) const {
         if (error != nullptr) *error = QStringLiteral("Could not verify package state: %1").arg(statusError);
         return false;
     }
-    if (!installed->isEmpty()) {
+    if (!installed->isEmpty() && projectOwnsInstalledPackage(project, *installed)) {
         if (error != nullptr) {
             *error = QStringLiteral("%1 is installed (%2). Uninstall it before deleting this project.")
                          .arg(project.archPackageName, *installed);
@@ -1424,24 +1542,25 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     if (sourceHash.isEmpty()) return std::nullopt;
 
     if (progress) progress({ImportStage::PreparingProject, 0});
-    const auto identity = !options.acquisition.canonicalIdentity.isEmpty()
-        ? options.acquisition.canonicalIdentity
-        : options.acquisition.kind == AcquisitionKind::GitHubRelease
-            ? QStringLiteral("github:%1/%2")
-                  .arg(options.acquisition.githubOwner.toLower(),
-                       options.acquisition.githubRepository.toLower())
-            : sourceIdentity(analysis->metadata);
+    const auto identity = requestedSourceIdentity(options, &analysis->metadata);
     std::optional<Project> matching;
-    for (auto existing : list()) {
-        if (existing.sourceIdentity == identity) {
-            matching = std::move(existing);
-            break;
+    if (!options.existingProjectId.isEmpty()) {
+        matching = loadById(options.existingProjectId, error);
+        if (!matching) {
+            if (error != nullptr && error->isEmpty()) {
+                *error = QStringLiteral("Could not load project %1 for import")
+                             .arg(options.existingProjectId);
+            }
+            return std::nullopt;
         }
+    } else {
+        matching = findMatchingProject(list(), options, &analysis->metadata);
     }
     bool projectCreated = !matching.has_value();
     Project project;
     if (matching) {
         project = std::move(*matching);
+        adoptCanonicalIdentity(project, identity);
         for (const auto &existing : project.releases) {
             if (existing.sourceSha256 == sourceHash) {
                 if (existing.state != ReleaseState::Discovered) {
@@ -1479,6 +1598,9 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     if (release.acquisition.canonicalIdentity.isEmpty()) {
         release.acquisition.kind = AcquisitionKind::LocalFile;
         release.acquisition.canonicalIdentity = sourceIdentity(analysis->metadata);
+    } else {
+        release.acquisition.canonicalIdentity =
+            normalizedSourceIdentity(release.acquisition.canonicalIdentity);
     }
     release.originalSourceFilename = QFileInfo(qStringFromPath(debPath)).fileName();
     release.sourceSha256 = sourceHash;
@@ -1618,9 +1740,10 @@ std::optional<ImportResult> ProjectStore::importSource(
             release->acquisition = options.acquisition;
             if (release->acquisition.canonicalIdentity.isEmpty()) {
                 release->acquisition.kind = AcquisitionKind::LocalFile;
+                release->acquisition.canonicalIdentity = sourceIdentity(release->debian);
+            } else {
                 release->acquisition.canonicalIdentity =
-                    QStringLiteral("deb:%1:%2").arg(release->debian.package,
-                                                     release->debian.architecture);
+                    normalizedSourceIdentity(release->acquisition.canonicalIdentity);
             }
             release->sourceUrl = release->acquisition.originalUrl;
             if (release->acquisition.kind == AcquisitionKind::GitHubRelease) {
@@ -1659,21 +1782,25 @@ std::optional<ImportResult> ProjectStore::importSource(
             .arg(sourcePackageTypeName(analysis->type), analysis->metadata.package.toLower(),
                  analysis->metadata.architecture.toLower());
     }
-    const auto identity = acquisition.kind == AcquisitionKind::GitHubRelease
-        ? QStringLiteral("github:%1/%2")
-              .arg(acquisition.githubOwner.toLower(), acquisition.githubRepository.toLower())
-        : acquisition.canonicalIdentity;
+    const auto identity = requestedSourceIdentity(options, &analysis->metadata);
     std::optional<Project> matching;
-    for (auto existing : list()) {
-        if (existing.sourceIdentity == identity) {
-            matching = std::move(existing);
-            break;
+    if (!options.existingProjectId.isEmpty()) {
+        matching = loadById(options.existingProjectId, error);
+        if (!matching) {
+            if (error != nullptr && error->isEmpty()) {
+                *error = QStringLiteral("Could not load project %1 for import")
+                             .arg(options.existingProjectId);
+            }
+            return std::nullopt;
         }
+    } else {
+        matching = findMatchingProject(list(), options, &analysis->metadata);
     }
     Project project;
     const bool projectCreated = !matching.has_value();
     if (matching) {
         project = std::move(*matching);
+        adoptCanonicalIdentity(project, identity);
         for (auto &existing : project.releases) {
             if (existing.sourceSha256 == sourceHash) {
                 // Re-importing an already analyzed artifact is also a safe way to
@@ -2041,6 +2168,7 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
         if (error != nullptr) *error = QStringLiteral("The update result is missing version, filename, or download URL");
         return nullptr;
     }
+    const auto trackerCopy = tracker;
     const auto existing = std::find_if(project.releases.begin(), project.releases.end(),
                                        [&](const auto &candidate) {
                                            return (!sha256.isEmpty() && candidate.sourceSha256 == sha256) ||
@@ -2069,17 +2197,17 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
     // GitHub can change artifact formats between releases. Do not claim a type until the
     // downloaded bytes have passed content-based detection and static analysis.
     release.sourceType = SourcePackageType::Unknown;
-    release.acquisition = tracker.acquisition;
+    release.acquisition = trackerCopy.acquisition;
     release.acquisition.originalUrl = downloadUrl;
-    if (tracker.update.strategy == UpdateStrategy::AptRepository) {
+    if (trackerCopy.update.strategy == UpdateStrategy::AptRepository) {
         release.acquisition.kind = AcquisitionKind::AptRepository;
-    } else if (tracker.update.strategy == UpdateStrategy::RpmRepository) {
+    } else if (trackerCopy.update.strategy == UpdateStrategy::RpmRepository) {
         release.acquisition.kind = AcquisitionKind::RpmRepository;
     }
-    if (tracker.update.strategy == UpdateStrategy::GitHubRelease) {
+    if (trackerCopy.update.strategy == UpdateStrategy::GitHubRelease) {
         release.acquisition.kind = AcquisitionKind::GitHubRelease;
-        release.acquisition.githubOwner = tracker.update.githubOwner;
-        release.acquisition.githubRepository = tracker.update.githubRepository;
+        release.acquisition.githubOwner = trackerCopy.update.githubOwner;
+        release.acquisition.githubRepository = trackerCopy.update.githubRepository;
         release.acquisition.githubReleaseId = providerReleaseId;
         release.acquisition.githubAssetId = providerAssetId;
         release.acquisition.githubTag = providerTag;
@@ -2087,12 +2215,13 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
         release.acquisition.githubAssetName = filename;
         release.acquisition.publisherDigest = publisherDigest;
         release.acquisition.canonicalIdentity = QStringLiteral("github:%1/%2")
-            .arg(tracker.update.githubOwner, tracker.update.githubRepository);
+            .arg(trackerCopy.update.githubOwner.toLower(),
+                 trackerCopy.update.githubRepository.toLower());
     }
-    release.debian.package = tracker.debian.package;
+    release.debian.package = trackerCopy.debian.package;
     release.debian.version = version;
-    release.debian.architecture = tracker.debian.architecture;
-    release.update = tracker.update;
+    release.debian.architecture = trackerCopy.debian.architecture;
+    release.update = trackerCopy.update;
     release.update.githubReleaseId = providerReleaseId;
     release.update.githubAssetId = providerAssetId;
     release.update.githubTag = providerTag;
@@ -2100,8 +2229,8 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
     release.state = ReleaseState::Discovered;
     release.createdAt = QDateTime::currentDateTimeUtc();
     release.modifiedAt = release.createdAt;
-    const auto discoveryMessage = (tracker.update.strategy == UpdateStrategy::AptRepository ||
-                                   tracker.update.strategy == UpdateStrategy::RpmRepository)
+    const auto discoveryMessage = (trackerCopy.update.strategy == UpdateStrategy::AptRepository ||
+                                   trackerCopy.update.strategy == UpdateStrategy::RpmRepository)
         ? QStringLiteral("Discovered signature-verified vendor release %1").arg(version)
         : !publisherDigest.isEmpty()
             ? QStringLiteral("Discovered GitHub release %1 with publisher digest").arg(version)

@@ -471,6 +471,9 @@ struct Project {
     // True only when a retained or detected vendor version is newer than the
     // PacSmith release currently installed through pacman.
     [[nodiscard]] bool hasAvailableUpdate() const;
+    // True when this project is the PacSmith owner of the pacman package, not
+    // merely sharing that package name with another project or an external install.
+    [[nodiscard]] bool ownsInstalledPackage() const;
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static Project fromJson(const QJsonObject &object);
 };

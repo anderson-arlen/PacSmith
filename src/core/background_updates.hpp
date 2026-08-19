@@ -10,6 +10,13 @@ namespace pacsmith {
 
 struct BackgroundUpdateState {
     bool checking{false};
+    QString checkingProjectId;
+    QString checkingProjectName;
+    QString preparingProjectId;
+    QString preparingProjectName;
+    QString preparationPhase;
+    qint64 preparationBytesReceived{0};
+    qint64 preparationBytesTotal{-1};
     int availableUpdates{0};
     int failedChecks{0};
     QDateTime lastRun;
@@ -30,16 +37,16 @@ public:
     [[nodiscard]] static QDateTime lastScheduledOccurrence(
         const BackgroundUpdateSettings &settings,
         const QDateTime &now = QDateTime::currentDateTime());
+    [[nodiscard]] static QDateTime nextScheduledOccurrence(
+        const BackgroundUpdateSettings &settings,
+        const QDateTime &now = QDateTime::currentDateTime());
     [[nodiscard]] static bool isOverdue(const BackgroundUpdateSettings &settings,
                                         const QDateTime &lastRun,
                                         const QDateTime &now = QDateTime::currentDateTime());
-    [[nodiscard]] static QString timerUnitPath();
-    [[nodiscard]] static QString scheduleDropInPath();
-    [[nodiscard]] static bool unitInstalled();
-    [[nodiscard]] static bool isEnabled(QString *error = nullptr);
+    [[nodiscard]] static QString autostartPath();
     [[nodiscard]] static bool apply(const BackgroundUpdateSettings &settings,
+                                    const QString &executablePath,
                                     QString *error = nullptr);
-    [[nodiscard]] static bool runNow(QString *error = nullptr);
 };
 
 } // namespace pacsmith

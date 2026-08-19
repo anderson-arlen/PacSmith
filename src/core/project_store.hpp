@@ -35,6 +35,9 @@ struct ImportOptions {
     std::optional<UpdateConfiguration> initialUpdate;
     QByteArray trustedSigningKey;
     QString trustedSigningKeySource;
+    // When preparing an already tracked project, import into that project instead of
+    // creating a sibling from vendor metadata.
+    QString existingProjectId;
 };
 
 struct RetentionPolicy {

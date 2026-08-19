@@ -3,6 +3,7 @@
 #include "core/app_settings.hpp"
 
 #include <QMap>
+#include <QProcessEnvironment>
 #include <QString>
 
 #include <optional>
@@ -32,12 +33,16 @@ public:
                               const QString &agePassword = {}, QString *error = nullptr);
     [[nodiscard]] std::optional<QString> load(const QString &provider, CredentialSource source,
                                               QString *error = nullptr) const;
+    [[nodiscard]] QProcessEnvironment environmentWithGithubToken(CredentialSource source) const;
 
 private:
     [[nodiscard]] bool saveAge(const QString &password, QString *error);
+    [[nodiscard]] QString effectiveAgePassword(const QString &provided) const;
+    void rememberAgePassword(const QString &password);
 
     QString ageSecretsPath_;
     QMap<QString, QString> ageSecrets_;
+    QString rememberedAgePassword_;
     bool ageUnlocked_{false};
 };
 

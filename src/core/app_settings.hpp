@@ -10,10 +10,12 @@ enum class AiProviderKind { None, ChatGpt, OpenAi, Xai };
 enum class CredentialSource { Environment, Keyring, Age };
 enum class AiReasoningEffort { ProviderDefault, None, Low, Medium, High, XHigh, Max };
 enum class AiExecutionMode { Standard, Fast };
-enum class TrayMode { Always, ActivityOrUpdates, Disabled };
 
 struct BackgroundUpdateSettings {
     bool enabled{false};
+    bool startAtLogin{false};
+    bool startMinimized{false};
+    bool keepInTray{false};
     bool daily{true};
     // Qt weekday: Monday=1 through Sunday=7. Ignored for a daily schedule.
     int weekDay{1};
@@ -21,7 +23,6 @@ struct BackgroundUpdateSettings {
     bool automaticallyPrepare{false};
     int retainedPackageVersions{2};
     int retainedCompleteReleases{3};
-    TrayMode trayMode{TrayMode::Always};
 };
 
 struct AiSettings {
@@ -32,6 +33,7 @@ struct AiSettings {
     bool automaticallyResolveReviewItems{false};
     QMap<QString, CredentialSource> credentialSources;
     BackgroundUpdateSettings updates;
+    bool githubTokenConfigured{false};
     bool debAssociationPrompted{false};
     bool selfTrackingPrompted{false};
 };
@@ -58,7 +60,6 @@ private:
 [[nodiscard]] AiReasoningEffort aiReasoningEffortFromName(const QString &name);
 [[nodiscard]] QString aiExecutionModeName(AiExecutionMode mode);
 [[nodiscard]] AiExecutionMode aiExecutionModeFromName(const QString &name);
-[[nodiscard]] QString trayModeName(TrayMode mode);
-[[nodiscard]] TrayMode trayModeFromName(const QString &name);
+[[nodiscard]] bool githubTokenUsesAge(const AiSettings &settings);
 
 } // namespace pacsmith

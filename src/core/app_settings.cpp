@@ -50,6 +50,10 @@ AiSettings AppSettingsStore::load(QString *error) const {
     }
     const auto updates = object.value(QStringLiteral("updates")).toObject();
     result.updates.enabled = updates.value(QStringLiteral("enabled")).toBool(false);
+    result.updates.startAtLogin = updates.value(QStringLiteral("startAtLogin")).toBool(false);
+    result.updates.startMinimized = updates.value(QStringLiteral("startMinimized")).toBool(false);
+    result.updates.keepInTray =
+        updates.value(QStringLiteral("keepInTray")).toBool(result.updates.startMinimized);
     result.updates.daily = updates.value(QStringLiteral("daily")).toBool(true);
     result.updates.weekDay = std::clamp(updates.value(QStringLiteral("weekDay")).toInt(1), 1, 7);
     const auto time = QTime::fromString(updates.value(QStringLiteral("localTime")).toString(),
@@ -61,7 +65,13 @@ AiSettings AppSettingsStore::load(QString *error) const {
         std::max(-1, updates.value(QStringLiteral("retainedPackageVersions")).toInt(2));
     result.updates.retainedCompleteReleases =
         std::max(-1, updates.value(QStringLiteral("retainedCompleteReleases")).toInt(3));
-    result.updates.trayMode = trayModeFromName(updates.value(QStringLiteral("trayMode")).toString());
+    if (object.contains(QStringLiteral("githubTokenConfigured"))) {
+        result.githubTokenConfigured = object.value(QStringLiteral("githubTokenConfigured")).toBool();
+    } else {
+        result.githubTokenConfigured =
+            result.credentialSources.value(QStringLiteral("github"), CredentialSource::Environment) ==
+            CredentialSource::Age;
+    }
     const auto onboarding = object.value(QStringLiteral("onboarding")).toObject();
     result.debAssociationPrompted = onboarding.value(QStringLiteral("debAssociationPrompted")).toBool(false);
     result.selfTrackingPrompted = onboarding.value(QStringLiteral("selfTrackingPrompted")).toBool(false);
@@ -83,13 +93,15 @@ bool AppSettingsStore::save(const AiSettings &settings, QString *error) const {
         : std::max(settings.updates.retainedCompleteReleases,
                    settings.updates.retainedPackageVersions);
     const QJsonObject updates{{QStringLiteral("enabled"), settings.updates.enabled},
+                              {QStringLiteral("startAtLogin"), settings.updates.startAtLogin},
+                              {QStringLiteral("startMinimized"), settings.updates.startMinimized},
+                              {QStringLiteral("keepInTray"), settings.updates.keepInTray},
                               {QStringLiteral("daily"), settings.updates.daily},
                               {QStringLiteral("weekDay"), settings.updates.weekDay},
                               {QStringLiteral("localTime"), settings.updates.localTime.toString(QStringLiteral("HH:mm"))},
                               {QStringLiteral("automaticallyPrepare"), settings.updates.automaticallyPrepare},
                               {QStringLiteral("retainedPackageVersions"), settings.updates.retainedPackageVersions},
-                              {QStringLiteral("retainedCompleteReleases"), completeRetention},
-                              {QStringLiteral("trayMode"), trayModeName(settings.updates.trayMode)}};
+                              {QStringLiteral("retainedCompleteReleases"), completeRetention}};
     const QJsonObject onboarding{{QStringLiteral("debAssociationPrompted"),
                                   settings.debAssociationPrompted},
                                  {QStringLiteral("selfTrackingPrompted"),
@@ -104,6 +116,7 @@ bool AppSettingsStore::save(const AiSettings &settings, QString *error) const {
                              {QStringLiteral("automaticallyResolveReviewItems"),
                               settings.automaticallyResolveReviewItems},
                              {QStringLiteral("credentialSources"), credentials},
+                             {QStringLiteral("githubTokenConfigured"), settings.githubTokenConfigured},
                              {QStringLiteral("updates"), updates},
                              {QStringLiteral("onboarding"), onboarding}};
     QSaveFile file(QDir(directory_).filePath(QStringLiteral("settings.json")));
@@ -188,19 +201,10 @@ AiExecutionMode aiExecutionModeFromName(const QString &name) {
                                           : AiExecutionMode::Standard;
 }
 
-QString trayModeName(const TrayMode mode) {
-    switch (mode) {
-    case TrayMode::Always: return QStringLiteral("always");
-    case TrayMode::ActivityOrUpdates: return QStringLiteral("activity-or-updates");
-    case TrayMode::Disabled: return QStringLiteral("disabled");
-    }
-    return QStringLiteral("always");
-}
-
-TrayMode trayModeFromName(const QString &name) {
-    if (name == QStringLiteral("activity-or-updates")) return TrayMode::ActivityOrUpdates;
-    if (name == QStringLiteral("disabled")) return TrayMode::Disabled;
-    return TrayMode::Always;
+bool githubTokenUsesAge(const AiSettings &settings) {
+    return settings.githubTokenConfigured &&
+           settings.credentialSources.value(QStringLiteral("github"), CredentialSource::Environment) ==
+               CredentialSource::Age;
 }
 
 } // namespace pacsmith

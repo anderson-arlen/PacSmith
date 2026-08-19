@@ -83,7 +83,7 @@ install: check-user deps test
 	fi
 	@echo "PacSmith installed for the current user under $(PREFIX)."
 	@echo "Run '$(PREFIX)/bin/pacsmith-gui' or add '$(PREFIX)/bin' to PATH."
-	@echo "Configure the optional user timer, tray, and cleanup policy in PacSmith Settings -> Updates & Cleanup."
+	@echo "Optional login autostart, tray, and periodic checks are in PacSmith Settings."
 
 uninstall: check-user
 	@set -eu; \

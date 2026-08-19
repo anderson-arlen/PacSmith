@@ -1,28 +1,23 @@
-#include "gui/main_window.hpp"
+#include "gui/application_session.hpp"
+#include "gui/age_unlock.hpp"
 #include "gui/gui_instance.hpp"
 #include "core/app_settings.hpp"
-#include "core/background_updates.hpp"
-#include "core/project_store.hpp"
+#include "core/credential_store.hpp"
 
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
-#include <QCursor>
+#include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QMessageBox>
-#include <QMenu>
-#include <QPainter>
-#include <QPixmap>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
-#include <QStyle>
-#include <QTimer>
-#include <QUrl>
 
-#include <algorithm>
+#include <string_view>
 
 #include <unistd.h>
 
@@ -32,37 +27,55 @@ QIcon applicationIcon() {
     return QIcon(QStringLiteral(":/pacsmith/icons/pacsmith.png"));
 }
 
-QIcon trayStatusIcon(const QApplication &application, int availableUpdates) {
-    QIcon source(QStringLiteral(":/pacsmith/icons/pacsmith-tray.png"));
-    QPixmap mask = source.pixmap(QSize(32, 32));
-    if (mask.isNull()) mask = application.style()->standardIcon(QStyle::SP_ComputerIcon).pixmap(32, 32);
-    QPixmap pixmap(mask.size());
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.drawPixmap(0, 0, mask);
-    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    painter.fillRect(pixmap.rect(), application.palette().color(QPalette::WindowText));
-    if (availableUpdates > 0) {
-        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        painter.setBrush(QColor(210, 50, 50));
-        painter.setPen(Qt::white);
-        painter.drawEllipse(QRect(17, 0, 15, 15));
-        auto font = painter.font();
-        font.setBold(true);
-        font.setPixelSize(10);
-        painter.setFont(font);
-        painter.drawText(QRect(17, 0, 15, 15), Qt::AlignCenter,
-                         availableUpdates > 9 ? QStringLiteral("9+")
-                                              : QString::number(availableUpdates));
+bool argvHasOption(const int argc, char *argv[], const std::string_view option) {
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] != nullptr && argv[index] == option) return true;
     }
-    return QIcon(pixmap);
+    return false;
+}
+
+QString pacsmithCliPath() {
+    auto program = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith"));
+    if (!QFileInfo::exists(program)) program = QStandardPaths::findExecutable(QStringLiteral("pacsmith"));
+    return program;
+}
+
+int runStandaloneCheck() {
+    if (pacsmith::gui::GuiInstanceServer::requestCheck()) return 0;
+    const auto program = pacsmithCliPath();
+    if (program.isEmpty()) return 1;
+    return QProcess::execute(program, {QStringLiteral("check"), QStringLiteral("--all")}) == 0 ? 0 : 1;
+}
+
+void syncGithubTokenConfiguredFlag(pacsmith::AppSettingsStore &settingsStore,
+                                   pacsmith::CredentialStore &credentials,
+                                   pacsmith::AiSettings &settings) {
+    if (!credentials.ageUnlocked()) return;
+    if (settings.credentialSources.value(QStringLiteral("github"),
+                                         pacsmith::CredentialSource::Environment) !=
+        pacsmith::CredentialSource::Age) {
+        return;
+    }
+    const auto token = credentials.load(QStringLiteral("github"), pacsmith::CredentialSource::Age,
+                                        nullptr);
+    const bool hasToken = token && !token->isEmpty();
+    if (settings.githubTokenConfigured == hasToken) return;
+    settings.githubTokenConfigured = hasToken;
+    QString error;
+    static_cast<void>(settingsStore.save(settings, &error));
 }
 
 }
 
 int main(int argc, char *argv[]) {
+    if (argvHasOption(argc, argv, "--check")) {
+        QCoreApplication application(argc, argv);
+        QCoreApplication::setApplicationName(QStringLiteral("pacsmith-gui"));
+        QCoreApplication::setApplicationVersion(QStringLiteral(PACSMITH_VERSION));
+        QCoreApplication::setOrganizationName(QStringLiteral("PacSmith"));
+        return runStandaloneCheck();
+    }
+
     QApplication application(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("pacsmith-gui"));
     QCoreApplication::setApplicationVersion(QStringLiteral(PACSMITH_VERSION));
@@ -84,8 +97,11 @@ int main(int argc, char *argv[]) {
                                     QStringLiteral("Import a vendor artifact or GitHub release URL"), QStringLiteral("source"));
     parser.addOption(importOption);
     QCommandLineOption trayOption(QStringLiteral("tray"),
-                                  QStringLiteral("Run PacSmith's update-status tray helper"));
+                                  QStringLiteral("Run PacSmith in the background with an update-status tray icon"));
     parser.addOption(trayOption);
+    QCommandLineOption checkOption(QStringLiteral("check"),
+                                   QStringLiteral("Ask the running PacSmith session to check for updates, or run a CLI check if none is running"));
+    parser.addOption(checkOption);
     parser.addPositionalArgument(QStringLiteral("source"),
                                  QStringLiteral("Artifact path or GitHub release URL"),
                                  QStringLiteral("[source]"));
@@ -98,147 +114,34 @@ int main(int argc, char *argv[]) {
     }
     parser.process(arguments);
 
-    if (parser.isSet(trayOption)) {
-        const auto settings = pacsmith::AppSettingsStore{}.load();
-        if (!settings.updates.enabled || settings.updates.trayMode == pacsmith::TrayMode::Disabled ||
-            !pacsmith::BackgroundUpdateManager::unitInstalled()) return 0;
-        if (!QSystemTrayIcon::isSystemTrayAvailable()) return 1;
-        QSystemTrayIcon tray;
-        QMenu menu;
-        auto *openAction = menu.addAction(QStringLiteral("Open PacSmith"));
-        auto *checkAction = menu.addAction(QStringLiteral("Check for Updates Now"));
-        menu.addSeparator();
-        auto *exitAction = menu.addAction(QStringLiteral("Exit"));
-        tray.setContextMenu(&menu);
-        const auto openPacSmith = [&] {
-            if (pacsmith::gui::GuiInstanceServer::activateExisting()) return;
-            if (!QProcess::startDetached(QCoreApplication::applicationFilePath(), {})) {
-                tray.showMessage(QStringLiteral("PacSmith"),
-                                 QStringLiteral("Could not start PacSmith."));
-            }
-        };
-        QObject::connect(openAction, &QAction::triggered, &application, openPacSmith);
-        QObject::connect(&tray, &QSystemTrayIcon::activated, &application,
-                         [&](const QSystemTrayIcon::ActivationReason reason) {
-            if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick ||
-                reason == QSystemTrayIcon::MiddleClick) {
-                menu.popup(QCursor::pos());
-            }
-        });
-        QObject::connect(checkAction, &QAction::triggered, &application, [&] {
-            QString error;
-            if (!pacsmith::BackgroundUpdateManager::runNow(&error)) tray.showMessage(QStringLiteral("PacSmith"), error);
-        });
-        QObject::connect(exitAction, &QAction::triggered, &application, &QApplication::quit);
-        QTimer refreshTimer;
-        refreshTimer.setInterval(5000);
-        const auto refresh = [&] {
-            const auto current = pacsmith::BackgroundUpdateStateStore::load();
-            tray.setIcon(trayStatusIcon(application, current.availableUpdates));
-            tray.setToolTip(current.checking ? QStringLiteral("PacSmith is checking for updates")
-                : current.availableUpdates > 0 ? QStringLiteral("PacSmith: %1 update(s) available").arg(current.availableUpdates)
-                                               : QStringLiteral("PacSmith: packages are current"));
-            const bool visible = settings.updates.trayMode == pacsmith::TrayMode::Always ||
-                                 current.checking || current.availableUpdates > 0;
-            tray.setVisible(visible);
-        };
-        QObject::connect(&refreshTimer, &QTimer::timeout, &application, refresh);
-        refreshTimer.start();
-        refresh();
-        return application.exec();
-    }
-
+    const bool startHidden = parser.isSet(trayOption);
     QString importPath;
     if (parser.isSet(importOption)) importPath = parser.value(importOption);
     else if (!parser.positionalArguments().isEmpty()) importPath = parser.positionalArguments().first();
-    if (pacsmith::gui::GuiInstanceServer::activateExisting(importPath)) return 0;
 
-    pacsmith::gui::MainWindow window;
-    window.resize(1180, 760);
-    pacsmith::gui::GuiInstanceServer instanceServer;
-    QObject::connect(&instanceServer, &pacsmith::gui::GuiInstanceServer::activated, &window,
-                     [&window](const QString &path) { window.activateExistingSession(path); });
-    static_cast<void>(instanceServer.listen());
-    window.show();
-    if (!importPath.isEmpty()) {
-        const QUrl url(importPath);
-        window.importPackage(url.isValid() && url.scheme().startsWith(QStringLiteral("http"))
-                                 ? importPath
-                                 : QFileInfo(importPath).absoluteFilePath());
-    } else {
-        QTimer::singleShot(0, &window, [&window] {
-            pacsmith::AppSettingsStore settingsStore;
-            auto settings = settingsStore.load();
-            bool changed = false;
-            if (!settings.debAssociationPrompted) {
-                settings.debAssociationPrompted = true;
-                changed = true;
-                const auto xdgMime = QStandardPaths::findExecutable(QStringLiteral("xdg-mime"));
-                const auto currentDefault = [&xdgMime](const QString &mimeType) {
-                    if (xdgMime.isEmpty()) return QString{};
-                    QProcess query;
-                    query.start(xdgMime, {QStringLiteral("query"), QStringLiteral("default"),
-                                          mimeType});
-                    if (query.waitForFinished(3000)) {
-                        return QString::fromUtf8(query.readAllStandardOutput()).trimmed();
-                    }
-                    return QString{};
-                };
-                const QStringList packageMimeTypes{
-                    QStringLiteral("application/vnd.debian.binary-package"),
-                    QStringLiteral("application/x-rpm")};
-                const auto needsAssociation = std::any_of(
-                    packageMimeTypes.cbegin(), packageMimeTypes.cend(),
-                    [&currentDefault](const auto &mimeType) {
-                        return currentDefault(mimeType) != QStringLiteral("pacsmith.desktop");
-                    });
-                if (needsAssociation &&
-                    QMessageBox::question(
-                        &window, QStringLiteral("Open vendor packages with PacSmith"),
-                        QStringLiteral("Set PacSmith as your default application for DEB and RPM package files? This changes only your desktop user's MIME preferences.")) ==
-                        QMessageBox::Yes) {
-                    bool failed = xdgMime.isEmpty();
-                    for (const auto &mimeType : packageMimeTypes) {
-                        if (!failed && QProcess::execute(
-                                xdgMime, {QStringLiteral("default"), QStringLiteral("pacsmith.desktop"),
-                                          mimeType}) != 0) {
-                            failed = true;
-                        }
-                    }
-                    if (failed) {
-                        QMessageBox::warning(
-                            &window, QStringLiteral("Could not set package associations"),
-                            QStringLiteral("Install PacSmith for the current user first, then choose PacSmith from your desktop's Open With dialog."));
-                    }
-                }
-            }
-            if (!settings.selfTrackingPrompted) {
-                settings.selfTrackingPrompted = true;
-                changed = true;
-                const pacsmith::ProjectStore store;
-                const bool emptyWorkbench = store.list().isEmpty();
-                const auto message = emptyWorkbench
-                    ? QStringLiteral("Set PacSmith up as the first project in this workbench? PacSmith will inspect the official x86_64 release artifact from GitHub and prepare a normal pacman package. It will remain marked Not installed until that package is actually installed through pacman.")
-                    : QStringLiteral("Track PacSmith's own official GitHub releases as a project too? It will remain marked Not installed unless a PacSmith-built package is actually installed through pacman.");
-                if (QMessageBox::question(&window, QStringLiteral("Track PacSmith updates"), message) ==
-                    QMessageBox::Yes) {
-                    if (changed) {
-                        QString error;
-                        if (!settingsStore.save(settings, &error)) {
-                            QMessageBox::warning(&window, QStringLiteral("Could not save onboarding settings"), error);
-                        }
-                        changed = false;
-                    }
-                    window.importPackage(QStringLiteral("https://github.com/anderson-arlen/pacsmith"));
-                }
-            }
-            if (changed) {
-                QString error;
-                if (!settingsStore.save(settings, &error)) {
-                    QMessageBox::warning(&window, QStringLiteral("Could not save onboarding settings"), error);
-                }
-            }
-        });
+    if (startHidden) {
+        if (pacsmith::gui::GuiInstanceServer::requestTray()) return 0;
+    } else if (pacsmith::gui::GuiInstanceServer::activateExisting(importPath)) {
+        return 0;
     }
+
+    pacsmith::AppSettingsStore settingsStore;
+    auto settings = settingsStore.load();
+    const bool hideWindow = startHidden && QSystemTrayIcon::isSystemTrayAvailable();
+    if (startHidden && !hideWindow) {
+        QMessageBox::warning(nullptr, QStringLiteral("PacSmith"),
+                             QStringLiteral("No system tray is available, so PacSmith will open in a window."));
+    }
+
+    pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
+    if (pacsmith::githubTokenUsesAge(settings) && credentials.hasAgeFile()) {
+        static_cast<void>(pacsmith::gui::promptUnlockAge(credentials, settingsStore.ageSecretsPath(),
+                                                         nullptr, false));
+        syncGithubTokenConfiguredFlag(settingsStore, credentials, settings);
+    }
+
+    pacsmith::gui::ApplicationSession session(settingsStore, credentials);
+    static_cast<void>(session.listen());
+    session.start(hideWindow, importPath);
     return application.exec();
 }

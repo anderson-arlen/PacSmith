@@ -96,7 +96,9 @@ pacsmith_target_defaults(pacsmith)
 
 add_executable(pacsmith-gui
     src/gui/main.cpp
+    src/gui/age_unlock.cpp
     src/gui/ai_progress_dialog.cpp
+    src/gui/application_session.cpp
     src/gui/command_progress_dialog.cpp
     src/gui/desktop_entry_highlighter.cpp
     src/gui/gui_instance.cpp
@@ -118,19 +120,11 @@ include(GNUInstallDirs)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/packaging)
 configure_file(packaging/pacsmith.desktop.in
                ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith.desktop @ONLY)
-configure_file(packaging/systemd/pacsmith-update.service.in
-               ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith-update.service @ONLY)
-configure_file(packaging/systemd/pacsmith-tray.service.in
-               ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith-tray.service @ONLY)
 install(TARGETS pacsmith pacsmith-gui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(DIRECTORY resources/icons/hicolor
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith-update.service
-              ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith-tray.service
-              packaging/systemd/pacsmith-update.timer
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/systemd/user)
 install(FILES README.md docs/ARCHITECTURE.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/pacsmith)
 
 include(CTest)

@@ -1003,6 +1003,10 @@ bool Project::hasAvailableUpdate() const {
     });
 }
 
+bool Project::ownsInstalledPackage() const {
+    return !installedVersion.isEmpty() && !externallyInstalled;
+}
+
 QJsonObject Project::toJson() const {
     QJsonArray releaseIds;
     for (const auto &item : releases) releaseIds.append(item.id);
