@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="resources/icons/pacsmith-hero.png" alt="PacSmith" width="192">
+</p>
+
 # PacSmith
 
 > [!WARNING]

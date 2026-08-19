@@ -7538,6 +7538,50 @@ void MainWindow::showSettings() {
     cleanupLayout->addStretch();
     settingsTabs->addTab(cleanupPage, QStringLiteral("Cleanup"));
 
+    auto *aboutPage = new QWidget(settingsTabs);
+    auto *aboutLayout = new QVBoxLayout(aboutPage);
+    aboutLayout->addStretch(1);
+    auto *hero = new QLabel(aboutPage);
+    QPixmap heroPixmap(QStringLiteral(":/pacsmith/icons/pacsmith-hero.png"));
+    const auto heroSide = qRound(192.0 * dialog.devicePixelRatioF());
+    auto heroScaled = heroPixmap.scaled(heroSide, heroSide, Qt::KeepAspectRatio,
+                                        Qt::SmoothTransformation);
+    heroScaled.setDevicePixelRatio(dialog.devicePixelRatioF());
+    hero->setPixmap(heroScaled);
+    hero->setAlignment(Qt::AlignCenter);
+    auto *aboutName = new QLabel(QStringLiteral("PacSmith"), aboutPage);
+    auto nameFont = aboutName->font();
+    if (nameFont.pointSize() > 0) nameFont.setPointSize(nameFont.pointSize() + 6);
+    else nameFont.setPixelSize(nameFont.pixelSize() + 8);
+    nameFont.setBold(true);
+    aboutName->setFont(nameFont);
+    aboutName->setAlignment(Qt::AlignCenter);
+    auto *aboutVersion = new QLabel(
+        QStringLiteral("Version %1").arg(QCoreApplication::applicationVersion()), aboutPage);
+    aboutVersion->setAlignment(Qt::AlignCenter);
+    auto *aboutSummary = new QLabel(
+        QStringLiteral("Convert vendor Linux packages into pacman packages you maintain yourself."),
+        aboutPage);
+    aboutSummary->setWordWrap(true);
+    aboutSummary->setAlignment(Qt::AlignCenter);
+    auto *aboutLink = new QLabel(
+        QStringLiteral("<a href=\"https://github.com/anderson-arlen/pacsmith\">github.com/anderson-arlen/pacsmith</a>"),
+        aboutPage);
+    aboutLink->setTextFormat(Qt::RichText);
+    aboutLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    aboutLink->setOpenExternalLinks(true);
+    aboutLink->setAlignment(Qt::AlignCenter);
+    aboutLayout->addWidget(hero);
+    aboutLayout->addSpacing(12);
+    aboutLayout->addWidget(aboutName);
+    aboutLayout->addWidget(aboutVersion);
+    aboutLayout->addSpacing(8);
+    aboutLayout->addWidget(aboutSummary);
+    aboutLayout->addSpacing(8);
+    aboutLayout->addWidget(aboutLink);
+    aboutLayout->addStretch(2);
+    settingsTabs->addTab(aboutPage, QStringLiteral("About"));
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
     auto *saveButton = buttons->button(QDialogButtonBox::Save);
     rootLayout->addWidget(buttons);

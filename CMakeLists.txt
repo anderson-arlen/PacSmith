@@ -113,6 +113,7 @@ qt_add_resources(pacsmith-gui gui_resources
     BASE resources
     FILES
         resources/icons/pacsmith.png
+        resources/icons/pacsmith-hero.png
         resources/icons/pacsmith-tray.png)
 pacsmith_target_defaults(pacsmith-gui)
 
