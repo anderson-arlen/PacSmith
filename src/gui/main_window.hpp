@@ -146,9 +146,13 @@ private:
     void updateDeleteButton();
     void populateOverview();
     void updateDashboardActions();
+    void updateProjectInfoActions();
     void placeUpdatesEditor();
     void handleProjectPrimaryAction();
+    void handleProjectInfoAction();
     void editPackageConfiguration();
+    [[nodiscard]] const PackageRelease *dashboardActionRelease() const;
+    [[nodiscard]] std::optional<EditorSection> firstReviewSection(const PackageRelease &release) const;
     void syncUpdateCheckButtons();
     void populateSourceOverview();
     void populatePackage();
@@ -217,7 +221,7 @@ private:
     void startUpdateCheck();
     void applyUpdateCheckResult(const UpdateCheckResult &result, const QString &sourceName);
     void applyRetentionCleanup();
-    void startBuild();
+    void startBuild(bool installWhenSuccessful = false);
     void startInstall();
     void startUninstall();
     void showCommandProgress(const QString &title, const QString &status, bool cancelable);
@@ -279,11 +283,11 @@ private:
     BuildService buildService_;
     InstallService installService_;
     QThread networkIoThread_;
-    DebDownloadService debDownloadService_;
+    DebDownloadService *debDownloadService_{nullptr};
     RepositoryKeyDownloadService signingKeyDownloadService_;
-    AptUpdateService aptUpdateService_;
-    RpmUpdateService rpmUpdateService_;
-    GitHubUpdateService githubUpdateService_;
+    AptUpdateService *aptUpdateService_{nullptr};
+    RpmUpdateService *rpmUpdateService_{nullptr};
+    GitHubUpdateService *githubUpdateService_{nullptr};
     AiAnalysisService aiService_;
     AiModelCatalogService aiModelCatalogService_;
     ChatGptLoginService chatGptLoginService_;
@@ -351,6 +355,8 @@ private:
     QLabel *projectStateLabel_{nullptr};
     QLabel *activeTrackerLabel_{nullptr};
     QLabel *projectAcquisitionLabel_{nullptr};
+    QLabel *projectActionNotice_{nullptr};
+    QPushButton *projectActionButton_{nullptr};
     QTableWidget *releaseTable_{nullptr};
     QPushButton *editReleaseButton_{nullptr};
     QPushButton *prepareReleaseButton_{nullptr};
@@ -457,6 +463,7 @@ private:
     QPushButton *resultPkgbuildBuildButton_{nullptr};
     QListWidget *historyList_{nullptr};
     QString pendingPackageOperation_;
+    bool installAfterSuccessfulBuild_{false};
     QString pendingDownloadedImport_;
     ImportOptions pendingImportOptions_;
     QHash<int, SectionLocation> sectionLocations_;

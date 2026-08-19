@@ -70,6 +70,7 @@
 #include <QNetworkRequest>
 #include <QInputDialog>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPainter>
 #include <QPen>
 #include <QProcess>
@@ -131,13 +132,23 @@ void cancelOnServiceThread(Service &service) {
 }
 
 template <typename Service>
+void shutdownNetworkService(Service *&service) {
+    if (service == nullptr) return;
+    cancelOnServiceThread(*service);
+    service->deleteLater();
+    service = nullptr;
+}
+
+template <typename Service>
 Service *networkServiceOnThread(QThread &thread) {
     auto *service = new Service;
     service->moveToThread(&thread);
     return service;
 }
 
-QLabel *pageIntroduction(const QString &text, QWidget *parent);
+void setSettingsSectionHelp(QLabel *label, const QString &summary, const QString &details);
+QLabel *settingsSectionHelp(QWidget *parent, const QString &summary, const QString &details);
+QLabel *pageIntroduction(const QString &summary, QWidget *parent, const QString &details = {});
 
 constexpr int projectSubtitleRole = Qt::UserRole + 1;
 constexpr int projectVisualStateRole = Qt::UserRole + 2;
@@ -481,9 +492,12 @@ std::optional<RepositorySourceChoice> chooseRepositorySource(QWidget *parent,
     auto *layout = new QVBoxLayout(&dialog);
     layout->addWidget(pageIntroduction(
         rpm
+            ? QStringLiteral("PacSmith will verify the signed RPM repository and import the newest matching package.")
+            : QStringLiteral("PacSmith will verify the signed APT repository and import the newest matching package."),
+        &dialog,
+        rpm
             ? QStringLiteral("PacSmith will download and let you review the repository signing key, verify signed RPM metadata, select the newest matching package, verify its checksum, and import it as a persistent project.")
-            : QStringLiteral("PacSmith will download and let you review the repository signing key, verify signed APT metadata, select the newest matching package, verify its SHA256, and import it as a persistent project."),
-        &dialog));
+            : QStringLiteral("PacSmith will download and let you review the repository signing key, verify signed APT metadata, select the newest matching package, verify its SHA256, and import it as a persistent project.")));
     auto *form = new QFormLayout;
     auto *repository = new QLineEdit(&dialog);
     repository->setPlaceholderText(rpm
@@ -754,8 +768,9 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
     dialog.resize(720, 520);
     auto *layout = new QVBoxLayout(&dialog);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Select the prebuilt artifact family PacSmith should install and track in future releases. The regular expression is saved as this release's GitHub update rule; it must match exactly one asset in each release."),
-        &dialog));
+        QStringLiteral("Choose the prebuilt artifact family PacSmith should track in later releases."),
+        &dialog,
+        QStringLiteral("The regular expression is saved as this release's GitHub update rule; it must match exactly one asset in each release.")));
     auto *expressionRow = new QWidget(&dialog);
     auto *expressionLayout = new QHBoxLayout(expressionRow);
     expressionLayout->setContentsMargins(0, 0, 0, 0);
@@ -854,10 +869,8 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
     return GitHubRuleChoice{expression->text(), prerelease->isChecked()};
 }
 
-QLabel *pageIntroduction(const QString &text, QWidget *parent) {
-    auto *label = new QLabel(text, parent);
-    label->setWordWrap(true);
-    return label;
+QLabel *pageIntroduction(const QString &summary, QWidget *parent, const QString &details) {
+    return settingsSectionHelp(parent, summary, details);
 }
 
 QString formatLocalDateTime(const QDateTime &value) {
@@ -883,21 +896,59 @@ QFrame *settingsStatusFrame(QWidget *parent) {
     return frame;
 }
 
-void setSettingsSectionHelp(QLabel *label, const QString &summary, const QString &details) {
-    label->setProperty("helpDetails", details);
-    auto text = summary.toHtmlEscaped();
-    if (!details.isEmpty()) {
-        text += QStringLiteral(" <a href=\"learn-more\">Learn more</a>");
+void showHelpDetails(QWidget *host, QLabel *source, const QString &details) {
+    auto *dialog = new QDialog(host);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("More information"));
+    dialog->setWindowModality(Qt::WindowModal);
+    auto *layout = new QVBoxLayout(dialog);
+    auto *text = new QLabel(dialog);
+    text->setWordWrap(true);
+    text->setTextFormat(Qt::PlainText);
+    text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    text->setText(details);
+    layout->addWidget(text);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    layout->addWidget(buttons);
+    dialog->adjustSize();
+    if (dialog->width() < 480) dialog->resize(480, dialog->height());
+
+    QPointer<QLabel> guard(source);
+    const auto flags = source != nullptr ? source->textInteractionFlags() : Qt::TextInteractionFlags{};
+    if (source != nullptr) {
+        source->clearFocus();
+        source->setTextInteractionFlags(Qt::NoTextInteraction);
     }
+    QObject::connect(dialog, &QDialog::finished, qApp, [guard, flags] {
+        QTimer::singleShot(0, qApp, [guard, flags] {
+            if (guard != nullptr) guard->setTextInteractionFlags(flags);
+        });
+    });
+    dialog->open();
+}
+
+void setSettingsSectionHelp(QLabel *label, const QString &summary, const QString &details) {
+    if (label == nullptr) return;
+    label->setProperty("helpDetails", details);
+    if (details.isEmpty()) {
+        label->setTextFormat(Qt::PlainText);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        label->setText(summary);
+        return;
+    }
+    label->setTextFormat(Qt::RichText);
+    label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    label->setOpenExternalLinks(false);
+    auto text = summary.toHtmlEscaped();
+    if (!text.isEmpty()) text += QLatin1Char(' ');
+    text += QStringLiteral("<a href=\"learn-more\">Learn more</a>");
     label->setText(text);
 }
 
 QLabel *settingsSectionHelp(QWidget *parent, const QString &summary, const QString &details) {
     auto *label = new QLabel(parent);
     label->setWordWrap(true);
-    label->setTextFormat(Qt::RichText);
-    label->setTextInteractionFlags(Qt::TextBrowserInteraction);
-    label->setOpenExternalLinks(false);
     auto font = label->font();
     if (font.pointSize() >= 10) font.setPointSize(font.pointSize() - 1);
     label->setFont(font);
@@ -912,8 +963,12 @@ QLabel *settingsSectionHelp(QWidget *parent, const QString &summary, const QStri
     QObject::connect(label, &QLabel::linkActivated, label, [label](const QString &) {
         const auto more = label->property("helpDetails").toString();
         if (more.isEmpty()) return;
-        QMessageBox::information(label->window() != nullptr ? label->window() : static_cast<QWidget *>(label),
-                                 QStringLiteral("More information"), more);
+        QPointer<QLabel> source(label);
+        QTimer::singleShot(0, label, [source, more] {
+            if (source.isNull()) return;
+            auto *host = source->window() != nullptr ? source->window() : static_cast<QWidget *>(source.data());
+            showHelpDetails(host, source, more);
+        });
     });
     return label;
 }
@@ -939,24 +994,46 @@ QString sourcePackageTypeTitle(const SourcePackageType type) {
     return QStringLiteral("Not yet inspected");
 }
 
-QString sourcePackageTypeExplanation(const SourcePackageType type) {
+void applySourcePackageTypeHelp(QLabel *label, const SourcePackageType type) {
     switch (type) {
     case SourcePackageType::Debian:
-        return QStringLiteral("Official Debian/Ubuntu binary package. PacSmith inspects control metadata, maintainer scripts, and the data archive without executing anything.");
+        setSettingsSectionHelp(
+            label, QStringLiteral("Official Debian/Ubuntu binary package."),
+            QStringLiteral("PacSmith inspects control metadata, maintainer scripts, and the data archive without executing anything."));
+        return;
     case SourcePackageType::Rpm:
-        return QStringLiteral("Official RPM binary package. PacSmith reads the header and cpio payload statically and never runs RPM scriptlets.");
+        setSettingsSectionHelp(
+            label, QStringLiteral("Official RPM binary package."),
+            QStringLiteral("PacSmith reads the header and cpio payload statically and never runs RPM scriptlets."));
+        return;
     case SourcePackageType::ArchPackage:
-        return QStringLiteral("Existing Arch package. PacSmith reads .PKGINFO and the payload, then rebuilds a new package with PacSmith identity metadata.");
+        setSettingsSectionHelp(
+            label, QStringLiteral("Existing Arch package."),
+            QStringLiteral("PacSmith reads .PKGINFO and the payload, then rebuilds a new package with PacSmith identity metadata."));
+        return;
     case SourcePackageType::Archive:
-        return QStringLiteral("tar, zip, or 7z application bundle. PacSmith maps the inspected layout into an Arch package, usually under /opt.");
+        setSettingsSectionHelp(
+            label, QStringLiteral("tar, zip, or 7z application bundle."),
+            QStringLiteral("PacSmith maps the inspected layout into an Arch package, usually under /opt."));
+        return;
     case SourcePackageType::AppImage:
-        return QStringLiteral("Type 2 AppImage. PacSmith decomposes the AppDir with unsquashfs; it does not run the image, FUSE-mount it, or keep the embedded updater.");
+        setSettingsSectionHelp(
+            label, QStringLiteral("Type 2 AppImage."),
+            QStringLiteral("PacSmith decomposes the AppDir with unsquashfs; it does not run the image, FUSE-mount it, or keep the embedded updater."));
+        return;
     case SourcePackageType::ElfBinary:
-        return QStringLiteral("Standalone Linux executable identified from its ELF header. PacSmith installs it to an explicit /usr/bin path and never runs it during analysis.");
+        setSettingsSectionHelp(
+            label, QStringLiteral("Standalone Linux executable."),
+            QStringLiteral("Identified from its ELF header. PacSmith installs it to an explicit /usr/bin path and never runs it during analysis."));
+        return;
     case SourcePackageType::Unknown:
-        return QStringLiteral("This release has been recorded but its artifact has not been downloaded and inspected yet.");
+        setSettingsSectionHelp(
+            label,
+            QStringLiteral("This release has been recorded but its artifact has not been inspected yet."),
+            {});
+        return;
     }
-    return {};
+    setSettingsSectionHelp(label, {}, {});
 }
 
 QString acquisitionKindTitle(const AcquisitionKind kind) {
@@ -1335,10 +1412,14 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     setAcceptDrops(true);
     qRegisterMetaType<UpdateCheckResult>();
     networkIoThread_.setObjectName(QStringLiteral("pacsmith-network-io"));
-    debDownloadService_.moveToThread(&networkIoThread_);
-    aptUpdateService_.moveToThread(&networkIoThread_);
-    rpmUpdateService_.moveToThread(&networkIoThread_);
-    githubUpdateService_.moveToThread(&networkIoThread_);
+    debDownloadService_ = new DebDownloadService;
+    aptUpdateService_ = new AptUpdateService;
+    rpmUpdateService_ = new RpmUpdateService;
+    githubUpdateService_ = new GitHubUpdateService;
+    debDownloadService_->moveToThread(&networkIoThread_);
+    aptUpdateService_->moveToThread(&networkIoThread_);
+    rpmUpdateService_->moveToThread(&networkIoThread_);
+    githubUpdateService_->moveToThread(&networkIoThread_);
     networkIoThread_.start();
 
     auto *githubAction = new QAction(QStringLiteral("GitHub Link…"), this);
@@ -1427,8 +1508,8 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     updatesEditor_ = createUpdatesPage();
     dashboardUpdatesHost_->layout()->addWidget(updatesEditor_);
     projectTabs_->addTab(createProjectInfoPage(), QStringLiteral("Project Info"));
-    projectTabs_->addTab(dashboardUpdatesHost_, QStringLiteral("Updates"));
-    projectTabs_->addTab(createOverviewPage(), QStringLiteral("Version History"));
+    projectTabs_->addTab(createOverviewPage(), QStringLiteral("Versions"));
+    projectTabs_->addTab(dashboardUpdatesHost_, QStringLiteral("Update Monitoring"));
     connect(projectTabs_, &QTabWidget::currentChanged, this, [this] {
         if (rightStack_ == nullptr || rightStack_->currentIndex() != 0) return;
         if (projectTabs_->currentWidget() == dashboardUpdatesHost_) {
@@ -1591,10 +1672,12 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             persistCurrent();
         }
         finishCommandProgress(false, QStringLiteral("Build could not start: %1").arg(message));
+        installAfterSuccessfulBuild_ = false;
         if (commandProgress_ == nullptr) {
             QMessageBox::critical(this, QStringLiteral("Build could not start"), message);
         }
         populateBuild();
+        updateDashboardActions();
         updateDeleteButton();
     });
     connect(&buildService_, &BuildService::finished, this, [this](const ProcessResult &result) {
@@ -1619,6 +1702,8 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         populateBuild();
         populateHistory();
         updateDeleteButton();
+        const auto shouldInstall = result.succeeded() && !result.canceled && installAfterSuccessfulBuild_;
+        installAfterSuccessfulBuild_ = false;
         finishCommandProgress(!result.canceled && result.succeeded(),
                               result.canceled ? QStringLiteral("Build canceled.")
                               : result.succeeded() ? QStringLiteral("Build succeeded.")
@@ -1627,6 +1712,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         statusBar()->showMessage(result.canceled ? QStringLiteral("Build canceled")
                                  : result.succeeded() ? QStringLiteral("Build succeeded")
                                                       : QStringLiteral("Build failed"), 8000);
+        if (shouldInstall) QTimer::singleShot(0, this, [this] { startInstall(); });
     });
     connect(&installService_, &InstallService::outputAvailable, this, [this](const QString &text) {
         if (commandProgress_ != nullptr) commandProgress_->appendOutput(text);
@@ -1694,7 +1780,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         }
     });
 
-    connect(&debDownloadService_, &DebDownloadService::progress, this,
+    connect(debDownloadService_, &DebDownloadService::progress, this,
             [this](const qint64 received, const qint64 total) {
         preparationBytesReceived_ = received;
         preparationBytesTotal_ = total;
@@ -1724,7 +1810,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             updateUpdateCheckIndicators();
         }
     });
-    connect(&debDownloadService_, &DebDownloadService::failed, this, [this](const QString &message) {
+    connect(debDownloadService_, &DebDownloadService::failed, this, [this](const QString &message) {
         const auto projectId = preparingProjectId_;
         resetPreparationState();
         statusBar()->showMessage(QStringLiteral("Vendor artifact download failed"), 8000);
@@ -1732,7 +1818,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         if (!projectId.isEmpty()) refreshProjectList(projectId);
         populateOverview();
     });
-    connect(&debDownloadService_, &DebDownloadService::finished, this, [this](const QString &path) {
+    connect(debDownloadService_, &DebDownloadService::finished, this, [this](const QString &path) {
         preparationPhase_ = QStringLiteral("Inspecting");
         if (downloadProgress_ != nullptr) {
             downloadProgress_->close();
@@ -1863,21 +1949,21 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             statusBar()->showMessage(QStringLiteral("Repository signing key trusted and pinned"), 7000);
         }
     });
-    connect(&aptUpdateService_, &AptUpdateService::progressChanged, this, [this](const QString &message) {
+    connect(aptUpdateService_, &AptUpdateService::progressChanged, this, [this](const QString &message) {
         updateCheckStatus_->setText(message);
     });
-    connect(&aptUpdateService_, &AptUpdateService::finished, this, [this](const UpdateCheckResult &result) {
+    connect(aptUpdateService_, &AptUpdateService::finished, this, [this](const UpdateCheckResult &result) {
         applyUpdateCheckResult(result, QStringLiteral("APT"));
     });
-    connect(&rpmUpdateService_, &RpmUpdateService::progressChanged, this, [this](const QString &message) {
+    connect(rpmUpdateService_, &RpmUpdateService::progressChanged, this, [this](const QString &message) {
         updateCheckStatus_->setText(message);
     });
-    connect(&rpmUpdateService_, &RpmUpdateService::finished, this, [this](const UpdateCheckResult &result) {
+    connect(rpmUpdateService_, &RpmUpdateService::finished, this, [this](const UpdateCheckResult &result) {
         applyUpdateCheckResult(result, QStringLiteral("RPM"));
     });
-    connect(&githubUpdateService_, &GitHubUpdateService::progressChanged, this,
+    connect(githubUpdateService_, &GitHubUpdateService::progressChanged, this,
             [this](const QString &message) { updateCheckStatus_->setText(message); });
-    connect(&githubUpdateService_, &GitHubUpdateService::finished, this,
+    connect(githubUpdateService_, &GitHubUpdateService::finished, this,
             [this](const UpdateCheckResult &result) {
         applyUpdateCheckResult(result, QStringLiteral("GitHub"));
     });
@@ -1993,13 +2079,18 @@ QWidget *MainWindow::createProjectInfoPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Project status and immutable acquisition details. Update settings are on the Updates tab."),
-        page));
+        QStringLiteral("Installed status and how this package was acquired."),
+        page,
+        QStringLiteral("Update settings are on the Update Monitoring tab. Acquisition details are recorded when PacSmith imports a vendor artifact and do not change when you edit package configuration.")));
+
     auto *summary = new QHBoxLayout;
+    summary->setSpacing(20);
     overviewIcon_ = new QLabel(page);
     overviewIcon_->setFixedSize(96, 96);
     overviewIcon_->setAlignment(Qt::AlignCenter);
+
     auto *details = new QVBoxLayout;
+    details->setSpacing(8);
     projectStateLabel_ = new QLabel(page);
     projectStateLabel_->setWordWrap(true);
     projectStateLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -2012,19 +2103,31 @@ QWidget *MainWindow::createProjectInfoPage() {
     details->addWidget(projectStateLabel_);
     details->addWidget(activeTrackerLabel_);
     details->addWidget(projectAcquisitionLabel_);
-    details->addStretch();
+
+    auto *actions = new QWidget(page);
+    auto *actionLayout = new QVBoxLayout(actions);
+    actionLayout->setContentsMargins(0, 0, 0, 0);
+    actionLayout->setSpacing(8);
+    projectActionNotice_ = new QLabel(actions);
+    projectActionNotice_->setWordWrap(true);
+    projectActionNotice_->setVisible(false);
+    projectActionButton_ = new QPushButton(actions);
+    applyPrimaryActionStyle(projectActionButton_);
+    projectActionButton_->setVisible(false);
+    projectActionButton_->setMinimumWidth(240);
+    editConfigurationButton_ = new QPushButton(QStringLiteral("Edit Package Configuration"), actions);
+    editConfigurationButton_->setVisible(false);
+    editConfigurationButton_->setMinimumWidth(240);
+    actionLayout->addWidget(projectActionNotice_);
+    actionLayout->addWidget(projectActionButton_);
+    actionLayout->addWidget(editConfigurationButton_);
+
     summary->addWidget(overviewIcon_, 0, Qt::AlignTop);
     summary->addLayout(details, 1);
+    summary->addWidget(actions, 0, Qt::AlignTop);
     layout->addLayout(summary);
-
-    auto *editRow = new QHBoxLayout;
-    editRow->addStretch();
-    editConfigurationButton_ = new QPushButton(QStringLiteral("Edit Package Configuration"), page);
-    editConfigurationButton_->setVisible(false);
-    editRow->addWidget(editConfigurationButton_);
-    editRow->addStretch();
-    layout->addLayout(editRow);
-    layout->addStretch();
+    layout->addStretch(1);
+    connect(projectActionButton_, &QPushButton::clicked, this, &MainWindow::handleProjectInfoAction);
     connect(editConfigurationButton_, &QPushButton::clicked, this,
             &MainWindow::editPackageConfiguration);
     return page;
@@ -2034,7 +2137,9 @@ QWidget *MainWindow::createOverviewPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Each vendor release retains its acquisition evidence, update configuration, package recipe, builds, and install history. Select a release for operational actions or open its package setup."), page));
+        QStringLiteral("Every imported vendor release, with actions for the selected row."),
+        page,
+        QStringLiteral("Each vendor release retains its acquisition evidence, update configuration, package recipe, builds, and install history. Select a release to download, install, roll back, or open package setup.")));
     releaseTable_ = new QTableWidget(page);
     releaseTable_->setColumnCount(8);
     releaseTable_->setHorizontalHeaderLabels({QStringLiteral("Vendor version"),
@@ -2092,7 +2197,7 @@ QWidget *MainWindow::createOverviewPage() {
                                                  : QStringLiteral("Download & Prepare"));
         prepareReleaseButton_->setEnabled(preparing ||
             (selected != nullptr && selected->state == ReleaseState::Discovered &&
-             !debDownloadService_.isRunning() && importThread_ == nullptr));
+             !debDownloadService_->isRunning() && importThread_ == nullptr));
         const bool installed = selected != nullptr && selected->id == project_->installedReleaseId;
         installReleaseButton_->setEnabled(selected != nullptr && !installed &&
                                           !retainedPackagePath(store_, *selected).isEmpty() &&
@@ -2125,14 +2230,13 @@ QWidget *MainWindow::createSourceOverviewPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("This is the vendor artifact PacSmith imported. It is evidence only: analysis never executes package content, and this page does not change the generated Arch package."),
-        page));
+        QStringLiteral("The imported vendor artifact. Inspection never executes it."),
+        page,
+        QStringLiteral("This page is evidence only. Analysis never executes package content, and nothing here changes the generated Arch package.")));
     sourceTypeHeadline_ = new QLabel(page);
     sourceTypeHeadline_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     sourceTypeHeadline_->setWordWrap(true);
-    sourceTypeExplanation_ = new QLabel(page);
-    sourceTypeExplanation_->setWordWrap(true);
-    sourceTypeExplanation_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    sourceTypeExplanation_ = settingsSectionHelp(page, {}, {});
     sourceAcquisitionDetail_ = new QLabel(page);
     sourceAcquisitionDetail_->setWordWrap(true);
     sourceAcquisitionDetail_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -2156,8 +2260,9 @@ QWidget *MainWindow::createSourceMetadataPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Vendor metadata taken from the imported artifact. These fields describe the source package; Arch package name, dependencies, and install paths are configured separately."),
-        page));
+        QStringLiteral("Vendor metadata from the imported artifact."),
+        page,
+        QStringLiteral("These fields describe the source package. Arch package name, dependencies, and install paths are configured separately.")));
     auto *splitter = new QSplitter(Qt::Vertical, page);
     metadataView_ = new QPlainTextEdit(splitter);
     rawMetadataView_ = new QPlainTextEdit(splitter);
@@ -2179,8 +2284,9 @@ QWidget *MainWindow::createInstallLayoutPage() {
     auto *mappingLayout = new QFormLayout(mappingGroup);
     installMappingLayout_ = mappingLayout;
     auto *mappingExplanation = pageIntroduction(
-        QStringLiteral("These settings control how the vendor archive or executable is laid out in the generated Arch package. They do not modify the imported artifact."),
-        mappingGroup);
+        QStringLiteral("How the vendor archive or executable is laid out in the Arch package."),
+        mappingGroup,
+        QStringLiteral("These settings do not modify the imported artifact."));
     mappingLayout->addRow(mappingExplanation);
     archiveLayout_ = new QComboBox(mappingGroup);
     archiveLayout_->addItems({QStringLiteral("Install under /opt"),
@@ -2201,10 +2307,10 @@ QWidget *MainWindow::createInstallLayoutPage() {
     mappingLayout->addRow(QStringLiteral("/opt directory"), installOptDirectory_);
     mappingLayout->addRow(QStringLiteral("Detected common root"), installCommonPrefix_);
     mappingLayout->addRow(QString{}, installStripPrefix_);
-    installCommandsHint_ = new QLabel(
-        QStringLiteral("PATH commands for this archive are configured on Commands. Choose a payload file there instead of typing a raw path here."),
-        mappingGroup);
-    installCommandsHint_->setWordWrap(true);
+    installCommandsHint_ = settingsSectionHelp(
+        mappingGroup,
+        QStringLiteral("PATH commands for this archive are configured on Commands."),
+        QStringLiteral("Choose a payload file there instead of typing a raw path here."));
     mappingLayout->addRow(installCommandsHint_);
     mappingLayout->addRow(QStringLiteral("Executable inside archive"), installBinarySource_);
     mappingLayout->addRow(QStringLiteral("Command destination"), installBinaryDestination_);
@@ -2254,7 +2360,9 @@ QWidget *MainWindow::createDependenciesPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("“Require Arch package” adds the mapped package to depends. PacSmith checks required names against your configured pacman repositories: unresolved mappings that need your review are amber, unavailable package names are red, and typing in the Arch package column suggests repository package names. Green indicates an AI-assisted decision that is resolved. Use “Bundled with application” or “Provided by this package” only when the imported payload actually contains that dependency; those choices remove it from depends."), page));
+        QStringLiteral("Map vendor dependencies onto Arch packages and how they are treated."),
+        page,
+        QStringLiteral("“Require Arch package” adds the mapped package to depends. PacSmith checks required names against your configured pacman repositories: unresolved mappings that need your review are amber, unavailable package names are red, and typing in the Arch package column suggests repository package names. Green indicates an AI-assisted decision that is resolved. Use “Bundled with application” or “Provided by this package” only when the imported payload actually contains that dependency; those choices remove it from depends.")));
     dependenciesTable_ = new QTableWidget(page);
     dependenciesTable_->setColumnCount(5);
     dependenciesTable_->setHorizontalHeaderLabels({QStringLiteral("Debian dependency"), QStringLiteral("Arch package"),
@@ -2277,8 +2385,9 @@ QWidget *MainWindow::createVendorScriptsPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Original maintainer scripts from the vendor package. PacSmith never executes them. Use them as reference while deciding Arch-specific handling under Configuration."),
-        page));
+        QStringLiteral("Original vendor maintainer scripts. PacSmith never executes them."),
+        page,
+        QStringLiteral("Use them as reference while deciding Arch-specific handling under Configuration.")));
     auto *splitter = new QSplitter(page);
     scriptsList_ = new QListWidget(splitter);
     scriptView_ = new QPlainTextEdit(splitter);
@@ -2304,8 +2413,9 @@ QWidget *MainWindow::createConfigScriptsPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Vendor maintainer scripts are the source. Each row maps a responsibility onto Arch handling; the .install file below is the destination pacman may run as root. Original script text stays on the imported package tab."),
-        page));
+        QStringLiteral("Map vendor script responsibilities onto Arch lifecycle handling."),
+        page,
+        QStringLiteral("Vendor maintainer scripts are the source. Each row maps a responsibility onto Arch handling; the .install file below is the destination pacman may run as root. Original script text stays on the imported package tab.")));
     scriptsActionNotice_ = new QLabel(page);
     scriptsActionNotice_->setWordWrap(true);
     scriptsActionNotice_->setFrameStyle(QFrame::StyledPanel);
@@ -2391,7 +2501,9 @@ QWidget *MainWindow::createPayloadPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     payloadIntroduction_ = pageIntroduction(
-        QStringLiteral("Vendor filesystem from the imported artifact. Most files need no action. Keep or exclude records a recipe rule for the resulting package; it does not modify the source archive. Changed upstream content restores review."), page);
+        QStringLiteral("Filesystem from the imported artifact. Most files need no action."),
+        page,
+        QStringLiteral("Keep or exclude records a recipe rule for the resulting package; it does not modify the source archive. Changed upstream content restores review."));
     layout->addWidget(payloadIntroduction_);
     auto *splitter = new QSplitter(Qt::Vertical, page);
     payloadTree_ = new QTreeWidget(page);
@@ -2435,8 +2547,9 @@ QWidget *MainWindow::createCommandsPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Choose which inspected executables the generated Arch package should expose on PATH. Rename a command to change the /usr/bin name. Source paths name exact files in the vendor artifact; they are not edited there. Use Add from payload to map any archive file onto /usr/bin."),
-        page));
+        QStringLiteral("Choose which executables the Arch package should expose on PATH."),
+        page,
+        QStringLiteral("Rename a command to change the /usr/bin name. Source paths name exact files in the vendor artifact; they are not edited there. Use Add from payload to map any archive file onto /usr/bin.")));
     commandsTable_ = new QTableWidget(page);
     commandsTable_->setColumnCount(6);
     commandsTable_->setHorizontalHeaderLabels(
@@ -2474,8 +2587,9 @@ QWidget *MainWindow::createAppRunPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("AppRun is the AppImage entry point. It stays inside the extracted AppDir under /opt with the rest of the image; the PATH command on Commands is a separate wrapper. Vendor AppRun scripts often assume they are still a mounted AppImage and can hang or mis-launch once extracted. Review this script, keep the original, edit it, or resolve it with AI."),
-        page));
+        QStringLiteral("AppRun is the AppImage entry point. Review it before building."),
+        page,
+        QStringLiteral("It stays inside the extracted AppDir under /opt with the rest of the image; the PATH command on Commands is a separate wrapper. Vendor AppRun scripts often assume they are still a mounted AppImage and can hang or mis-launch once extracted. Review this script, keep the original, edit it, or resolve it with AI.")));
     appRunReviewBanner_ = new QFrame(page);
     appRunReviewBanner_->setObjectName(QStringLiteral("appRunReviewBanner"));
     appRunReviewBanner_->setStyleSheet(QStringLiteral(
@@ -2527,8 +2641,9 @@ QWidget *MainWindow::createDesktopEntriesPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Desktop entries are host integration owned by the local recipe. PacSmith derives genuine application launchers from vendor metadata, preserves the vendor payload unchanged, and carries user-edited or additional entries forward exactly."),
-        page));
+        QStringLiteral("Desktop launchers for the generated Arch package."),
+        page,
+        QStringLiteral("PacSmith derives genuine application launchers from vendor metadata, preserves the vendor payload unchanged, and carries user-edited or additional entries forward exactly.")));
     auto *splitter = new QSplitter(page);
     auto *left = new QWidget(splitter);
     auto *leftLayout = new QVBoxLayout(left);
@@ -2586,8 +2701,9 @@ QWidget *MainWindow::createIconPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Select an icon detected in the inspected artifact, import a local image, or fetch an official HTTPS image for review. PacSmith stores the chosen bytes in the release and pins their SHA256."),
-        page));
+        QStringLiteral("Choose an icon from the artifact, a local file, or an official HTTPS URL."),
+        page,
+        QStringLiteral("PacSmith stores the chosen bytes in the release and pins their SHA256.")));
     auto *top = new QHBoxLayout;
     iconPreview_ = new QLabel(page);
     iconPreview_->setFixedSize(160, 160);
@@ -2632,8 +2748,9 @@ QWidget *MainWindow::createPkgbuildPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Custom mode: this PKGBUILD is what makepkg executes. Guided configuration is ignored until you switch back. Saving keeps this file user-owned."),
-        page));
+        QStringLiteral("This PKGBUILD is what makepkg executes in Custom mode."),
+        page,
+        QStringLiteral("Guided configuration is ignored until you switch back. Saving keeps this file user-owned.")));
     pkgbuildState_ = new QLabel(page);
     pkgbuildEditor_ = new QPlainTextEdit(page);
     pkgbuildEditor_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -2661,7 +2778,7 @@ QWidget *MainWindow::createPkgbuildPage() {
                                  PkgbuildGenerator::validate(pkgbuildEditor_->toPlainText()));
     });
     connect(guidedButton, &QPushButton::clicked, this, [this] { setConfigurationMode(false); });
-    connect(pkgbuildBuildButton_, &QPushButton::clicked, this, &MainWindow::startBuild);
+    connect(pkgbuildBuildButton_, &QPushButton::clicked, this, [this] { startBuild(); });
     connect(pkgbuildEditor_->document(), &QTextDocument::modificationChanged, this, [this](const bool modified) {
         if (!project_ || pkgbuildState_ == nullptr) return;
         pkgbuildState_->setText(modified ? QStringLiteral("● Unsaved editor changes")
@@ -2674,8 +2791,9 @@ QWidget *MainWindow::createResultPkgbuildPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Read-only PKGBUILD makepkg will run. Change Guided settings to regenerate it, or switch Configuration to Custom to edit it."),
-        page));
+        QStringLiteral("Read-only PKGBUILD that makepkg will run."),
+        page,
+        QStringLiteral("Change Guided settings to regenerate it, or switch Configuration to Custom to edit it.")));
     pkgbuildPreviewNotice_ = new QLabel(page);
     pkgbuildPreviewNotice_->setWordWrap(true);
     pkgbuildPreview_ = new QPlainTextEdit(page);
@@ -2697,7 +2815,7 @@ QWidget *MainWindow::createResultPkgbuildPage() {
                                  PkgbuildGenerator::validate(currentPkgbuildText()));
     });
     connect(editButton, &QPushButton::clicked, this, [this] { setConfigurationMode(true); });
-    connect(resultPkgbuildBuildButton_, &QPushButton::clicked, this, &MainWindow::startBuild);
+    connect(resultPkgbuildBuildButton_, &QPushButton::clicked, this, [this] { startBuild(); });
     return page;
 }
 
@@ -2705,7 +2823,9 @@ QWidget *MainWindow::createUpdatesPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("How PacSmith will look for the next vendor release. On the project dashboard this edits the current tracking release (installed, or newest analyzed if nothing is installed). In Configuration it edits the open release. This is not part of the Pacman package, and it is separate from the immutable acquisition recorded for the imported artifact."), page));
+        QStringLiteral("How PacSmith looks for the next vendor release."),
+        page,
+        QStringLiteral("On the project dashboard this edits the current tracking release (installed, or newest analyzed if nothing is installed). In Configuration it edits the open release. This is not part of the Pacman package, and it is separate from the immutable acquisition recorded for the imported artifact.")));
     updateOwnerLabel_ = new QLabel(page);
     updateOwnerLabel_->setWordWrap(true);
     updateOwnerLabel_->setFrameStyle(QFrame::StyledPanel);
@@ -2947,8 +3067,9 @@ QWidget *MainWindow::createBuildPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Build the Arch package with makepkg, then install it with pacman. Progress and command output open in a dialog."),
-        page));
+        QStringLiteral("Build the Arch package with makepkg, then install it with pacman."),
+        page,
+        QStringLiteral("Progress and command output open in a dialog.")));
     buildChecklist_ = new QLabel(page);
     buildChecklist_->setWordWrap(true);
     buildButton_ = new QPushButton(QStringLiteral("Build"), page);
@@ -3074,7 +3195,7 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                                        const QUrl &signingKeyUrl,
                                        const QByteArray &signingKeyContents,
                                        const QString &signingKeySource) {
-    if (repositoryImportRunning_ || debDownloadService_.isRunning() ||
+    if (repositoryImportRunning_ || debDownloadService_->isRunning() ||
         importThread_ != nullptr) {
         statusBar()->showMessage(QStringLiteral("Another package acquisition is already in progress"),
                                  5000);
@@ -3282,8 +3403,8 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
             const auto url = QUrl(result.downloadUrl);
             const auto sha = result.sha256;
             const auto path = std::filesystem::path(target.toUtf8().constData());
-            onServiceThread(debDownloadService_, [this, url, sha, path] {
-                debDownloadService_.start(url, sha, path);
+            onServiceThread(*debDownloadService_, [this, url, sha, path] {
+                debDownloadService_->start(url, sha, path);
             });
         };
 
@@ -3576,8 +3697,8 @@ void MainWindow::placeUpdatesEditor() {
 }
 
 void MainWindow::syncUpdateCheckButtons() {
-    const bool busy = aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-                      githubUpdateService_.isRunning() || debDownloadService_.isRunning() ||
+    const bool busy = aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+                      githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
                       importThread_ != nullptr;
     bool allowed = false;
     if (!busy && project_ && updateEditorRelease() != nullptr && updateStrategy_ != nullptr) {
@@ -3595,16 +3716,20 @@ void MainWindow::updateDashboardActions() {
         uninstallButton_->setEnabled(installed && !installService_.isRunning());
     }
     const auto *tracker = project_ ? project_->activeTrackingRelease() : nullptr;
+    const auto *editTarget = dashboardActionRelease();
+    if (editTarget == nullptr) editTarget = tracker;
     if (editConfigurationButton_ != nullptr) {
-        editConfigurationButton_->setVisible(tracker != nullptr &&
-                                             tracker->state != ReleaseState::Discovered);
+        editConfigurationButton_->setVisible(editTarget != nullptr &&
+                                             editTarget->state != ReleaseState::Discovered);
     }
     if (projectPrimaryButton_ == nullptr) {
+        updateProjectInfoActions();
         syncUpdateCheckButtons();
         return;
     }
     if (tracker == nullptr) {
         projectPrimaryButton_->setVisible(false);
+        updateProjectInfoActions();
         syncUpdateCheckButtons();
         return;
     }
@@ -3624,12 +3749,141 @@ void MainWindow::updateDashboardActions() {
     } else if (tracker->state == ReleaseState::Discovered) {
         projectPrimaryButton_->setVisible(true);
         projectPrimaryButton_->setText(QStringLiteral("Download & Prepare"));
-        projectPrimaryButton_->setEnabled(!debDownloadService_.isRunning() &&
+        projectPrimaryButton_->setEnabled(!debDownloadService_->isRunning() &&
                                           importThread_ == nullptr);
     } else {
         projectPrimaryButton_->setVisible(false);
     }
+    updateProjectInfoActions();
     syncUpdateCheckButtons();
+}
+
+const PackageRelease *MainWindow::dashboardActionRelease() const {
+    if (!project_) return nullptr;
+    if (project_->installedVersion.isEmpty()) {
+        const auto *tracker = project_->activeTrackingRelease();
+        if (tracker == nullptr || tracker->state == ReleaseState::Discovered ||
+            tracker->state == ReleaseState::Preparing) {
+            return nullptr;
+        }
+        return tracker;
+    }
+    if (!project_->hasAvailableUpdate() || project_->externallyInstalled) return nullptr;
+    const auto *installed = project_->installedRelease();
+    if (installed == nullptr) return nullptr;
+    const PackageRelease *best = nullptr;
+    for (const auto &candidate : project_->releases) {
+        if (candidate.state == ReleaseState::Discovered ||
+            candidate.state == ReleaseState::Preparing) {
+            continue;
+        }
+        if (candidate.id == installed->id) continue;
+        if (!candidate.debian.version.isEmpty() && !installed->debian.version.isEmpty() &&
+            comparePackageVersions(candidate.sourceType, candidate.debian.version,
+                                   installed->debian.version) <= 0) {
+            continue;
+        }
+        if (best == nullptr || compareReleaseVersions(candidate, *best) > 0) best = &candidate;
+    }
+    return best;
+}
+
+std::optional<MainWindow::EditorSection> MainWindow::firstReviewSection(
+    const PackageRelease &release) const {
+    const bool packageMappingNeedsAttention =
+        ((release.sourceType == SourcePackageType::Archive ||
+          release.sourceType == SourcePackageType::AppImage) &&
+         release.installMapping.archiveLayout == ArchiveLayout::OptBundle &&
+         release.installMapping.optDirectory.trimmed().isEmpty()) ||
+        (release.sourceType == SourcePackageType::ElfBinary &&
+         release.installMapping.binaryDestination.trimmed().isEmpty());
+    const bool dependencyReview = std::any_of(
+        release.dependencies.cbegin(), release.dependencies.cend(),
+        [this](const auto &dependency) {
+            return dependency.status == MappingStatus::Unresolved ||
+                   repositoryPackageUnavailable(dependency, repositoryDependencyAvailability_);
+        });
+    const bool lifecycleReview = !release.lifecycleScript.contents.isEmpty() &&
+        (!release.lifecycleScript.validationPassed ||
+         release.lifecycleScript.requiresAcknowledgement());
+    const bool commandReview = std::any_of(
+        release.installMapping.launchers.cbegin(), release.installMapping.launchers.cend(),
+        [](const auto &launcher) { return launcher.enabled && launcher.missing; }) ||
+        (release.sourceType == SourcePackageType::Archive &&
+         std::any_of(release.installMapping.desktopEntries.cbegin(),
+                     release.installMapping.desktopEntries.cend(),
+                     [&](const auto &desktop) {
+                         if (!desktop.enabled) return false;
+                         const auto command = desktopEntryCommand(desktop.contents);
+                         if (command.isEmpty()) return false;
+                         return std::none_of(
+                             release.installMapping.launchers.cbegin(),
+                             release.installMapping.launchers.cend(),
+                             [&](const auto &launcher) {
+                                 return launcher.enabled && !launcher.missing &&
+                                        launcher.commandName.compare(
+                                            command, Qt::CaseInsensitive) == 0;
+                             });
+                     }));
+    const bool desktopReview = std::any_of(
+        release.installMapping.desktopEntries.cbegin(),
+        release.installMapping.desktopEntries.cend(),
+        [](const auto &desktop) { return desktop.enabled && desktop.missing; });
+    const bool custom = release.pkgbuildManuallyModified;
+    if (packageMappingNeedsAttention && !custom) {
+        return release.sourceType == SourcePackageType::AppImage
+                   ? EditorSection::ResultInstallPlan
+                   : EditorSection::ConfigLayout;
+    }
+    if (dependencyReview && !custom) return EditorSection::ConfigDependencies;
+    if (pendingScriptFindings(release) > 0) return EditorSection::ConfigScripts;
+    if (lifecycleReview) return EditorSection::ConfigScripts;
+    if (pendingPayloadReviews(release) > 0) return EditorSection::SourceContents;
+    if (release.installMapping.appRun.requiresReview() && !custom) {
+        return EditorSection::ConfigAppRun;
+    }
+    if (commandReview && !custom) return EditorSection::ConfigCommands;
+    if (desktopReview && !custom) return EditorSection::ConfigDesktopEntries;
+    if (release.installMapping.icon.missing && !custom) return EditorSection::ConfigIcon;
+    return std::nullopt;
+}
+
+void MainWindow::updateProjectInfoActions() {
+    if (projectActionNotice_ == nullptr || projectActionButton_ == nullptr) return;
+    const auto *target = dashboardActionRelease();
+    const bool busy = buildService_.isRunning() || installService_.isRunning();
+    if (target == nullptr) {
+        projectActionNotice_->setVisible(false);
+        projectActionButton_->setVisible(false);
+        return;
+    }
+    const bool isUpdate = !project_->installedVersion.isEmpty();
+    const bool needsReview = firstReviewSection(*target).has_value();
+    projectActionNotice_->setVisible(true);
+    projectActionButton_->setVisible(true);
+    projectActionButton_->setEnabled(!busy);
+    if (needsReview) {
+        projectActionNotice_->setText(
+            isUpdate ? QStringLiteral("This update has changes that need review.")
+                     : QStringLiteral("This package has changes that need review."));
+        projectActionButton_->setText(QStringLiteral("Review Changes"));
+    } else {
+        projectActionNotice_->setText(
+            isUpdate ? QStringLiteral("This update is ready to build and install.")
+                     : QStringLiteral("This package is ready to build and install."));
+        projectActionButton_->setText(QStringLiteral("Build && Install"));
+    }
+}
+
+void MainWindow::handleProjectInfoAction() {
+    const auto *target = dashboardActionRelease();
+    if (target == nullptr) return;
+    if (firstReviewSection(*target).has_value()) {
+        showReleaseWorkbenchAtFirstAttention(target->id);
+        return;
+    }
+    currentReleaseId_ = target->id;
+    startBuild(true);
 }
 
 void MainWindow::handleProjectPrimaryAction() {
@@ -3663,9 +3917,10 @@ void MainWindow::handleProjectPrimaryAction() {
 
 void MainWindow::editPackageConfiguration() {
     if (!project_) return;
-    const auto *tracker = project_->activeTrackingRelease();
-    if (tracker == nullptr || tracker->state == ReleaseState::Discovered) return;
-    showReleaseWorkbenchAtFirstAttention(tracker->id);
+    const auto *target = dashboardActionRelease();
+    if (target == nullptr) target = project_->activeTrackingRelease();
+    if (target == nullptr || target->state == ReleaseState::Discovered) return;
+    showReleaseWorkbench(target->id);
 }
 
 void MainWindow::showProjectDashboard() {
@@ -3788,65 +4043,12 @@ void MainWindow::showReleaseWorkbenchAtFirstAttention(const QString &releaseId) 
     if (release == nullptr || release->state == ReleaseState::Discovered) return;
     showReleaseWorkbench(releaseId);
 
-    auto attention = EditorSection::ResultBuild;
-    const bool packageMappingNeedsAttention =
-        ((release->sourceType == SourcePackageType::Archive ||
-          release->sourceType == SourcePackageType::AppImage) &&
-         release->installMapping.archiveLayout == ArchiveLayout::OptBundle &&
-         release->installMapping.optDirectory.trimmed().isEmpty()) ||
-        (release->sourceType == SourcePackageType::ElfBinary &&
-         release->installMapping.binaryDestination.trimmed().isEmpty());
-    const bool dependencyReview = std::any_of(
-        release->dependencies.cbegin(), release->dependencies.cend(),
-        [this](const auto &dependency) {
-            return dependency.status == MappingStatus::Unresolved ||
-                   repositoryPackageUnavailable(dependency,
-                                                repositoryDependencyAvailability_);
-        });
-    const bool lifecycleReview = !release->lifecycleScript.contents.isEmpty() &&
-        (!release->lifecycleScript.validationPassed ||
-         release->lifecycleScript.requiresAcknowledgement());
-    const bool commandReview = std::any_of(
-        release->installMapping.launchers.cbegin(), release->installMapping.launchers.cend(),
-        [](const auto &launcher) { return launcher.enabled && launcher.missing; }) ||
-        (release->sourceType == SourcePackageType::Archive &&
-         std::any_of(release->installMapping.desktopEntries.cbegin(),
-                     release->installMapping.desktopEntries.cend(),
-                     [&](const auto &desktop) {
-                         if (!desktop.enabled) return false;
-                         const auto command = desktopEntryCommand(desktop.contents);
-                         if (command.isEmpty()) return false;
-                         return std::none_of(
-                             release->installMapping.launchers.cbegin(),
-                             release->installMapping.launchers.cend(),
-                             [&](const auto &launcher) {
-                                 return launcher.enabled && !launcher.missing &&
-                                        launcher.commandName.compare(
-                                            command, Qt::CaseInsensitive) == 0;
-                             });
-                     }));
-    const bool desktopReview = std::any_of(
-        release->installMapping.desktopEntries.cbegin(),
-        release->installMapping.desktopEntries.cend(),
-        [](const auto &desktop) { return desktop.enabled && desktop.missing; });
-    const bool custom = release->pkgbuildManuallyModified;
-    if (packageMappingNeedsAttention && !custom) {
-        attention = release->sourceType == SourcePackageType::AppImage
-                        ? EditorSection::ResultInstallPlan
-                        : EditorSection::ConfigLayout;
+    if (const auto attention = firstReviewSection(*release)) {
+        selectSection(*attention);
+        return;
     }
-    else if (dependencyReview && !custom) attention = EditorSection::ConfigDependencies;
-    else if (pendingScriptFindings(*release) > 0) attention = EditorSection::ConfigScripts;
-    else if (lifecycleReview) attention = EditorSection::ConfigScripts;
-    else if (pendingPayloadReviews(*release) > 0) attention = EditorSection::SourceContents;
-    else if (release->installMapping.appRun.requiresReview() && !custom) {
-        attention = EditorSection::ConfigAppRun;
-    }
-    else if (commandReview && !custom) attention = EditorSection::ConfigCommands;
-    else if (desktopReview && !custom) attention = EditorSection::ConfigDesktopEntries;
-    else if (release->installMapping.icon.missing && !custom) attention = EditorSection::ConfigIcon;
-    else if (custom) attention = EditorSection::ConfigPkgbuild;
-    selectSection(attention);
+    selectSection(release->pkgbuildManuallyModified ? EditorSection::ConfigPkgbuild
+                                                    : EditorSection::ResultBuild);
 }
 
 void MainWindow::selectDashboardRelease(const QString &releaseId) {
@@ -3927,8 +4129,8 @@ void MainWindow::updateUpdateCheckIndicators() {
     const auto updateState = BackgroundUpdateStateStore::load();
     QString checkingId = updateState.checkingProjectId;
     QString checkingName = updateState.checkingProjectName;
-    const bool inProcess = aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-                           githubUpdateService_.isRunning();
+    const bool inProcess = aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+                           githubUpdateService_->isRunning();
     if (checkingId.isEmpty() && inProcess && project_) {
         checkingId = project_->id;
         checkingName = project_->displayName.isEmpty() ? project_->archPackageName
@@ -3992,8 +4194,8 @@ void MainWindow::syncActivityTimer() {
 }
 
 bool MainWindow::updateCheckInProgress() const {
-    if (aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-        githubUpdateService_.isRunning()) {
+    if (aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+        githubUpdateService_->isRunning()) {
         return true;
     }
     return BackgroundUpdateStateStore::load().checking;
@@ -4001,8 +4203,8 @@ bool MainWindow::updateCheckInProgress() const {
 
 bool MainWindow::listActivityInProgress() const {
     if (!preparingProjectId_.isEmpty()) return true;
-    if (aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-        githubUpdateService_.isRunning()) {
+    if (aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+        githubUpdateService_->isRunning()) {
         return true;
     }
     const auto updateState = BackgroundUpdateStateStore::load();
@@ -4144,17 +4346,23 @@ void MainWindow::setKeepRunningInTray(const bool enabled) {
 }
 
 MainWindow::~MainWindow() {
-    if (!networkIoThread_.isRunning()) return;
-    cancelOnServiceThread(debDownloadService_);
-    cancelOnServiceThread(aptUpdateService_);
-    cancelOnServiceThread(rpmUpdateService_);
-    cancelOnServiceThread(githubUpdateService_);
-    networkIoThread_.quit();
-    networkIoThread_.wait();
-    debDownloadService_.moveToThread(QThread::currentThread());
-    aptUpdateService_.moveToThread(QThread::currentThread());
-    rpmUpdateService_.moveToThread(QThread::currentThread());
-    githubUpdateService_.moveToThread(QThread::currentThread());
+    if (networkIoThread_.isRunning()) {
+        shutdownNetworkService(debDownloadService_);
+        shutdownNetworkService(aptUpdateService_);
+        shutdownNetworkService(rpmUpdateService_);
+        shutdownNetworkService(githubUpdateService_);
+        networkIoThread_.quit();
+        networkIoThread_.wait();
+        return;
+    }
+    delete debDownloadService_;
+    delete aptUpdateService_;
+    delete rpmUpdateService_;
+    delete githubUpdateService_;
+    debDownloadService_ = nullptr;
+    aptUpdateService_ = nullptr;
+    rpmUpdateService_ = nullptr;
+    githubUpdateService_ = nullptr;
 }
 
 void MainWindow::reloadVisibleProjects() {
@@ -4179,7 +4387,7 @@ void MainWindow::importPackage(const QString &path) {
         return;
     }
     if (remote.isValid() && remote.scheme() == QStringLiteral("https")) {
-        if (debDownloadService_.isRunning()) return;
+        if (debDownloadService_->isRunning()) return;
         const auto filename = QFileInfo(remote.path()).fileName().isEmpty()
             ? QStringLiteral("vendor-artifact") : QFileInfo(remote.path()).fileName();
         if (QMessageBox::question(
@@ -4195,8 +4403,8 @@ void MainWindow::importPackage(const QString &path) {
             PkgbuildGenerator::sanitizePackageName(QFileInfo(filename).completeBaseName()),
             QStringLiteral("direct"), filename);
         const auto targetPath = std::filesystem::path(target.toUtf8().constData());
-        onServiceThread(debDownloadService_, [this, remote, targetPath] {
-            debDownloadService_.start(remote, {}, targetPath);
+        onServiceThread(*debDownloadService_, [this, remote, targetPath] {
+            debDownloadService_->start(remote, {}, targetPath);
         });
         return;
     }
@@ -4567,7 +4775,7 @@ void MainWindow::startGitHubChooserAi(const PackageRelease &probe,
 
 void MainWindow::downloadGitHubAsset(const PackageRelease &probe,
                                      const UpdateCheckResult &result) {
-    if (debDownloadService_.isRunning()) return;
+    if (debDownloadService_->isRunning()) return;
     pendingImportOptions_ = {};
     pendingImportOptions_.version = result.detectedVersion;
     pendingImportOptions_.githubAssetRegex = probe.update.githubAssetRegex;
@@ -4607,8 +4815,8 @@ void MainWindow::downloadGitHubAsset(const PackageRelease &probe,
     const auto url = QUrl(result.downloadUrl);
     const auto sha = result.sha256;
     const auto path = std::filesystem::path(target.toUtf8().constData());
-    onServiceThread(debDownloadService_, [this, url, sha, path] {
-        debDownloadService_.start(url, sha, path);
+    onServiceThread(*debDownloadService_, [this, url, sha, path] {
+        debDownloadService_->start(url, sha, path);
     });
 }
 
@@ -4631,10 +4839,10 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         return;
     }
     if (aiService_.isRunning()) aiService_.cancel();
-    if (aptUpdateService_.isRunning()) cancelOnServiceThread(aptUpdateService_);
-    if (rpmUpdateService_.isRunning()) cancelOnServiceThread(rpmUpdateService_);
-    if (githubUpdateService_.isRunning()) cancelOnServiceThread(githubUpdateService_);
-    if (debDownloadService_.isRunning()) cancelOnServiceThread(debDownloadService_);
+    if (aptUpdateService_->isRunning()) cancelOnServiceThread(*aptUpdateService_);
+    if (rpmUpdateService_->isRunning()) cancelOnServiceThread(*rpmUpdateService_);
+    if (githubUpdateService_->isRunning()) cancelOnServiceThread(*githubUpdateService_);
+    if (debDownloadService_->isRunning()) cancelOnServiceThread(*debDownloadService_);
     QMainWindow::closeEvent(event);
 }
 
@@ -4663,25 +4871,11 @@ void MainWindow::refreshProjectList(const QString &selectId) {
                 statusDescription = QStringLiteral("Installed package cannot be matched to a retained PacSmith release");
             } else if (project.hasAvailableUpdate()) {
                 visualState = ProjectVisualState::UpdateAvailable;
-                auto availableVersion = project.newestRelease() == nullptr
-                    ? QString{} : project.newestRelease()->debian.version;
-                const auto detected = project.installedRelease()->update.detectedVersion;
-                if (!detected.isEmpty() &&
-                    (availableVersion.isEmpty() ||
-                     comparePackageVersions(
-                         project.installedRelease()->update.strategy == UpdateStrategy::RpmRepository
-                             ? SourcePackageType::Rpm : project.installedRelease()->sourceType,
-                         detected, availableVersion) > 0)) {
-                    availableVersion = detected;
-                }
-                subtitle = availableVersion.isEmpty()
-                    ? QStringLiteral("⚠ Update available")
-                    : QStringLiteral("⚠ Update %1 available").arg(availableVersion);
+                subtitle = QStringLiteral("⚠ Update available");
                 statusDescription = QStringLiteral("Update available");
             } else {
                 visualState = ProjectVisualState::Current;
-                subtitle = QStringLiteral("✓ Installed %1 · up to date")
-                               .arg(project.installedVersion);
+                subtitle = QStringLiteral("✓ Up to date");
                 statusDescription = QStringLiteral("Installed and up to date");
             }
         }
@@ -4737,6 +4931,8 @@ void MainWindow::refreshProjectList(const QString &selectId) {
         if (projectPrimaryButton_ != nullptr) projectPrimaryButton_->setVisible(false);
         if (uninstallButton_ != nullptr) uninstallButton_->setVisible(false);
         if (editConfigurationButton_ != nullptr) editConfigurationButton_->setVisible(false);
+        if (projectActionNotice_ != nullptr) projectActionNotice_->setVisible(false);
+        if (projectActionButton_ != nullptr) projectActionButton_->setVisible(false);
     }
 }
 
@@ -4871,9 +5067,9 @@ void MainWindow::updateDeleteButton() {
         return;
     }
     const bool busy = buildService_.isRunning() || installService_.isRunning() ||
-                      aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-                      githubUpdateService_.isRunning() ||
-                      aiService_.isRunning() || debDownloadService_.isRunning() ||
+                      aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+                      githubUpdateService_->isRunning() ||
+                      aiService_.isRunning() || debDownloadService_->isRunning() ||
                       importThread_ != nullptr;
     if (reanalyzeButton_ != nullptr) {
         reanalyzeButton_->setEnabled(currentRelease() != nullptr &&
@@ -4904,9 +5100,9 @@ void MainWindow::deleteCurrentProject() {
         return;
     }
     if (buildService_.isRunning() || installService_.isRunning() ||
-        aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-        githubUpdateService_.isRunning() ||
-        aiService_.isRunning() || debDownloadService_.isRunning() ||
+        aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+        githubUpdateService_->isRunning() ||
+        aiService_.isRunning() || debDownloadService_->isRunning() ||
         importThread_ != nullptr) {
         QMessageBox::warning(this, QStringLiteral("Project is busy"),
                              QStringLiteral("Wait for the current operation to finish before deleting the project."));
@@ -5135,7 +5331,7 @@ void MainWindow::populateSourceOverview() {
     const auto &release = *currentRelease();
     sourceTypeHeadline_->setText(
         QStringLiteral("<h2>%1</h2>").arg(sourcePackageTypeTitle(release.sourceType).toHtmlEscaped()));
-    sourceTypeExplanation_->setText(sourcePackageTypeExplanation(release.sourceType));
+    applySourcePackageTypeHelp(sourceTypeExplanation_, release.sourceType);
     const auto location = !release.acquisition.originalUrl.isEmpty()
         ? release.acquisition.originalUrl
         : !release.sourceUrl.isEmpty() ? release.sourceUrl : release.originalSourceFilename;
@@ -5247,13 +5443,15 @@ void MainWindow::populateInstallPlan() {
     const auto pkgbuild = currentPkgbuildText();
     const auto plan = PkgbuildInstallPlan::parse(pkgbuild, release);
     if (installPlanNotice_ != nullptr) {
-        QString notice = release.pkgbuildManuallyModified
-            ? QStringLiteral("Filesystem parsed from the Custom PKGBUILD. Expand a directory to see each file.")
-            : QStringLiteral("Filesystem parsed from the Guided PKGBUILD. Expand a directory to see each file.");
+        QString summary = release.pkgbuildManuallyModified
+            ? QStringLiteral("Filesystem parsed from the Custom PKGBUILD.")
+            : QStringLiteral("Filesystem parsed from the Guided PKGBUILD.");
         if (!plan.warnings.isEmpty()) {
-            notice += QLatin1Char('\n') + plan.warnings.join(QLatin1Char('\n'));
+            summary += QLatin1Char(' ') + plan.warnings.join(QLatin1Char(' '));
         }
-        installPlanNotice_->setText(notice);
+        setSettingsSectionHelp(
+            installPlanNotice_, summary,
+            QStringLiteral("Expand a directory to see each installed path, its source, and its purpose."));
     }
     appImageInstallPlan_->clear();
     QHash<QString, QTreeWidgetItem *> nodes;
@@ -5856,12 +6054,21 @@ void MainWindow::discardLifecycleScript() {
 void MainWindow::populatePayload() {
     if (!project_) return;
     const bool appImage = currentRelease()->sourceType == SourcePackageType::AppImage;
-    payloadIntroduction_->setText(appImage
-        ? QStringLiteral("Read-only AppDir contents. Every entry remains inside /opt/%1; PacSmith does not relocate, prune, or expose individual bundle files. Select a file to inspect it.")
-              .arg(currentRelease()->installMapping.optDirectory.isEmpty()
-                       ? currentRelease()->archPackageName
-                       : currentRelease()->installMapping.optDirectory)
-        : QStringLiteral("This is the filesystem payload in the vendor artifact. Most files need no action. For highlighted system files, inspect the explanation/content and explicitly keep or exclude them. Symbolic links that point outside the package are shown in red and stay excluded until you keep them. Decisions are content-specific and changed files require review again."));
+    if (appImage) {
+        const auto optDirectory = currentRelease()->installMapping.optDirectory.isEmpty()
+                                      ? currentRelease()->archPackageName
+                                      : currentRelease()->installMapping.optDirectory;
+        setSettingsSectionHelp(
+            payloadIntroduction_,
+            QStringLiteral("Read-only AppDir contents. Every entry stays under /opt."),
+            QStringLiteral("Every entry remains inside /opt/%1; PacSmith does not relocate, prune, or expose individual bundle files. Select a file to inspect it.")
+                .arg(optDirectory));
+    } else {
+        setSettingsSectionHelp(
+            payloadIntroduction_,
+            QStringLiteral("Filesystem from the imported artifact. Most files need no action."),
+            QStringLiteral("Keep or exclude records a recipe rule for the resulting package; it does not modify the source archive. For highlighted system files, inspect the explanation and explicitly keep or exclude them. Symbolic links that point outside the package are shown in red and stay excluded until you keep them. Decisions are content-specific and changed files require review again."));
+    }
     payloadTree_->headerItem()->setText(3, appImage ? QStringLiteral("Bundle status")
                                                     : QStringLiteral("Review"));
     keepPayloadButton_->setVisible(!appImage);
@@ -8329,7 +8536,7 @@ void MainWindow::showSettings() {
 void MainWindow::startReanalysis() {
     if (!project_ || currentRelease() == nullptr || importThread_ != nullptr ||
         buildService_.isRunning() || installService_.isRunning() ||
-        debDownloadService_.isRunning() || aiService_.isRunning()) {
+        debDownloadService_->isRunning() || aiService_.isRunning()) {
         return;
     }
     const auto projectId = project_->id;
@@ -8892,9 +9099,9 @@ void MainWindow::applyRetentionCleanup() {
 }
 
 void MainWindow::startUpdateCheck() {
-    if (!project_ || aptUpdateService_.isRunning() || rpmUpdateService_.isRunning() ||
-        githubUpdateService_.isRunning() ||
-        debDownloadService_.isRunning() || importThread_ != nullptr) return;
+    if (!project_ || aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+        githubUpdateService_->isRunning() ||
+        debDownloadService_->isRunning() || importThread_ != nullptr) return;
     if (!saveUpdateConfiguration()) return;
     auto *tracker = updateEditorRelease();
     if (tracker == nullptr) return;
@@ -8906,8 +9113,8 @@ void MainWindow::startUpdateCheck() {
         return;
     }
     const auto backgroundState = BackgroundUpdateStateStore::load();
-    if (backgroundState.checking && !aptUpdateService_.isRunning() &&
-        !rpmUpdateService_.isRunning() && !githubUpdateService_.isRunning()) {
+    if (backgroundState.checking && !aptUpdateService_->isRunning() &&
+        !rpmUpdateService_->isRunning() && !githubUpdateService_->isRunning()) {
         statusBar()->showMessage(QStringLiteral("An update check is already running"), 6000);
         return;
     }
@@ -8920,15 +9127,15 @@ void MainWindow::startUpdateCheck() {
         updateCheckStatus_->setText(QStringLiteral("Starting APT repository check…"));
         const auto release = *tracker;
         const auto path = store_.releasePath(*tracker);
-        onServiceThread(aptUpdateService_, [this, release, path] {
-            aptUpdateService_.start(release, path);
+        onServiceThread(*aptUpdateService_, [this, release, path] {
+            aptUpdateService_->start(release, path);
         });
     } else if (strategy == UpdateStrategy::RpmRepository) {
         updateCheckStatus_->setText(QStringLiteral("Starting RPM repository check…"));
         const auto release = *tracker;
         const auto path = store_.releasePath(*tracker);
-        onServiceThread(rpmUpdateService_, [this, release, path] {
-            rpmUpdateService_.start(release, path);
+        onServiceThread(*rpmUpdateService_, [this, release, path] {
+            rpmUpdateService_->start(release, path);
         });
     } else {
         QString token;
@@ -8946,8 +9153,8 @@ void MainWindow::startUpdateCheck() {
         if (loaded) token = *loaded;
         updateCheckStatus_->setText(QStringLiteral("Starting GitHub release check…"));
         const auto release = *tracker;
-        onServiceThread(githubUpdateService_, [this, release, token]() mutable {
-            githubUpdateService_.start(release, token);
+        onServiceThread(*githubUpdateService_, [this, release, token]() mutable {
+            githubUpdateService_->start(release, token);
             token.fill(QChar::Null);
         });
         token.fill(QChar::Null);
@@ -9042,7 +9249,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
 
         QMessageBox available(QMessageBox::Warning, QStringLiteral("Update available"),
             QStringLiteral("%1 %2 is available. Download and inspect the vendor artifact now?\n\n"
-                           "You can choose Later; PacSmith will keep the update alert in the package list and the release in Version History.")
+                           "You can choose Later; PacSmith will keep the update alert in the package list and the release in Versions.")
                 .arg(project_->displayName, result.detectedVersion),
             QMessageBox::NoButton, this);
         auto *download = available.addButton(QStringLiteral("Download & Inspect"),
@@ -9095,8 +9302,9 @@ void MainWindow::finishCommandProgress(const bool success, const QString &summar
     commandProgress_->markFinished(success, summary);
 }
 
-void MainWindow::startBuild() {
-    if (!project_ || buildService_.isRunning()) return;
+void MainWindow::startBuild(const bool installWhenSuccessful) {
+    installAfterSuccessfulBuild_ = false;
+    if (!project_ || currentRelease() == nullptr || buildService_.isRunning()) return;
     bool lifecycleChanged = false;
     QString lifecycleError;
     if (!store_.synchronizeLifecycle(*project_, *currentRelease(), &lifecycleChanged, &lifecycleError)) {
@@ -9217,13 +9425,17 @@ void MainWindow::startBuild() {
     currentRelease()->buildStatus = BuildStatus::Building;
     persistCurrent();
     populateOverview();
-    if (projectSidebar_ != nullptr) projectSidebar_->hide();
-    rightStack_->setCurrentIndex(1);
-    selectSection(EditorSection::ResultBuild);
+    if (!installWhenSuccessful) {
+        if (projectSidebar_ != nullptr) projectSidebar_->hide();
+        rightStack_->setCurrentIndex(1);
+        selectSection(EditorSection::ResultBuild);
+    }
+    installAfterSuccessfulBuild_ = installWhenSuccessful;
     showCommandProgress(QStringLiteral("Building %1").arg(project_->displayName),
                         QStringLiteral("Running makepkg…"), true);
     buildService_.start(store_.releasePath(*currentRelease()));
     populateBuild();
+    updateDashboardActions();
     updateDeleteButton();
 }
 
@@ -9269,6 +9481,7 @@ void MainWindow::startInstall() {
         QMessageBox::Yes) return;
     installButton_->setEnabled(false);
     if (projectPrimaryButton_ != nullptr) projectPrimaryButton_->setEnabled(false);
+    if (projectActionButton_ != nullptr) projectActionButton_->setEnabled(false);
     projectList_->setEnabled(false);
     pendingPackageOperation_ = QStringLiteral("install");
     showCommandProgress(QStringLiteral("Installing %1").arg(project_->displayName),
@@ -9317,7 +9530,7 @@ void MainWindow::prepareSelectedRelease() {
 
 void MainWindow::beginReleasePreparation(const QString &releaseId,
                                          const bool askForConfirmation) {
-    if (!project_ || debDownloadService_.isRunning() || importThread_ != nullptr) return;
+    if (!project_ || debDownloadService_->isRunning() || importThread_ != nullptr) return;
     const auto *release = project_->release(releaseId);
     if (release == nullptr || release->state != ReleaseState::Discovered) return;
     const auto integrity = release->sourceSha256.isEmpty()
@@ -9363,8 +9576,8 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
     const auto url = QUrl(release->sourceUrl);
     const auto sha = release->sourceSha256;
     const auto path = std::filesystem::path(target.toUtf8().constData());
-    onServiceThread(debDownloadService_, [this, url, sha, path] {
-        debDownloadService_.start(url, sha, path);
+    onServiceThread(*debDownloadService_, [this, url, sha, path] {
+        debDownloadService_->start(url, sha, path);
     });
 }
 
