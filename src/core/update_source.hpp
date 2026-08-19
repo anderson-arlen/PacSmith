@@ -2,6 +2,7 @@
 
 #include "core/model.hpp"
 
+#include <QMetaType>
 #include <QString>
 
 #include <memory>
@@ -41,3 +42,5 @@ public:
 };
 
 } // namespace pacsmith
+
+Q_DECLARE_METATYPE(pacsmith::UpdateCheckResult)

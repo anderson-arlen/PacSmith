@@ -1,8 +1,10 @@
 #pragma once
 
 #include "core/app_settings.hpp"
+#include "core/model.hpp"
 
 #include <QDateTime>
+#include <QList>
 #include <QString>
 #include <QStringList>
 
@@ -24,11 +26,19 @@ struct BackgroundUpdateState {
     QString message;
 };
 
+// Count projects whose retained or detected vendor version is newer than the
+// currently installed PacSmith release. Used for the tray badge so installs do
+// not leave the last check's snapshot stale until the next scheduled run.
+void applyAvailableUpdateCensus(BackgroundUpdateState &state, const QList<Project> &projects);
+[[nodiscard]] int availableUpdateCount(const QList<Project> &projects);
+
 class BackgroundUpdateStateStore final {
 public:
     [[nodiscard]] static QString defaultPath();
     [[nodiscard]] static BackgroundUpdateState load(QString *error = nullptr);
     [[nodiscard]] static bool save(const BackgroundUpdateState &state, QString *error = nullptr);
+    [[nodiscard]] static bool syncAvailableUpdates(const QList<Project> &projects,
+                                                   QString *error = nullptr);
 };
 
 class BackgroundUpdateManager final {

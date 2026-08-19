@@ -55,6 +55,9 @@ private:
     QTimer trayRefresh_;
     QTimer checkTimer_;
     QProcess *checkProcess_{nullptr};
+    int lastTrayBadge_{-1};
+    bool lastTrayChecking_{false};
+    bool lastTrayPreparing_{false};
     bool startHidden_{false};
     bool onboardingStarted_{false};
 };

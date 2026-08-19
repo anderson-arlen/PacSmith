@@ -2,6 +2,7 @@
 
 #include "core/project_store.hpp"
 
+#include <QElapsedTimer>
 #include <QFileInfo>
 
 #include <exception>
@@ -42,9 +43,20 @@ void ImportWorker::run() {
     try {
         ProjectStore store(projectsRoot_);
         QString error;
+        QElapsedTimer progressTimer;
+        QString lastDescription;
         const auto project = store.importSource(
             std::filesystem::path(sourcePath_.toUtf8().constData()), options_, &error,
-            [this](const ImportProgress &progress) { emit progressChanged(descriptionFor(progress)); });
+            [this, &progressTimer, &lastDescription](const ImportProgress &progress) {
+                const auto description = descriptionFor(progress);
+                if (description == lastDescription && progressTimer.isValid() &&
+                    progressTimer.elapsed() < 100) {
+                    return;
+                }
+                lastDescription = description;
+                progressTimer.restart();
+                emit progressChanged(description);
+            });
         emit completed(project ? project->project.id : QString{},
                        project ? project->releaseId : QString{}, error);
     } catch (const std::exception &exception) {

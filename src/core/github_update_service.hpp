@@ -7,6 +7,8 @@
 #include <QNetworkAccessManager>
 #include <QObject>
 
+#include <atomic>
+
 class QNetworkReply;
 
 namespace pacsmith {
@@ -17,9 +19,9 @@ public:
     explicit GitHubUpdateService(QObject *parent = nullptr);
 
     [[nodiscard]] bool isRunning() const noexcept;
-    void start(const PackageRelease &release, const QString &token = {},
-               const QString &requestedTag = {});
-    void cancel();
+    Q_INVOKABLE void start(const PackageRelease &release, const QString &token = {},
+                           const QString &requestedTag = {});
+    Q_INVOKABLE void cancel();
 
     [[nodiscard]] static UpdateCheckResult selectRelease(
         const QJsonArray &releases, const PackageRelease &current, QString *error = nullptr,
@@ -31,7 +33,9 @@ signals:
 
 private:
     void finishReply();
+    void complete(const UpdateCheckResult &result);
 
+    std::atomic<bool> running_{false};
     QNetworkAccessManager network_;
     QNetworkReply *reply_{nullptr};
     PackageRelease current_;

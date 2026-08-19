@@ -16,6 +16,7 @@
 #include <QHash>
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <QThread>
 
 #include <optional>
 
@@ -54,6 +55,7 @@ class MainWindow final : public QMainWindow {
 public:
     MainWindow(AppSettingsStore &settingsStore, CredentialStore &credentials,
                QWidget *parent = nullptr);
+    ~MainWindow() override;
     void importPackage(const QString &path);
     void activateExistingSession(const QString &importPath = {});
     void setKeepRunningInTray(bool enabled);
@@ -136,6 +138,7 @@ private:
     void showReleaseWorkbench(const QString &releaseId);
     void showReleaseWorkbenchAtFirstAttention(const QString &releaseId);
     void deleteCurrentProject();
+    void syncTrayUpdateCensus();
     void refreshProjectList(const QString &selectId = {});
     void loadProject(const QString &id);
     void refreshCurrentProject();
@@ -275,6 +278,7 @@ private:
     bool updateCheckFromWorkbench_{false};
     BuildService buildService_;
     InstallService installService_;
+    QThread networkIoThread_;
     DebDownloadService debDownloadService_;
     RepositoryKeyDownloadService signingKeyDownloadService_;
     AptUpdateService aptUpdateService_;

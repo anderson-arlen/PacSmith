@@ -83,11 +83,13 @@ bool verifyDetached(const QByteArray &contents, const QByteArray &signature,
 
 RpmUpdateService::RpmUpdateService(QObject *parent) : QObject(parent), network_(this) {}
 
-bool RpmUpdateService::isRunning() const noexcept { return reply_ != nullptr; }
+bool RpmUpdateService::isRunning() const noexcept {
+    return running_.load(std::memory_order_acquire);
+}
 
 void RpmUpdateService::start(const PackageRelease &release,
                              const std::filesystem::path &releaseDirectory) {
-    if (isRunning()) return;
+    if (running_.exchange(true, std::memory_order_acq_rel)) return;
     release_ = release;
     releaseDirectory_ = releaseDirectory;
     cancelled_ = false;
@@ -270,6 +272,11 @@ void RpmUpdateService::processPrimary(const QByteArray &compressed) {
                          .arg(result.updateAvailable ? QStringLiteral("Update available")
                                                      : QStringLiteral("No newer version"),
                               package->name, package->evr(), package->architecture);
+    complete(result);
+}
+
+void RpmUpdateService::complete(const UpdateCheckResult &result) {
+    running_.store(false, std::memory_order_release);
     emit finished(result);
 }
 
@@ -277,7 +284,7 @@ void RpmUpdateService::fail(const QString &message) {
     UpdateCheckResult result;
     result.supported = true;
     result.message = message;
-    emit finished(result);
+    complete(result);
 }
 
 } // namespace pacsmith

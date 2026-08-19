@@ -115,6 +115,28 @@
 namespace pacsmith::gui {
 namespace {
 
+template <typename Service, typename Function>
+void onServiceThread(Service &service, Function &&function) {
+    QMetaObject::invokeMethod(&service, std::forward<Function>(function));
+}
+
+template <typename Service>
+void cancelOnServiceThread(Service &service) {
+    if (service.thread() == QThread::currentThread()) {
+        service.cancel();
+        return;
+    }
+    QMetaObject::invokeMethod(&service, [&service] { service.cancel(); },
+                              Qt::BlockingQueuedConnection);
+}
+
+template <typename Service>
+Service *networkServiceOnThread(QThread &thread) {
+    auto *service = new Service;
+    service->moveToThread(&thread);
+    return service;
+}
+
 QLabel *pageIntroduction(const QString &text, QWidget *parent);
 
 constexpr int projectSubtitleRole = Qt::UserRole + 1;
@@ -138,6 +160,19 @@ QString downloadActivityText(const QString &phase, const qint64 received, const 
         return QStringLiteral("Downloading update…");
     }
     return phase;
+}
+
+QString finishedUpdateCheckStatus(const BackgroundUpdateState &state) {
+    const auto &message = state.message;
+    if (!message.isEmpty() &&
+        !message.startsWith(QStringLiteral("Checking")) &&
+        !message.startsWith(QStringLiteral("Downloading"))) {
+        return message;
+    }
+    if (state.availableUpdates > 0) {
+        return QStringLiteral("%1 update(s) available").arg(state.availableUpdates);
+    }
+    return QStringLiteral("Update check finished");
 }
 
 QString downloadStatusText(const QString &name, const QString &phase, const qint64 received,
@@ -264,15 +299,15 @@ public:
         const auto selected = option.state.testFlag(QStyle::State_Selected);
         const auto darkTheme = option.palette.color(QPalette::Base).lightness() < 128;
         const auto activity = index.data(projectActivityRole).toString();
-        const auto state = activity.isEmpty()
-            ? static_cast<ProjectVisualState>(index.data(projectVisualStateRole).toInt())
-            : ProjectVisualState::Preparing;
+        const auto visualState =
+            static_cast<ProjectVisualState>(index.data(projectVisualStateRole).toInt());
+        const auto state = activity.isEmpty() ? visualState : ProjectVisualState::Preparing;
         const auto row = option.rect.adjusted(2, 2, -2, -2);
 
-        if (selected || !activity.isEmpty()) {
+        if (selected) {
             QColor background;
             QColor border;
-            switch (state) {
+            switch (visualState) {
             case ProjectVisualState::Current:
                 background = darkTheme ? QColor(24, 70, 42) : QColor(219, 244, 226);
                 border = darkTheme ? QColor(70, 205, 108) : QColor(31, 145, 66);
@@ -1293,12 +1328,18 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
                        QWidget *parent)
     : QMainWindow(parent), settingsStore_(settingsStore), aiSettings_(settingsStore_.load()),
       credentialStore_(credentials), buildService_(this),
-      installService_(this), debDownloadService_(this), signingKeyDownloadService_(this),
-      aptUpdateService_(this), rpmUpdateService_(this),
-      githubUpdateService_(this), aiService_(this),
+      installService_(this), signingKeyDownloadService_(this),
+      aiService_(this),
       aiModelCatalogService_(this), chatGptLoginService_(this) {
     setWindowTitle(QStringLiteral("PacSmith"));
     setAcceptDrops(true);
+    qRegisterMetaType<UpdateCheckResult>();
+    networkIoThread_.setObjectName(QStringLiteral("pacsmith-network-io"));
+    debDownloadService_.moveToThread(&networkIoThread_);
+    aptUpdateService_.moveToThread(&networkIoThread_);
+    rpmUpdateService_.moveToThread(&networkIoThread_);
+    githubUpdateService_.moveToThread(&networkIoThread_);
+    networkIoThread_.start();
 
     auto *githubAction = new QAction(QStringLiteral("GitHub Link…"), this);
     auto *packageFileAction = new QAction(QStringLiteral("Package File…"), this);
@@ -1633,6 +1674,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         refreshProjectList(projectId);
         if (!project_ || project_->id != projectId) loadProject(projectId);
         refreshCurrentProject();
+        if (result.succeeded()) syncTrayUpdateCensus();
         const auto succeeded = result.succeeded();
         const auto summary = operation == QStringLiteral("uninstall")
             ? (succeeded ? QStringLiteral("Uninstall completed successfully.")
@@ -1678,9 +1720,9 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         if (!lastPreparationPublish_.isValid() || lastPreparationPublish_.elapsed() >= 150) {
             publishPreparationActivity();
             lastPreparationPublish_.restart();
+            updatePreparationIndicators();
+            updateUpdateCheckIndicators();
         }
-        updatePreparationIndicators();
-        updateUpdateCheckIndicators();
     });
     connect(&debDownloadService_, &DebDownloadService::failed, this, [this](const QString &message) {
         const auto projectId = preparingProjectId_;
@@ -3237,13 +3279,16 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
             downloadProgress_->activateWindow();
             repositoryImportRunning_ = false;
             startListDownloadActivity(PkgbuildGenerator::sanitizePackageName(packageName));
-            debDownloadService_.start(
-                QUrl(result.downloadUrl), result.sha256,
-                std::filesystem::path(target.toUtf8().constData()));
+            const auto url = QUrl(result.downloadUrl);
+            const auto sha = result.sha256;
+            const auto path = std::filesystem::path(target.toUtf8().constData());
+            onServiceThread(debDownloadService_, [this, url, sha, path] {
+                debDownloadService_.start(url, sha, path);
+            });
         };
 
         if (rpm) {
-            auto *service = new RpmUpdateService(this);
+            auto *service = networkServiceOnThread<RpmUpdateService>(networkIoThread_);
             connect(queryProgress, &QProgressDialog::canceled, service,
                     &RpmUpdateService::cancel);
             connect(service, &RpmUpdateService::progressChanged, queryProgress,
@@ -3252,10 +3297,10 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                     [finishQuery, service](const UpdateCheckResult &result) mutable {
                 finishQuery(result, service);
             });
-            service->start(probe,
-                           std::filesystem::path(temporary->path().toUtf8().constData()));
+            const auto path = std::filesystem::path(temporary->path().toUtf8().constData());
+            onServiceThread(*service, [service, probe, path] { service->start(probe, path); });
         } else {
-            auto *service = new AptUpdateService(this);
+            auto *service = networkServiceOnThread<AptUpdateService>(networkIoThread_);
             connect(queryProgress, &QProgressDialog::canceled, service,
                     &AptUpdateService::cancel);
             connect(service, &AptUpdateService::progressChanged, queryProgress,
@@ -3264,8 +3309,8 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                     [finishQuery, service](const UpdateCheckResult &result) mutable {
                 finishQuery(result, service);
             });
-            service->start(probe,
-                           std::filesystem::path(temporary->path().toUtf8().constData()));
+            const auto path = std::filesystem::path(temporary->path().toUtf8().constData());
+            onServiceThread(*service, [service, probe, path] { service->start(probe, path); });
         }
     });
     keyProgress->show();
@@ -3920,20 +3965,16 @@ void MainWindow::updateUpdateCheckIndicators() {
         if (itemBusy) projectList_->viewport()->update(projectList_->visualItemRect(item));
     }
     if (prepareBusy && canShowUpdateCheckStatus()) {
-        updateCheckStatusActive_ = true;
         statusBar()->showMessage(downloadStatusText(preparingName, phase, received, total));
     } else if (checkBusy && canShowUpdateCheckStatus()) {
         updateCheckStatusActive_ = true;
         statusBar()->showMessage(checkingName.isEmpty()
                                      ? QStringLiteral("Checking for updates…")
                                      : QStringLiteral("Checking %1 for updates…").arg(checkingName));
-    } else if (!checkBusy && !prepareBusy && updateCheckStatusActive_) {
+    } else if (!checkBusy && updateCheckStatusActive_) {
         updateCheckStatusActive_ = false;
-        if (canShowUpdateCheckStatus()) {
-            statusBar()->showMessage(updateState.message.isEmpty()
-                                         ? QStringLiteral("Update check finished")
-                                         : updateState.message,
-                                     8000);
+        if (!prepareBusy && canShowUpdateCheckStatus()) {
+            statusBar()->showMessage(finishedUpdateCheckStatus(updateState), 8000);
         }
     }
     if (checkBusy || prepareBusy) projectList_->viewport()->update();
@@ -3947,6 +3988,7 @@ void MainWindow::syncActivityTimer() {
         return;
     }
     if (preparationSpinnerTimer_->isActive()) preparationSpinnerTimer_->stop();
+    if (updateCheckStatusActive_) updateUpdateCheckIndicators();
 }
 
 bool MainWindow::updateCheckInProgress() const {
@@ -3994,6 +4036,10 @@ void MainWindow::publishUpdateCheckActivity(const bool running, const QString &p
     updateState.checking = false;
     updateState.checkingProjectId.clear();
     updateState.checkingProjectName.clear();
+    if (updateState.preparingProjectId.isEmpty()) {
+        applyAvailableUpdateCensus(updateState, store_.list());
+        updateState.message = finishedUpdateCheckStatus(updateState);
+    }
     static_cast<void>(BackgroundUpdateStateStore::save(updateState));
     updateUpdateCheckIndicators();
     syncActivityTimer();
@@ -4097,12 +4143,32 @@ void MainWindow::setKeepRunningInTray(const bool enabled) {
     keepRunningInTray_ = enabled;
 }
 
+MainWindow::~MainWindow() {
+    if (!networkIoThread_.isRunning()) return;
+    cancelOnServiceThread(debDownloadService_);
+    cancelOnServiceThread(aptUpdateService_);
+    cancelOnServiceThread(rpmUpdateService_);
+    cancelOnServiceThread(githubUpdateService_);
+    networkIoThread_.quit();
+    networkIoThread_.wait();
+    debDownloadService_.moveToThread(QThread::currentThread());
+    aptUpdateService_.moveToThread(QThread::currentThread());
+    rpmUpdateService_.moveToThread(QThread::currentThread());
+    githubUpdateService_.moveToThread(QThread::currentThread());
+}
+
 void MainWindow::reloadVisibleProjects() {
     const auto projectId = project_ ? project_->id : QString{};
     refreshProjectList(projectId);
     if (!projectId.isEmpty() && (!project_ || project_->id != projectId)) loadProject(projectId);
     if (project_) refreshCurrentProject();
     syncActivityTimer();
+    updateUpdateCheckIndicators();
+}
+
+void MainWindow::syncTrayUpdateCensus() {
+    static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(store_.list()));
+    static_cast<void>(GuiInstanceServer::requestTray());
 }
 
 void MainWindow::importPackage(const QString &path) {
@@ -4128,8 +4194,10 @@ void MainWindow::importPackage(const QString &path) {
         const auto target = defaultDownloadPath(
             PkgbuildGenerator::sanitizePackageName(QFileInfo(filename).completeBaseName()),
             QStringLiteral("direct"), filename);
-        debDownloadService_.start(remote, {},
-                                  std::filesystem::path(target.toUtf8().constData()));
+        const auto targetPath = std::filesystem::path(target.toUtf8().constData());
+        onServiceThread(debDownloadService_, [this, remote, targetPath] {
+            debDownloadService_.start(remote, {}, targetPath);
+        });
         return;
     }
     if (importThread_ != nullptr) {
@@ -4291,7 +4359,7 @@ void MainWindow::beginGitHubImport(const QUrl &url) {
     probe.update.githubRepository = repository;
     probe.update.githubAssetRegex = initialRegex;
     probe.update.githubIncludePrereleases = false;
-    auto *service = new GitHubUpdateService(this);
+    auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
     auto *progress = new QProgressDialog(QStringLiteral("Loading GitHub release assets…"),
                                          QStringLiteral("Cancel"), 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Import from GitHub"));
@@ -4331,7 +4399,10 @@ void MainWindow::beginGitHubImport(const QUrl &url) {
     if (credentialSource != CredentialSource::Age) {
         token = credentialStore_.load(QStringLiteral("github"), credentialSource, nullptr).value_or(QString{});
     }
-    service->start(probe, token, requestedTag);
+    onServiceThread(*service, [service, probe, token, requestedTag]() mutable {
+        service->start(probe, token, requestedTag);
+        token.fill(QChar::Null);
+    });
     token.fill(QChar::Null);
 }
 
@@ -4345,7 +4416,7 @@ void MainWindow::continueGitHubImport(const QString &owner, const QString &repos
     probe.update.githubRepository = repository;
     probe.update.githubAssetRegex = assetRegex;
     probe.update.githubIncludePrereleases = includePrereleases;
-    auto *service = new GitHubUpdateService(this);
+    auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
     auto *progress = new QProgressDialog(QStringLiteral("Resolving selected GitHub asset…"),
                                          QStringLiteral("Cancel"), 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Import from GitHub"));
@@ -4369,7 +4440,10 @@ void MainWindow::continueGitHubImport(const QString &owner, const QString &repos
     if (credentialSource != CredentialSource::Age) {
         token = credentialStore_.load(QStringLiteral("github"), credentialSource, nullptr).value_or(QString{});
     }
-    service->start(probe, token, requestedTag);
+    onServiceThread(*service, [service, probe, token, requestedTag]() mutable {
+        service->start(probe, token, requestedTag);
+        token.fill(QChar::Null);
+    });
     token.fill(QChar::Null);
 }
 
@@ -4530,8 +4604,12 @@ void MainWindow::downloadGitHubAsset(const PackageRelease &probe,
     downloadProgress_->activateWindow();
     startListDownloadActivity(projectId);
 
-    debDownloadService_.start(QUrl(result.downloadUrl), result.sha256,
-                              std::filesystem::path(target.toUtf8().constData()));
+    const auto url = QUrl(result.downloadUrl);
+    const auto sha = result.sha256;
+    const auto path = std::filesystem::path(target.toUtf8().constData());
+    onServiceThread(debDownloadService_, [this, url, sha, path] {
+        debDownloadService_.start(url, sha, path);
+    });
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -4553,9 +4631,10 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         return;
     }
     if (aiService_.isRunning()) aiService_.cancel();
-    if (aptUpdateService_.isRunning()) aptUpdateService_.cancel();
-    if (rpmUpdateService_.isRunning()) rpmUpdateService_.cancel();
-    if (githubUpdateService_.isRunning()) githubUpdateService_.cancel();
+    if (aptUpdateService_.isRunning()) cancelOnServiceThread(aptUpdateService_);
+    if (rpmUpdateService_.isRunning()) cancelOnServiceThread(rpmUpdateService_);
+    if (githubUpdateService_.isRunning()) cancelOnServiceThread(githubUpdateService_);
+    if (debDownloadService_.isRunning()) cancelOnServiceThread(debDownloadService_);
     QMainWindow::closeEvent(event);
 }
 
@@ -4644,7 +4723,7 @@ void MainWindow::refreshProjectList(const QString &selectId) {
         updatePreparationIndicators();
     }
     syncActivityTimer();
-    if (listActivityInProgress()) updateUpdateCheckIndicators();
+    updateUpdateCheckIndicators();
     if (projects.isEmpty()) {
         project_.reset();
         projectCache_.clear();
@@ -4854,6 +4933,7 @@ void MainWindow::deleteCurrentProject() {
     }
     project_.reset();
     refreshProjectList();
+    syncTrayUpdateCensus();
     statusBar()->showMessage(QStringLiteral("Deleted project %1").arg(deletedName), 8000);
 }
 
@@ -6045,16 +6125,14 @@ void MainWindow::loadSelectedPayloadPreview(const QString &path) {
                 entry->contentSha256 = inspection->contentSha256;
                 entry->textPreview = inspection->textPreview;
                 entry->previewTruncated = inspection->previewTruncated;
-                persistCurrent();
-                populatePayload();
-                QTreeWidgetItemIterator iterator(payloadTree_);
-                while (*iterator != nullptr) {
-                    if ((*iterator)->data(0, Qt::UserRole).toString() == path) {
-                        payloadTree_->setCurrentItem(*iterator);
-                        break;
-                    }
-                    ++iterator;
-                }
+                projectCache_.insert(project_->id, *project_);
+                auto persisted = *project_;
+                const auto root = store_.projectsRoot();
+                static_cast<void>(QtConcurrent::run([root, persisted]() mutable {
+                    ProjectStore store(root);
+                    QString saveError;
+                    static_cast<void>(store.save(persisted, &saveError));
+                }));
                 updateSelectedPayload();
             });
     watcher->setFuture(QtConcurrent::run([debPath, path]() -> InspectionTaskResult {
@@ -8439,7 +8517,7 @@ void MainWindow::startGithubRegexAi() {
     githubToken = credentialStore_.load(QStringLiteral("github"), githubCredentialSource, nullptr)
                       .value_or(QString{});
 
-    auto *service = new GitHubUpdateService(this);
+    auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
     auto *progress = new QProgressDialog(QStringLiteral("Loading the latest GitHub release assets…"),
                                          QStringLiteral("Cancel"), 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Generate GitHub Asset Rule"));
@@ -8516,7 +8594,10 @@ void MainWindow::startGithubRegexAi() {
         credential->fill(QChar::Null);
         updateDeleteButton();
     });
-    service->start(probe, githubToken);
+    onServiceThread(*service, [service, probe, githubToken]() mutable {
+        service->start(probe, githubToken);
+        githubToken.fill(QChar::Null);
+    });
     githubToken.fill(QChar::Null);
 }
 
@@ -8825,10 +8906,18 @@ void MainWindow::startUpdateCheck() {
     updateCheckFromWorkbench_ = rightStack_ != nullptr && rightStack_->currentIndex() == 1;
     if (strategy == UpdateStrategy::AptRepository) {
         updateCheckStatus_->setText(QStringLiteral("Starting APT repository check…"));
-        aptUpdateService_.start(*tracker, store_.releasePath(*tracker));
+        const auto release = *tracker;
+        const auto path = store_.releasePath(*tracker);
+        onServiceThread(aptUpdateService_, [this, release, path] {
+            aptUpdateService_.start(release, path);
+        });
     } else if (strategy == UpdateStrategy::RpmRepository) {
         updateCheckStatus_->setText(QStringLiteral("Starting RPM repository check…"));
-        rpmUpdateService_.start(*tracker, store_.releasePath(*tracker));
+        const auto release = *tracker;
+        const auto path = store_.releasePath(*tracker);
+        onServiceThread(rpmUpdateService_, [this, release, path] {
+            rpmUpdateService_.start(release, path);
+        });
     } else {
         QString token;
         const auto source = aiSettings_.credentialSources.value(
@@ -8844,7 +8933,11 @@ void MainWindow::startUpdateCheck() {
         const auto loaded = credentialStore_.load(QStringLiteral("github"), source, &credentialError);
         if (loaded) token = *loaded;
         updateCheckStatus_->setText(QStringLiteral("Starting GitHub release check…"));
-        githubUpdateService_.start(*tracker, token);
+        const auto release = *tracker;
+        onServiceThread(githubUpdateService_, [this, release, token]() mutable {
+            githubUpdateService_.start(release, token);
+            token.fill(QChar::Null);
+        });
         token.fill(QChar::Null);
     }
     const auto projectName = project_->displayName.isEmpty() ? project_->archPackageName
@@ -8909,6 +9002,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
     refreshProjectList(projectId);
     if (!project_ || project_->id != projectId) loadProject(projectId);
     applyRetentionCleanup();
+    syncTrayUpdateCensus();
     if (remainInWorkbench && project_.has_value() &&
         project_->release(checkedReleaseId) != nullptr) {
         showReleaseWorkbench(checkedReleaseId);
@@ -9254,8 +9348,12 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
     publishPreparationActivity();
     updatePreparationIndicators();
     updateUpdateCheckIndicators();
-    debDownloadService_.start(QUrl(release->sourceUrl), release->sourceSha256,
-                              std::filesystem::path(target.toUtf8().constData()));
+    const auto url = QUrl(release->sourceUrl);
+    const auto sha = release->sourceSha256;
+    const auto path = std::filesystem::path(target.toUtf8().constData());
+    onServiceThread(debDownloadService_, [this, url, sha, path] {
+        debDownloadService_.start(url, sha, path);
+    });
 }
 
 void MainWindow::deleteSelectedRelease() {

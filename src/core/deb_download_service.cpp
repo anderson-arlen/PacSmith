@@ -14,11 +14,13 @@ namespace pacsmith {
 DebDownloadService::DebDownloadService(QObject *parent)
     : QObject(parent), network_(new QNetworkAccessManager(this)) {}
 
-bool DebDownloadService::isRunning() const noexcept { return reply_ != nullptr; }
+bool DebDownloadService::isRunning() const noexcept {
+    return running_.load(std::memory_order_acquire);
+}
 
 void DebDownloadService::start(const QUrl &url, const QString &expectedSha256,
                                const std::filesystem::path &targetPath) {
-    if (isRunning()) {
+    if (running_.load(std::memory_order_acquire)) {
         emit failed(QStringLiteral("A source artifact download is already running"));
         return;
     }
@@ -44,9 +46,11 @@ void DebDownloadService::start(const QUrl &url, const QString &expectedSha256,
     expectedSha256_ = expectedSha256.toLower();
     hash_.reset();
     received_ = 0;
+    progressTimer_.invalidate();
     QNetworkRequest request(url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
+    running_.store(true, std::memory_order_release);
     reply_ = network_->get(request);
     connect(reply_, &QNetworkReply::readyRead, this, [this] {
         const auto bytes = reply_->readAll();
@@ -60,7 +64,10 @@ void DebDownloadService::start(const QUrl &url, const QString &expectedSha256,
         }
         hash_.addData(bytes);
     });
-    connect(reply_, &QNetworkReply::downloadProgress, this, &DebDownloadService::progress);
+    connect(reply_, &QNetworkReply::downloadProgress, this,
+            [this](const qint64 received, const qint64 total) {
+        emitProgress(received, total);
+    });
     connect(reply_, &QNetworkReply::finished, this, &DebDownloadService::finishReply);
 }
 
@@ -77,20 +84,24 @@ void DebDownloadService::finishReply() {
     reply->deleteLater();
     if (networkError != QNetworkReply::NoError) {
         output_.cancelWriting();
+        running_.store(false, std::memory_order_release);
         emit failed(message);
         return;
     }
     const auto digest = QString::fromLatin1(hash_.result().toHex());
     if (!expectedSha256_.isEmpty() && digest != expectedSha256_) {
         output_.cancelWriting();
+        running_.store(false, std::memory_order_release);
         emit failed(QStringLiteral("Downloaded artifact SHA256 mismatch (expected %1, received %2)")
                         .arg(expectedSha256_, digest));
         return;
     }
     if (!output_.commit()) {
-        emit failed(output_.errorString());
+        fail(output_.errorString());
         return;
     }
+    emitProgress(received_, received_, true);
+    running_.store(false, std::memory_order_release);
     emit finished(QFileInfo(targetPath_).absoluteFilePath());
 }
 
@@ -102,7 +113,14 @@ void DebDownloadService::fail(const QString &message) {
         reply->deleteLater();
     }
     output_.cancelWriting();
+    running_.store(false, std::memory_order_release);
     emit failed(message);
+}
+
+void DebDownloadService::emitProgress(const qint64 received, const qint64 total, const bool force) {
+    if (!force && progressTimer_.isValid() && progressTimer_.elapsed() < 100) return;
+    progressTimer_.restart();
+    emit progress(received, total);
 }
 
 QString defaultDownloadPath(const QString &projectId, const QString &releaseId,

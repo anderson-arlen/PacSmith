@@ -44,6 +44,20 @@ bool runSystemctl(const QStringList &arguments, QString *error, QByteArray *stan
 
 } // namespace
 
+void applyAvailableUpdateCensus(BackgroundUpdateState &state, const QList<Project> &projects) {
+    state.projectsWithUpdates.clear();
+    for (const auto &project : projects) {
+        if (project.hasAvailableUpdate()) state.projectsWithUpdates.append(project.id);
+    }
+    state.availableUpdates = static_cast<int>(state.projectsWithUpdates.size());
+}
+
+int availableUpdateCount(const QList<Project> &projects) {
+    BackgroundUpdateState state;
+    applyAvailableUpdateCensus(state, projects);
+    return state.availableUpdates;
+}
+
 QString BackgroundUpdateStateStore::defaultPath() {
     return QDir(stateDirectory()).filePath(QStringLiteral("update-state.json"));
 }
@@ -116,6 +130,18 @@ bool BackgroundUpdateStateStore::save(const BackgroundUpdateState &state, QStrin
         return false;
     }
     return true;
+}
+
+bool BackgroundUpdateStateStore::syncAvailableUpdates(const QList<Project> &projects, QString *error) {
+    auto state = load(error);
+    applyAvailableUpdateCensus(state, projects);
+    if (!state.checking && state.preparingProjectId.isEmpty()) {
+        state.message = state.availableUpdates > 0
+            ? QStringLiteral("%1 update(s) available").arg(state.availableUpdates)
+            : state.failedChecks > 0 ? QStringLiteral("Update checks completed with failures")
+                                     : QStringLiteral("All eligible project trackers are current");
+    }
+    return save(state, error);
 }
 
 QString BackgroundUpdateManager::calendar(const BackgroundUpdateSettings &settings) {

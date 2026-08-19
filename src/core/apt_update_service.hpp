@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QUrl>
 
+#include <atomic>
 #include <filesystem>
 
 class QNetworkReply;
@@ -34,8 +35,8 @@ public:
     explicit AptUpdateService(QObject *parent = nullptr);
 
     [[nodiscard]] bool isRunning() const noexcept;
-    void start(const PackageRelease &release, const std::filesystem::path &releaseDirectory);
-    void cancel();
+    Q_INVOKABLE void start(const PackageRelease &release, const std::filesystem::path &releaseDirectory);
+    Q_INVOKABLE void cancel();
 
 signals:
     void progressChanged(const QString &message);
@@ -53,8 +54,10 @@ private:
                                              QString &error) const;
     [[nodiscard]] QStringList allowedSigningFingerprints() const;
     [[nodiscard]] QString resolvedKeyring(QString &error) const;
+    void complete(const UpdateCheckResult &result);
     void fail(const QString &message);
 
+    std::atomic<bool> running_{false};
     QNetworkAccessManager network_;
     QNetworkReply *reply_{nullptr};
     PackageRelease project_;

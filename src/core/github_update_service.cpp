@@ -60,13 +60,15 @@ bool tagLooksLikePrerelease(const QString &value) {
 
 } // namespace
 
-GitHubUpdateService::GitHubUpdateService(QObject *parent) : QObject(parent) {}
+GitHubUpdateService::GitHubUpdateService(QObject *parent) : QObject(parent), network_(this) {}
 
-bool GitHubUpdateService::isRunning() const noexcept { return reply_ != nullptr; }
+bool GitHubUpdateService::isRunning() const noexcept {
+    return running_.load(std::memory_order_acquire);
+}
 
 void GitHubUpdateService::start(const PackageRelease &release, const QString &token,
                                 const QString &requestedTag) {
-    if (isRunning()) {
+    if (running_.load(std::memory_order_acquire)) {
         UpdateCheckResult result;
         result.supported = true;
         result.message = QStringLiteral("A GitHub update check is already running");
@@ -113,6 +115,7 @@ void GitHubUpdateService::start(const PackageRelease &release, const QString &to
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     emit progressChanged(QStringLiteral("Querying GitHub releases for %1/%2…")
                              .arg(release.update.githubOwner, release.update.githubRepository));
+    running_.store(true, std::memory_order_release);
     reply_ = network_.get(request);
     connect(reply_, &QNetworkReply::finished, this, &GitHubUpdateService::finishReply);
 }
@@ -282,6 +285,11 @@ void GitHubUpdateService::finishReply() {
     }
     reply->deleteLater();
     requestedTag_.clear();
+    complete(result);
+}
+
+void GitHubUpdateService::complete(const UpdateCheckResult &result) {
+    running_.store(false, std::memory_order_release);
     emit finished(result);
 }
 

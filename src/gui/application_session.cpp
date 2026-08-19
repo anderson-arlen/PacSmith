@@ -3,7 +3,6 @@
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/credential_store.hpp"
-#include "core/project_store.hpp"
 #include "gui/main_window.hpp"
 
 #include <QAction>
@@ -172,18 +171,28 @@ void ApplicationSession::refreshTray() {
         setupTray();
     }
     const auto current = BackgroundUpdateStateStore::load();
-    tray_->setIcon(trayStatusIcon(current.availableUpdates));
-    tray_->setToolTip(!current.preparingProjectId.isEmpty()
+    // Use the persisted census. Reloading every project here would parse
+    // release.json and shell out to pacman -Q on the GUI thread every 5s.
+    const auto availableUpdates = current.availableUpdates;
+    const auto checking = current.checking;
+    const auto preparing = !current.preparingProjectId.isEmpty();
+    if (lastTrayBadge_ != availableUpdates || lastTrayChecking_ != checking ||
+        lastTrayPreparing_ != preparing) {
+        lastTrayBadge_ = availableUpdates;
+        lastTrayChecking_ = checking;
+        lastTrayPreparing_ = preparing;
+        tray_->setIcon(trayStatusIcon(availableUpdates));
+    }
+    tray_->setToolTip(preparing
         ? (current.preparingProjectName.isEmpty()
                ? QStringLiteral("PacSmith is downloading an update")
                : QStringLiteral("PacSmith is downloading an update for %1")
                      .arg(current.preparingProjectName))
-        : current.checking ? QStringLiteral("PacSmith is checking for updates")
-        : current.availableUpdates > 0 ? QStringLiteral("PacSmith: %1 update(s) available").arg(current.availableUpdates)
-                                       : QStringLiteral("PacSmith: packages are current"));
+        : checking ? QStringLiteral("PacSmith is checking for updates")
+        : availableUpdates > 0 ? QStringLiteral("PacSmith: %1 update(s) available").arg(availableUpdates)
+                               : QStringLiteral("PacSmith: packages are current"));
     tray_->setVisible(true);
-    if (window_ != nullptr &&
-        (current.checking || !current.preparingProjectId.isEmpty())) {
+    if (window_ != nullptr && (checking || preparing)) {
         window_->noteBackgroundCheckStarted();
     }
 }
@@ -254,26 +263,23 @@ void ApplicationSession::runBackgroundCheck(const CheckKind kind) {
         scheduleNextCheck();
         refreshTray();
     });
-    checkProcess_->start();
-    if (!checkProcess_->waitForStarted(3000)) {
+    connect(checkProcess_, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;
+        if (checkProcess_ == nullptr) return;
         checkProcess_->deleteLater();
         checkProcess_ = nullptr;
-        pendingState.checking = false;
-        pendingState.checkingProjectId.clear();
-        pendingState.checkingProjectName.clear();
-        pendingState.preparingProjectId.clear();
-        pendingState.preparingProjectName.clear();
-        pendingState.preparationPhase.clear();
-        pendingState.preparationBytesReceived = 0;
-        pendingState.preparationBytesTotal = -1;
-        static_cast<void>(BackgroundUpdateStateStore::save(pendingState));
+        auto failedState = BackgroundUpdateStateStore::load();
+        failedState.checking = false;
+        failedState.checkingProjectId.clear();
+        failedState.checkingProjectName.clear();
+        static_cast<void>(BackgroundUpdateStateStore::save(failedState));
         if (tray_ != nullptr) {
             tray_->showMessage(QStringLiteral("PacSmith"),
                                QStringLiteral("Could not start an update check."));
         }
         if (window_ != nullptr) window_->reloadVisibleProjects();
-        return;
-    }
+    });
+    checkProcess_->start();
     if (window_ != nullptr) window_->noteBackgroundCheckStarted();
 }
 

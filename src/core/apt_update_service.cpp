@@ -106,11 +106,11 @@ bool AptSignatureVerifier::verifyDetachedRelease(const QByteArray &release,
 AptUpdateService::AptUpdateService(QObject *parent) : QObject(parent), network_(this) {}
 
 bool AptUpdateService::isRunning() const noexcept {
-    return reply_ != nullptr;
+    return running_.load(std::memory_order_acquire);
 }
 
 void AptUpdateService::start(const PackageRelease &project, const std::filesystem::path &projectDirectory) {
-    if (isRunning()) return;
+    if (running_.exchange(true, std::memory_order_acq_rel)) return;
     project_ = project;
     projectDirectory_ = projectDirectory;
     cancelled_ = false;
@@ -285,7 +285,7 @@ void AptUpdateService::processPackages(const QByteArray &data) {
                               record->package, record->version, record->architecture,
                               signatureVerified_ ? QStringLiteral(", repository signature verified")
                                                  : QStringLiteral(", repository signature not verified"));
-    emit finished(result);
+    complete(result);
 }
 
 bool AptUpdateService::verifyInRelease(const QByteArray &data, QString &error) const {
@@ -337,11 +337,16 @@ QStringList AptUpdateService::allowedSigningFingerprints() const {
     return allowedFingerprints;
 }
 
+void AptUpdateService::complete(const UpdateCheckResult &result) {
+    running_.store(false, std::memory_order_release);
+    emit finished(result);
+}
+
 void AptUpdateService::fail(const QString &message) {
     UpdateCheckResult result;
     result.supported = true;
     result.message = message;
-    emit finished(result);
+    complete(result);
 }
 
 } // namespace pacsmith

@@ -2,6 +2,8 @@
 
 #include "core/project_store.hpp"
 
+#include <QElapsedTimer>
+
 #include <exception>
 
 namespace pacsmith::gui {
@@ -41,10 +43,19 @@ void ReanalyzeWorker::run() {
     try {
         ProjectStore store(projectsRoot_);
         QString error;
+        QElapsedTimer progressTimer;
+        QString lastDescription;
         const auto result = store.reanalyzeRelease(
             projectId_, releaseId_, &error,
-            [this](const ImportProgress &progress) {
-                emit progressChanged(descriptionFor(progress));
+            [this, &progressTimer, &lastDescription](const ImportProgress &progress) {
+                const auto description = descriptionFor(progress);
+                if (description == lastDescription && progressTimer.isValid() &&
+                    progressTimer.elapsed() < 100) {
+                    return;
+                }
+                lastDescription = description;
+                progressTimer.restart();
+                emit progressChanged(description);
             });
         emit completed(result ? result->project.id : QString{},
                        result ? result->releaseId : QString{}, error);

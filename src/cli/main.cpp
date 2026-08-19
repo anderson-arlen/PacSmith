@@ -1084,6 +1084,7 @@ int main(int argc, char *argv[]) {
         state.preparationBytesReceived = 0;
         state.preparationBytesTotal = -1;
         state.lastRun = QDateTime::currentDateTimeUtc();
+        applyAvailableUpdateCensus(state, store.list());
         state.message = state.availableUpdates > 0
             ? QStringLiteral("%1 update(s) available").arg(state.availableUpdates)
             : state.failedChecks > 0 ? QStringLiteral("Update checks completed with failures")
@@ -1497,6 +1498,10 @@ int main(int argc, char *argv[]) {
                                                                          : QStringLiteral("Installation failed")});
                              QString error;
                              if (!store.save(*project, &error)) errorStream << "warning: " << error << '\n';
+                             if (result.succeeded()) {
+                                 static_cast<void>(
+                                     pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates(store.list()));
+                             }
                              exitCode = result.succeeded() ? 0 : 1;
                              QCoreApplication::exit(exitCode);
         });
@@ -1556,6 +1561,10 @@ int main(int argc, char *argv[]) {
                                                     : QStringLiteral("Rollback failed")});
                              QString saveError;
                              if (!store.save(*project, &saveError)) errorStream << "warning: " << saveError << '\n';
+                             if (result.succeeded()) {
+                                 static_cast<void>(
+                                     pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates(store.list()));
+                             }
                              exitCode = result.succeeded() ? 0 : 1;
                              QCoreApplication::exit(exitCode);
                          });
@@ -1585,6 +1594,10 @@ int main(int argc, char *argv[]) {
                                                     : QStringLiteral("Package removal failed")});
                              QString saveError;
                              if (!store.save(*project, &saveError)) errorStream << "warning: " << saveError << '\n';
+                             if (result.succeeded()) {
+                                 static_cast<void>(
+                                     pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates(store.list()));
+                             }
                              exitCode = result.succeeded() ? 0 : 1;
                              QCoreApplication::exit(exitCode);
                          });

@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QUrl>
 
+#include <atomic>
 #include <filesystem>
 
 class QNetworkReply;
@@ -21,8 +22,8 @@ public:
     explicit RpmUpdateService(QObject *parent = nullptr);
 
     [[nodiscard]] bool isRunning() const noexcept;
-    void start(const PackageRelease &release, const std::filesystem::path &releaseDirectory);
-    void cancel();
+    Q_INVOKABLE void start(const PackageRelease &release, const std::filesystem::path &releaseDirectory);
+    Q_INVOKABLE void cancel();
 
 signals:
     void progressChanged(const QString &message);
@@ -37,8 +38,10 @@ private:
     [[nodiscard]] QString resolvedKeyring(QString &error) const;
     [[nodiscard]] QStringList allowedSigningFingerprints() const;
     void processPrimary(const QByteArray &compressed);
+    void complete(const UpdateCheckResult &result);
     void fail(const QString &message);
 
+    std::atomic<bool> running_{false};
     QNetworkAccessManager network_;
     QNetworkReply *reply_{nullptr};
     PackageRelease release_;

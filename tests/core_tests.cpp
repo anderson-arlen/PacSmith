@@ -74,6 +74,7 @@ private slots:
     void persistsBackgroundUpdateSettings();
     void writesLoginAutostartDesktopEntry();
     void roundTripsBackgroundUpdateCheckActivity();
+    void recountsAvailableUpdatesFromInstalledState();
     void buildsSystemdCalendarSchedules();
     void reportsOverdueBackgroundUpdateChecks();
     void persistsMultipleReleases();
@@ -1235,6 +1236,62 @@ void CoreTests::roundTripsBackgroundUpdateCheckActivity() {
     QCOMPARE(restored.preparationBytesReceived, static_cast<qint64>(12 * 1024 * 1024));
     QCOMPARE(restored.preparationBytesTotal, static_cast<qint64>(40 * 1024 * 1024));
     QCOMPARE(restored.message, QStringLiteral("Checking Cursor for updates"));
+    if (previous.isEmpty()) qunsetenv("XDG_STATE_HOME");
+    else QVERIFY(qputenv("XDG_STATE_HOME", previous));
+}
+
+void CoreTests::recountsAvailableUpdatesFromInstalledState() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto previous = qgetenv("XDG_STATE_HOME");
+    QVERIFY(qputenv("XDG_STATE_HOME", QFile::encodeName(temporary.path())));
+
+    pacsmith::Project current;
+    current.id = QStringLiteral("current");
+    pacsmith::PackageRelease currentRelease;
+    currentRelease.id = QStringLiteral("2.0");
+    currentRelease.debian.version = QStringLiteral("2.0");
+    currentRelease.state = pacsmith::ReleaseState::Ready;
+    current.releases.append(currentRelease);
+    current.installedReleaseId = QStringLiteral("2.0");
+    current.installedVersion = QStringLiteral("2.0-1");
+
+    pacsmith::Project outdated;
+    outdated.id = QStringLiteral("outdated");
+    for (const auto &version : {QStringLiteral("1.0"), QStringLiteral("2.0")}) {
+        pacsmith::PackageRelease release;
+        release.id = version;
+        release.debian.version = version;
+        release.state = pacsmith::ReleaseState::Ready;
+        outdated.releases.append(release);
+    }
+    outdated.installedReleaseId = QStringLiteral("1.0");
+    outdated.installedVersion = QStringLiteral("1.0-1");
+
+    pacsmith::BackgroundUpdateState stale;
+    stale.availableUpdates = 4;
+    stale.projectsWithUpdates = {QStringLiteral("stale-a"), QStringLiteral("stale-b")};
+    stale.message = QStringLiteral("4 update(s) available");
+    QString error;
+    QVERIFY2(pacsmith::BackgroundUpdateStateStore::save(stale, &error), qPrintable(error));
+
+    QCOMPARE(pacsmith::availableUpdateCount({current, outdated}), 1);
+    QVERIFY2(pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates({current, outdated}, &error),
+             qPrintable(error));
+    const auto restored = pacsmith::BackgroundUpdateStateStore::load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(restored.availableUpdates, 1);
+    QCOMPARE(restored.projectsWithUpdates, QStringList{QStringLiteral("outdated")});
+    QCOMPARE(restored.message, QStringLiteral("1 update(s) available"));
+
+    QVERIFY2(pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates({current}, &error),
+             qPrintable(error));
+    const auto afterInstall = pacsmith::BackgroundUpdateStateStore::load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(afterInstall.availableUpdates, 0);
+    QVERIFY(afterInstall.projectsWithUpdates.isEmpty());
+    QCOMPARE(afterInstall.message, QStringLiteral("All eligible project trackers are current"));
+
     if (previous.isEmpty()) qunsetenv("XDG_STATE_HOME");
     else QVERIFY(qputenv("XDG_STATE_HOME", previous));
 }
