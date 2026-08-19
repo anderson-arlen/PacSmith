@@ -707,10 +707,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
         statusBar()->showMessage(
             QStringLiteral("%1 %2 is available").arg(project_->displayName, result.detectedVersion),
             12000);
-        if (!remainInWorkbench && discoveredState != ReleaseState::Discovered) {
-            showReleaseWorkbenchAtFirstAttention(discoveredReleaseId);
-            return;
-        }
+        if (discoveredState != ReleaseState::Discovered) return;
         if (aiSettings_.updates.automaticallyPrepare) {
             beginReleasePreparation(discoveredReleaseId, false);
             return;
@@ -1064,7 +1061,9 @@ void MainWindow::deleteSelectedRelease() {
         if (fallback == nullptr) fallback = project_->newestRelease();
         currentReleaseId_ = fallback == nullptr ? QString{} : fallback->id;
     }
+    refreshProjectList(project_->id);
     refreshCurrentProject();
+    syncTrayUpdateCensus();
 }
 
 void MainWindow::rollbackSelectedRelease() {

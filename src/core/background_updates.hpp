@@ -32,6 +32,12 @@ struct BackgroundUpdateState {
 void applyAvailableUpdateCensus(BackgroundUpdateState &state, const QList<Project> &projects);
 [[nodiscard]] int availableUpdateCount(const QList<Project> &projects);
 
+// Local-socket name and fire-and-forget command used by a running pacsmith-gui.
+// The CLI uses this during `check --all` so the package list can refresh after
+// each project instead of waiting until every tracker has been queried.
+[[nodiscard]] QString runningGuiSocketName();
+bool notifyRunningGui(const QString &command, const QString &importPath = {});
+
 class BackgroundUpdateStateStore final {
 public:
     [[nodiscard]] static QString defaultPath();

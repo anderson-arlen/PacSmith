@@ -59,7 +59,7 @@ public:
     void importPackage(const QString &path);
     void activateExistingSession(const QString &importPath = {});
     void setKeepRunningInTray(bool enabled);
-    void reloadVisibleProjects();
+    void reloadVisibleProjects(bool refreshOpenProject = true);
     void noteBackgroundCheckStarted();
 
 protected:

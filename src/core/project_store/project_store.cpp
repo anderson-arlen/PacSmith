@@ -22,6 +22,58 @@
 namespace pacsmith {
 using namespace project_store_internal;
 
+namespace {
+
+bool sameVendorRelease(const PackageRelease &candidate, const QString &version,
+                       const QString &sha256, const qint64 providerAssetId) {
+    if (!sha256.isEmpty() && candidate.sourceSha256 == sha256) return true;
+    if (providerAssetId > 0 && candidate.acquisition.githubAssetId == providerAssetId) {
+        return true;
+    }
+    if (candidate.debian.version != version || version.isEmpty()) return false;
+    // Same vendor version from a different URL still refers to this release
+    // unless both sides have hashes that prove the bytes changed.
+    return sha256.isEmpty() || candidate.sourceSha256.isEmpty() ||
+           candidate.sourceSha256 == sha256;
+}
+
+bool releaseHasBeenInspected(const PackageRelease &release) {
+    return release.state != ReleaseState::Discovered &&
+           release.state != ReleaseState::Preparing;
+}
+
+PackageRelease *existingVendorRelease(Project &project, const QString &version,
+                                      const QString &sha256, const qint64 providerAssetId) {
+    PackageRelease *best = nullptr;
+    for (auto &candidate : project.releases) {
+        if (!sameVendorRelease(candidate, version, sha256, providerAssetId)) continue;
+        if (best == nullptr ||
+            (releaseHasBeenInspected(candidate) && !releaseHasBeenInspected(*best))) {
+            best = &candidate;
+        }
+    }
+    return best;
+}
+
+void forgetDetectedVendorVersion(Project &project, const QString &version) {
+    if (version.isEmpty()) return;
+    for (auto &release : project.releases) {
+        if (release.update.detectedVersion.isEmpty()) continue;
+        const auto type = release.update.strategy == UpdateStrategy::RpmRepository
+            ? SourcePackageType::Rpm : release.sourceType;
+        if (comparePackageVersions(type, release.update.detectedVersion, version) != 0) {
+            continue;
+        }
+        release.update.detectedVersion.clear();
+        release.update.detectedFilename.clear();
+        release.update.detectedSha256.clear();
+        release.update.detectedUrl.clear();
+        release.update.githubEtag.clear();
+    }
+}
+
+} // namespace
+
 ProjectStore::ProjectStore(std::filesystem::path projectsRoot) : root_(std::move(projectsRoot)) {}
 
 std::filesystem::path ProjectStore::defaultProjectsRoot() {
@@ -524,6 +576,7 @@ bool ProjectStore::deleteRelease(Project &project, const QString &releaseIdValue
     }
     const auto removedRelease = *iterator;
     project.releases.erase(iterator);
+    forgetDetectedVendorVersion(project, removedRelease.debian.version);
     if (!save(project, error)) {
         project.releases.append(removedRelease);
         filesystemError.clear();
@@ -545,19 +598,11 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
         return nullptr;
     }
     const auto trackerCopy = tracker;
-    const auto existing = std::find_if(project.releases.begin(), project.releases.end(),
-                                       [&](const auto &candidate) {
-                                           return (!sha256.isEmpty() && candidate.sourceSha256 == sha256) ||
-                                                  (providerAssetId > 0 &&
-                                                   candidate.acquisition.githubAssetId == providerAssetId) ||
-                                                  (candidate.debian.version == version &&
-                                                   candidate.sourceUrl == downloadUrl);
-                                       });
-    if (existing != project.releases.end()) {
+    if (auto *existing = existingVendorRelease(project, version, sha256, providerAssetId)) {
         // The caller may have just updated the tracking release's last-check result.
-        // Persist that state even when this vendor release was already discovered.
+        // Persist that state even when this vendor release was already retained.
         if (!save(project, error)) return nullptr;
-        return &*existing;
+        return existing;
     }
     PackageRelease release;
     release.projectId = project.id;

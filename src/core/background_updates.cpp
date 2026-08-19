@@ -6,12 +6,14 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalSocket>
 #include <QProcess>
 #include <QSaveFile>
 #include <QTime>
 #include <QTimeZone>
 
 #include <algorithm>
+#include <unistd.h>
 
 namespace pacsmith {
 namespace {
@@ -56,6 +58,23 @@ int availableUpdateCount(const QList<Project> &projects) {
     BackgroundUpdateState state;
     applyAvailableUpdateCensus(state, projects);
     return state.availableUpdates;
+}
+
+QString runningGuiSocketName() {
+    return QStringLiteral("pacsmith-gui-%1").arg(::getuid());
+}
+
+bool notifyRunningGui(const QString &command, const QString &importPath) {
+    QLocalSocket socket;
+    socket.connectToServer(runningGuiSocketName());
+    if (!socket.waitForConnected(250)) return false;
+    QJsonObject object{{QStringLiteral("command"), command}};
+    if (!importPath.isEmpty()) object.insert(QStringLiteral("path"), importPath);
+    auto encoded = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    encoded.append('\n');
+    if (socket.write(encoded) != encoded.size() || !socket.waitForBytesWritten(1000)) return false;
+    socket.waitForDisconnected(250);
+    return true;
 }
 
 QString BackgroundUpdateStateStore::defaultPath() {

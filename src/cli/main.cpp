@@ -121,6 +121,13 @@ void clearPreparation(pacsmith::BackgroundUpdateState *state) {
     static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(*state));
 }
 
+void publishCheckProgress(pacsmith::BackgroundUpdateState &state,
+                          const pacsmith::ProjectStore &store) {
+    applyAvailableUpdateCensus(state, store.list());
+    static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
+    static_cast<void>(pacsmith::notifyRunningGui(QStringLiteral("projects")));
+}
+
 QString scriptFriendly(const QString &value) {
     QString result = value;
     result.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
@@ -581,17 +588,13 @@ int runCheck(pacsmith::ProjectStore &store, pacsmith::Project project, QTextStre
         } else if (!saveError.isEmpty()) {
             errorStream << "warning: " << saveError << '\n';
         }
-        if (backgroundState != nullptr) {
-            ++backgroundState->availableUpdates;
-            backgroundState->projectsWithUpdates.append(project.id);
-        }
     }
     pacsmith::AppSettingsStore settingsStore;
     const auto settings = settingsStore.load();
     if (result.success && result.updateAvailable && settings.updates.automaticallyPrepare &&
         !discoveredId.isEmpty()) {
         const auto *discovered = project.release(discoveredId);
-        if (discovered != nullptr) {
+        if (discovered != nullptr && discovered->state == pacsmith::ReleaseState::Discovered) {
             pacsmith::BackgroundUpdateState ownedActivity;
             pacsmith::BackgroundUpdateState *activity = backgroundState;
             if (activity == nullptr) {
@@ -1065,15 +1068,16 @@ int main(int argc, char *argv[]) {
         state.checking = true;
         state.lastRun = QDateTime::currentDateTimeUtc();
         state.message = QStringLiteral("Checking PacSmith project update trackers");
-        static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
+        publishCheckProgress(state, store);
         int exitCode = 0;
         for (auto project : store.list()) {
             state.checkingProjectId = project.id;
             state.checkingProjectName = project.displayName.isEmpty() ? project.archPackageName
                                                                       : project.displayName;
             state.message = QStringLiteral("Checking %1 for updates").arg(state.checkingProjectName);
-            static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
+            publishCheckProgress(state, store);
             exitCode = std::max(exitCode, runCheck(store, project, out, errorStream, &state));
+            publishCheckProgress(state, store);
         }
         state.checking = false;
         state.checkingProjectId.clear();
@@ -1090,6 +1094,7 @@ int main(int argc, char *argv[]) {
             : state.failedChecks > 0 ? QStringLiteral("Update checks completed with failures")
                                      : QStringLiteral("All eligible project trackers are current");
         static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
+        static_cast<void>(pacsmith::notifyRunningGui(QStringLiteral("projects")));
         return exitCode;
     }
     if (command == QStringLiteral("ai") && arguments.size() >= 3) {

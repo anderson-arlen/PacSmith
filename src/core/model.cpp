@@ -989,16 +989,9 @@ bool Project::hasAvailableUpdate() const {
     if (installedVersion.isEmpty() || installed == nullptr) return false;
     const auto installedVendorVersion = installed->debian.version;
     if (installedVendorVersion.isEmpty()) return false;
-    const auto trackerType = installed->update.strategy == UpdateStrategy::RpmRepository
-        ? SourcePackageType::Rpm : installed->sourceType;
-    if (!installed->update.detectedVersion.isEmpty() &&
-        comparePackageVersions(trackerType, installed->update.detectedVersion,
-                               installedVendorVersion) > 0) {
-        return true;
-    }
     return std::any_of(releases.cbegin(), releases.cend(), [&](const auto &candidate) {
-        return !candidate.debian.version.isEmpty() &&
-               comparePackageVersions(candidate.sourceType, candidate.debian.version,
+        if (candidate.id == installed->id || candidate.debian.version.isEmpty()) return false;
+        return comparePackageVersions(candidate.sourceType, candidate.debian.version,
                                       installedVendorVersion) > 0;
     });
 }

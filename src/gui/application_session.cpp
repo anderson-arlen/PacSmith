@@ -79,6 +79,10 @@ ApplicationSession::ApplicationSession(AppSettingsStore &settingsStore, Credenti
         runBackgroundCheck(CheckKind::Manual);
     });
     connect(&server_, &GuiInstanceServer::trayRequested, this, &ApplicationSession::refreshTray);
+    connect(&server_, &GuiInstanceServer::projectsReloadRequested, this, [this] {
+        if (window_ != nullptr) window_->reloadVisibleProjects(false);
+        refreshTray();
+    });
     trayRefresh_.setInterval(5000);
     connect(&trayRefresh_, &QTimer::timeout, this, &ApplicationSession::refreshTray);
     checkTimer_.setSingleShot(true);

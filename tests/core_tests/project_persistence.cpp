@@ -607,11 +607,62 @@ void CoreTests::reportsInstalledUpdateStatus() {
     project.installedVersion = QStringLiteral("2.0-1");
     QVERIFY(!project.hasAvailableUpdate());
     project.releases[1].update.detectedVersion = QStringLiteral("3.0");
+    QVERIFY(!project.hasAvailableUpdate());
+    pacsmith::PackageRelease detected;
+    detected.id = QStringLiteral("3.0");
+    detected.debian.version = QStringLiteral("3.0");
+    detected.state = pacsmith::ReleaseState::Discovered;
+    project.releases.append(detected);
     QVERIFY(project.hasAvailableUpdate());
 
     project.installedReleaseId.clear();
     project.externallyInstalled = true;
     QVERIFY(!project.hasAvailableUpdate());
+}
+
+void CoreTests::deletingUpdateReleaseClearsAvailableStatus() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    pacsmith::ProjectStore store(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::Project project;
+    project.id = QStringLiteral("signal");
+    project.archPackageName = QStringLiteral("signal-desktop-bin");
+    pacsmith::PackageRelease installed;
+    installed.id = QStringLiteral("8.23.0-aaaaaaaaaaaa");
+    installed.projectId = project.id;
+    installed.archPackageName = project.archPackageName;
+    installed.debian.version = QStringLiteral("8.23.0");
+    installed.state = pacsmith::ReleaseState::Built;
+    installed.buildStatus = pacsmith::BuildStatus::Succeeded;
+    installed.update.strategy = pacsmith::UpdateStrategy::AptRepository;
+    installed.update.detectedVersion = QStringLiteral("8.24.0");
+    installed.update.detectedFilename = QStringLiteral("signal-desktop_8.24.0_amd64.deb");
+    installed.update.detectedUrl = QStringLiteral("https://updates.signal.org/desktop/apt/pool/s/signal-desktop/signal-desktop_8.24.0_amd64.deb");
+    installed.update.githubEtag = QStringLiteral("etag-824");
+    pacsmith::PackageRelease update;
+    update.id = QStringLiteral("8.24.0-bbbbbbbbbbbb");
+    update.projectId = project.id;
+    update.archPackageName = project.archPackageName;
+    update.debian.version = QStringLiteral("8.24.0");
+    update.state = pacsmith::ReleaseState::Ready;
+    project.releases.append(installed);
+    project.releases.append(update);
+    project.installedReleaseId = installed.id;
+    project.installedVersion = QStringLiteral("8.23.0-1");
+    QString error;
+    QVERIFY2(store.save(project, &error), qPrintable(error));
+    QVERIFY(project.hasAvailableUpdate());
+
+    QVERIFY2(store.deleteRelease(project, update.id, &error), qPrintable(error));
+    QCOMPARE(project.releases.size(), 1);
+    QVERIFY(!project.hasAvailableUpdate());
+    const auto *tracker = project.release(installed.id);
+    QVERIFY(tracker != nullptr);
+    QCOMPARE(tracker->update.detectedVersion, QString{});
+    QCOMPARE(tracker->update.detectedFilename, QString{});
+    QCOMPARE(tracker->update.detectedUrl, QString{});
+    QCOMPARE(tracker->update.githubEtag, QString{});
 }
 
 void CoreTests::dropsUnbuiltIntermediateUpdates() {
@@ -707,6 +758,70 @@ void CoreTests::recordsUninspectedGitHubDiscoveries() {
     QCOMPARE(restoredDiscovery->update.githubAssetRegex,
              QStringLiteral("discovery-.*-x86_64\\.tar\\.gz"));
     QCOMPARE(restored->release(tracker.id)->update.githubAssetRegex, QString{});
+}
+
+void CoreTests::reusesInspectedReleaseForSameVendorVersion() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    pacsmith::ProjectStore store(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::Project project;
+    project.id = QStringLiteral("reuse");
+    project.displayName = QStringLiteral("Reuse");
+    project.archPackageName = QStringLiteral("reuse-bin");
+    pacsmith::PackageRelease installed;
+    installed.id = QStringLiteral("1.0-aaaaaaaaaaaa");
+    installed.projectId = project.id;
+    installed.archPackageName = project.archPackageName;
+    installed.sourceType = pacsmith::SourcePackageType::Debian;
+    installed.sourceUrl = QStringLiteral("file:///tmp/reuse-1.0.deb");
+    installed.sourceSha256 = QString(64, QLatin1Char('a'));
+    installed.debian.package = QStringLiteral("reuse");
+    installed.debian.version = QStringLiteral("1.0");
+    installed.state = pacsmith::ReleaseState::Built;
+    installed.buildStatus = pacsmith::BuildStatus::Succeeded;
+    installed.update.strategy = pacsmith::UpdateStrategy::GitHubRelease;
+    installed.update.githubOwner = QStringLiteral("vendor");
+    installed.update.githubRepository = QStringLiteral("reuse");
+    pacsmith::PackageRelease inspected;
+    inspected.id = QStringLiteral("1.1-bbbbbbbbbbbb");
+    inspected.projectId = project.id;
+    inspected.archPackageName = project.archPackageName;
+    inspected.sourceType = pacsmith::SourcePackageType::Debian;
+    inspected.sourceUrl = QStringLiteral("file:///tmp/reuse-1.1.deb");
+    inspected.sourceSha256 = QString(64, QLatin1Char('b'));
+    inspected.debian.package = QStringLiteral("reuse");
+    inspected.debian.version = QStringLiteral("1.1");
+    inspected.state = pacsmith::ReleaseState::Ready;
+    inspected.update.strategy = pacsmith::UpdateStrategy::GitHubRelease;
+    inspected.update.githubOwner = QStringLiteral("vendor");
+    inspected.update.githubRepository = QStringLiteral("reuse");
+    project.releases.append(installed);
+    project.releases.append(inspected);
+    project.installedReleaseId = installed.id;
+    project.installedVersion = QStringLiteral("1.0-1");
+    QString error;
+    QVERIFY2(store.save(project, &error), qPrintable(error));
+
+    auto *matched = store.recordDiscoveredRelease(
+        project, installed, QStringLiteral("1.1"), QStringLiteral("reuse-1.1.tar.gz"), {},
+        QStringLiteral("https://github.com/vendor/reuse/releases/download/v1.1/reuse-1.1.tar.gz"),
+        &error, 110, 111, QStringLiteral("v1.1"), {});
+    QVERIFY2(matched != nullptr, qPrintable(error));
+    QCOMPARE(matched->id, inspected.id);
+    QVERIFY(matched->state != pacsmith::ReleaseState::Discovered);
+    QVERIFY(matched->state != pacsmith::ReleaseState::Preparing);
+    QCOMPARE(project.releases.size(), 2);
+
+    auto *rebuild = store.recordDiscoveredRelease(
+        project, installed, QStringLiteral("1.1"), QStringLiteral("reuse-1.1.tar.gz"),
+        QString(64, QLatin1Char('c')),
+        QStringLiteral("https://github.com/vendor/reuse/releases/download/v1.1/reuse-1.1.tar.gz"),
+        &error, 112, 113, QStringLiteral("v1.1"), {});
+    QVERIFY2(rebuild != nullptr, qPrintable(error));
+    QVERIFY(rebuild->id != inspected.id);
+    QCOMPARE(rebuild->state, pacsmith::ReleaseState::Discovered);
+    QCOMPARE(project.releases.size(), 3);
 }
 
 void CoreTests::carriesInstallMappingAcrossGitHubVersions() {
@@ -868,6 +983,13 @@ void CoreTests::attachesPreparedGitHubDebToExistingProject() {
     QCOMPARE(store.list().size(), 1);
     QCOMPARE(prepared->project.sourceIdentity, QStringLiteral("github:toeverything/affine"));
     QCOMPARE(prepared->project.releases.size(), 2);
+    const auto *preparedRelease = prepared->project.release(prepared->releaseId);
+    QVERIFY(preparedRelease != nullptr);
+    QCOMPARE(preparedRelease->update.strategy, pacsmith::UpdateStrategy::GitHubRelease);
+    QCOMPARE(preparedRelease->update.githubOwner, QStringLiteral("toeverything"));
+    QCOMPARE(preparedRelease->update.githubRepository, QStringLiteral("AFFiNE"));
+    QCOMPARE(preparedRelease->update.githubAssetRegex,
+             QStringLiteral("affine-.*-stable-linux-x64\\.deb"));
 
     pacsmith::ProjectStore siblingStore(
         std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
@@ -879,6 +1001,107 @@ void CoreTests::attachesPreparedGitHubDebToExistingProject() {
     QVERIFY(!attached->projectCreated);
     QCOMPARE(attached->project.id, first->project.id);
     QCOMPARE(siblingStore.list().size(), 1);
+}
+
+void CoreTests::preservesAptTrackerAcrossDebUpdates() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto writeFixture = [&](const std::filesystem::path &path, const QByteArray &contents) {
+        std::filesystem::create_directories(path.parent_path());
+        QFile file(QString::fromUtf8(path.string().c_str()));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(contents), contents.size());
+    };
+    const auto makeDeb = [&](const QString &version, const QByteArray &payload) -> QString {
+        const auto root = std::filesystem::path(
+            (temporary.path() + QStringLiteral("/signal-") + version).toUtf8().constData());
+        writeFixture(root / "control/control",
+                     QByteArray("Package: signal-desktop\nVersion: ") + version.toUtf8() +
+                         "\nArchitecture: amd64\nDescription: Signal fixture\n");
+        writeFixture(root / "data/usr/share/applications/signal-desktop.desktop",
+                     QByteArrayLiteral("[Desktop Entry]\nType=Application\nName=Signal\nExec=signal-desktop\n"));
+        writeFixture(root / "data/opt/Signal/signal-desktop", payload);
+        writeFixture(root / "debian-binary", QByteArrayLiteral("2.0\n"));
+        const auto makeTar = [&](const QString &output, const std::filesystem::path &directory) -> bool {
+            QProcess tar;
+            tar.setProgram(QStringLiteral("/usr/bin/bsdtar"));
+            tar.setArguments({QStringLiteral("-cf"), output, QStringLiteral("-C"),
+                              QString::fromUtf8(directory.string().c_str()), QStringLiteral(".")});
+            tar.start();
+            return tar.waitForFinished(10000) && tar.exitCode() == 0;
+        };
+        const auto work = QString::fromUtf8(root.string().c_str());
+        if (!makeTar(work + QStringLiteral("/control.tar"), root / "control")) return {};
+        if (!makeTar(work + QStringLiteral("/data.tar"), root / "data")) return {};
+        const auto deb = temporary.filePath(QStringLiteral("signal-desktop_%1_amd64.deb").arg(version));
+        QProcess ar;
+        ar.setWorkingDirectory(work);
+        ar.setProgram(QStringLiteral("/usr/bin/ar"));
+        ar.setArguments({QStringLiteral("r"), deb, QStringLiteral("control.tar"),
+                         QStringLiteral("data.tar"), QStringLiteral("debian-binary")});
+        ar.start();
+        if (!ar.waitForFinished(10000) || ar.exitCode() != 0) return {};
+        return deb;
+    };
+    const auto firstDeb = makeDeb(QStringLiteral("8.23.0"), QByteArrayLiteral("old-signal\n"));
+    const auto secondDeb = makeDeb(QStringLiteral("8.24.0"), QByteArrayLiteral("new-signal\n"));
+    QVERIFY(!firstDeb.isEmpty());
+    QVERIFY(!secondDeb.isEmpty());
+
+    pacsmith::ProjectStore store(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::ImportOptions firstOptions;
+    firstOptions.acquisition.kind = pacsmith::AcquisitionKind::LocalFile;
+    firstOptions.acquisition.canonicalIdentity = QStringLiteral("deb:signal-desktop:amd64");
+    firstOptions.acquisition.originalUrl = firstDeb;
+    QString error;
+    auto first = store.importSource(
+        std::filesystem::path(firstDeb.toUtf8().constData()), firstOptions, &error);
+    QVERIFY2(first.has_value(), qPrintable(error));
+    auto *tracker = first->project.release(first->releaseId);
+    QVERIFY(tracker != nullptr);
+    tracker->update.strategy = pacsmith::UpdateStrategy::AptRepository;
+    tracker->update.url = QStringLiteral("https://updates.signal.org/desktop/apt");
+    tracker->update.aptSuite = QStringLiteral("xenial");
+    tracker->update.aptComponent = QStringLiteral("main");
+    tracker->update.aptArchitecture = QStringLiteral("amd64");
+    tracker->update.aptPackageName = QStringLiteral("signal-desktop");
+    tracker->update.aptSigningKeyring = QStringLiteral("files/keys/vendor-signal.gpg");
+    tracker->update.trustedSigningFingerprint = QStringLiteral("DBA36B818115965B43BB1BA87521D88C4F37503A");
+    const auto keyPath = store.releasePath(*tracker) /
+                         std::filesystem::path("files/keys/vendor-signal.gpg");
+    writeFixture(keyPath, QByteArrayLiteral("signal-apt-key"));
+    const auto trackerSnapshot = *tracker;
+    QVERIFY2(store.save(first->project, &error), qPrintable(error));
+
+    const auto secondHash = pacsmith::sha256File(
+        std::filesystem::path(secondDeb.toUtf8().constData()), &error);
+    QVERIFY2(!secondHash.isEmpty(), qPrintable(error));
+    const auto *discovered = store.recordDiscoveredRelease(
+        first->project, trackerSnapshot, QStringLiteral("8.24.0"),
+        QStringLiteral("signal-desktop_8.24.0_amd64.deb"), secondHash,
+        QStringLiteral("https://updates.signal.org/desktop/apt/pool/s/signal-desktop/"
+                       "signal-desktop_8.24.0_amd64.deb"),
+        &error);
+    QVERIFY2(discovered != nullptr, qPrintable(error));
+    QCOMPARE(discovered->update.strategy, pacsmith::UpdateStrategy::AptRepository);
+
+    pacsmith::ImportOptions prepareOptions;
+    prepareOptions.version = QStringLiteral("8.24.0");
+    prepareOptions.acquisition = discovered->acquisition;
+    prepareOptions.existingProjectId = first->project.id;
+    auto prepared = store.importSource(
+        std::filesystem::path(secondDeb.toUtf8().constData()), prepareOptions, &error);
+    QVERIFY2(prepared.has_value(), qPrintable(error));
+    const auto *updated = prepared->project.release(prepared->releaseId);
+    QVERIFY(updated != nullptr);
+    QCOMPARE(updated->update.strategy, pacsmith::UpdateStrategy::AptRepository);
+    QCOMPARE(updated->update.url, QStringLiteral("https://updates.signal.org/desktop/apt"));
+    QCOMPARE(updated->update.aptSuite, QStringLiteral("xenial"));
+    QCOMPARE(updated->update.aptPackageName, QStringLiteral("signal-desktop"));
+    QCOMPARE(updated->update.aptSigningKeyring, QStringLiteral("files/keys/vendor-signal.gpg"));
+    QVERIFY(std::filesystem::is_regular_file(
+        store.releasePath(*updated) / std::filesystem::path("files/keys/vendor-signal.gpg")));
 }
 
 void CoreTests::preservesRepositoryFirstImportConfiguration() {

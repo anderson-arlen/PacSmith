@@ -535,11 +535,11 @@ void MainWindow::resetPreparationState() {
     updateUpdateCheckIndicators();
 }
 
-void MainWindow::reloadVisibleProjects() {
+void MainWindow::reloadVisibleProjects(const bool refreshOpenProject) {
     const auto projectId = project_ ? project_->id : QString{};
     refreshProjectList(projectId);
     if (!projectId.isEmpty() && (!project_ || project_->id != projectId)) loadProject(projectId);
-    if (project_) refreshCurrentProject();
+    if (refreshOpenProject && project_) refreshCurrentProject();
     syncActivityTimer();
     updateUpdateCheckIndicators();
 }

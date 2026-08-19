@@ -113,6 +113,11 @@ public:
     [[nodiscard]] bool reconcileInstalled(Project &project, QString *error = nullptr) const;
     [[nodiscard]] CleanupResult cleanup(Project &project, const RetentionPolicy &policy,
                                         QString *error = nullptr) const;
+    // Record a remote vendor version as a Discovered release, or return the
+    // existing row for that version. The same debian.version is treated as the
+    // same release unless both sides have SHA256 values that prove the bytes
+    // changed. Callers must still skip download/inspect unless the returned
+    // release is Discovered.
     [[nodiscard]] PackageRelease *recordDiscoveredRelease(
         Project &project, const PackageRelease &tracker, const QString &version,
         const QString &filename, const QString &sha256, const QString &downloadUrl,

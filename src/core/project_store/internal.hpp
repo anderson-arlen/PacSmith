@@ -23,6 +23,10 @@ bool writeBytes(const std::filesystem::path &path, const QByteArray &contents, Q
 bool writeImportedLifecycle(const std::filesystem::path &releaseDirectory,
                             PackageRelease &release, QString *error);
 void applyInitialUpdateConfiguration(PackageRelease &release, const ImportOptions &options);
+void inheritUpdateConfiguration(const PackageRelease &previous, PackageRelease &next);
+bool copyInheritedSigningKeys(const std::filesystem::path &previousDirectory,
+                              const std::filesystem::path &nextDirectory,
+                              const UpdateConfiguration &update, QString *error);
 bool storeImportSigningKeys(const std::filesystem::path &directory,
                             const QList<ExtractedSigningKey> &detectedKeys,
                             const ImportOptions &options, UpdateConfiguration &update,

@@ -468,8 +468,9 @@ struct Project {
     // has no PacSmith tracker.
     [[nodiscard]] PackageRelease *activeTrackingRelease();
     [[nodiscard]] const PackageRelease *activeTrackingRelease() const;
-    // True only when a retained or detected vendor version is newer than the
-    // PacSmith release currently installed through pacman.
+    // True when a retained vendor version is newer than the PacSmith release
+    // currently installed through pacman. Last-check detections do not count
+    // until that version exists as a project release again.
     [[nodiscard]] bool hasAvailableUpdate() const;
     // True when this project is the PacSmith owner of the pacman package, not
     // merely sharing that package name with another project or an external install.

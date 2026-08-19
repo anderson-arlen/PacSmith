@@ -42,10 +42,13 @@ private slots:
     void persistsMultipleReleases();
     void selectsActiveTrackingRelease();
     void reportsInstalledUpdateStatus();
+    void deletingUpdateReleaseClearsAvailableStatus();
     void dropsUnbuiltIntermediateUpdates();
     void recordsUninspectedGitHubDiscoveries();
+    void reusesInspectedReleaseForSameVendorVersion();
     void carriesInstallMappingAcrossGitHubVersions();
     void attachesPreparedGitHubDebToExistingProject();
+    void preservesAptTrackerAcrossDebUpdates();
     void preservesRepositoryFirstImportConfiguration();
     void parsesAiModelCatalog();
     void parsesChatGptCredentialsAndCatalog();

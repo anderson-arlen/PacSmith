@@ -1,38 +1,21 @@
 #include "gui/gui_instance.hpp"
 
+#include "core/background_updates.hpp"
+
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalSocket>
 
-#include <unistd.h>
-
 namespace pacsmith::gui {
-namespace {
-
-QByteArray encodeMessage(const QString &command, const QString &importPath) {
-    QJsonObject object{{QStringLiteral("command"), command}};
-    if (!importPath.isEmpty()) object.insert(QStringLiteral("path"), importPath);
-    auto encoded = QJsonDocument(object).toJson(QJsonDocument::Compact);
-    encoded.append('\n');
-    return encoded;
-}
-
-}
 
 GuiInstanceServer::GuiInstanceServer(QObject *parent) : QObject(parent) {}
 
 QString GuiInstanceServer::socketName() {
-    return QStringLiteral("pacsmith-gui-%1").arg(getuid());
+    return runningGuiSocketName();
 }
 
 bool GuiInstanceServer::sendCommand(const QString &command, const QString &importPath) {
-    QLocalSocket socket;
-    socket.connectToServer(socketName());
-    if (!socket.waitForConnected(250)) return false;
-    const auto payload = encodeMessage(command, importPath);
-    if (socket.write(payload) != payload.size() || !socket.waitForBytesWritten(1000)) return false;
-    socket.waitForDisconnected(250);
-    return true;
+    return notifyRunningGui(command, importPath);
 }
 
 bool GuiInstanceServer::activateExisting(const QString &importPath) {
@@ -46,6 +29,10 @@ bool GuiInstanceServer::requestCheck() {
 
 bool GuiInstanceServer::requestTray() {
     return sendCommand(QStringLiteral("tray"));
+}
+
+bool GuiInstanceServer::requestProjectsReload() {
+    return sendCommand(QStringLiteral("projects"));
 }
 
 bool GuiInstanceServer::listen() {
@@ -69,6 +56,7 @@ void GuiInstanceServer::acceptConnection() {
             const auto command = object.value(QStringLiteral("command")).toString();
             if (command == QStringLiteral("check")) emit checkRequested();
             else if (command == QStringLiteral("tray")) emit trayRequested();
+            else if (command == QStringLiteral("projects")) emit projectsReloadRequested();
             else if (command == QStringLiteral("import")) {
                 emit activated(object.value(QStringLiteral("path")).toString());
             } else {

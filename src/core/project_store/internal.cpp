@@ -79,33 +79,81 @@ bool writeImportedLifecycle(const std::filesystem::path &releaseDirectory,
                       release.lifecycleScript.contents.toUtf8(), error);
 }
 
+namespace {
+
+void mergeUpdateCandidates(UpdateConfiguration &into, const UpdateConfiguration &from) {
+    into.detectedCandidates.append(from.detectedCandidates);
+    into.detectedCandidates.removeDuplicates();
+    for (const auto &candidate : from.aptCandidates) {
+        if (std::none_of(into.aptCandidates.cbegin(), into.aptCandidates.cend(),
+                         [&](const auto &existing) {
+                             return existing.displayText() == candidate.displayText();
+                         })) {
+            into.aptCandidates.append(candidate);
+        }
+    }
+    for (const auto &candidate : from.rpmCandidates) {
+        if (std::none_of(into.rpmCandidates.cbegin(), into.rpmCandidates.cend(),
+                         [&](const auto &existing) {
+                             return existing.displayText() == candidate.displayText();
+                         })) {
+            into.rpmCandidates.append(candidate);
+        }
+    }
+}
+
+} // namespace
+
 void applyInitialUpdateConfiguration(PackageRelease &release,
                                      const ImportOptions &options) {
     if (!options.initialUpdate) return;
-    const auto detectedCandidates = release.update.detectedCandidates;
-    const auto aptCandidates = release.update.aptCandidates;
-    const auto rpmCandidates = release.update.rpmCandidates;
+    const auto incoming = release.update;
     release.update = *options.initialUpdate;
-    release.update.detectedCandidates.append(detectedCandidates);
-    release.update.detectedCandidates.removeDuplicates();
-    for (const auto &candidate : aptCandidates) {
-        if (std::none_of(release.update.aptCandidates.cbegin(),
-                         release.update.aptCandidates.cend(),
-                         [&](const auto &existing) {
-                             return existing.displayText() == candidate.displayText();
-                         })) {
-            release.update.aptCandidates.append(candidate);
+    mergeUpdateCandidates(release.update, incoming);
+}
+
+void inheritUpdateConfiguration(const PackageRelease &previous, PackageRelease &next) {
+    if (previous.update.strategy == UpdateStrategy::Manual) return;
+    const auto incoming = next.update;
+    next.update = previous.update;
+    if (previous.update.strategy == UpdateStrategy::GitHubRelease &&
+        incoming.strategy == UpdateStrategy::GitHubRelease) {
+        if (incoming.githubReleaseId > 0) next.update.githubReleaseId = incoming.githubReleaseId;
+        if (incoming.githubAssetId > 0) next.update.githubAssetId = incoming.githubAssetId;
+        if (!incoming.githubTag.isEmpty()) next.update.githubTag = incoming.githubTag;
+        if (!incoming.githubPublisherDigest.isEmpty()) {
+            next.update.githubPublisherDigest = incoming.githubPublisherDigest;
         }
     }
-    for (const auto &candidate : rpmCandidates) {
-        if (std::none_of(release.update.rpmCandidates.cbegin(),
-                         release.update.rpmCandidates.cend(),
-                         [&](const auto &existing) {
-                             return existing.displayText() == candidate.displayText();
-                         })) {
-            release.update.rpmCandidates.append(candidate);
-        }
+    mergeUpdateCandidates(next.update, incoming);
+}
+
+bool copyInheritedSigningKeys(const std::filesystem::path &previousDirectory,
+                              const std::filesystem::path &nextDirectory,
+                              const UpdateConfiguration &update, QString *error) {
+    QStringList relativePaths;
+    if (!update.aptSigningKeyring.isEmpty()) relativePaths.append(update.aptSigningKeyring);
+    for (const auto &key : update.signingKeys) {
+        if (!key.relativePath.isEmpty()) relativePaths.append(key.relativePath);
     }
+    relativePaths.removeDuplicates();
+    for (const auto &relative : relativePaths) {
+        if (QFileInfo(relative).isAbsolute()) continue;
+        const auto safe = PathSafety::normalizedArchivePath(relative);
+        if (!safe || !safe->startsWith(QStringLiteral("files/"))) continue;
+        const auto source = previousDirectory / pathFromQString(*safe);
+        const auto destination = nextDirectory / pathFromQString(*safe);
+        std::error_code filesystemError;
+        if (!std::filesystem::is_regular_file(source, filesystemError)) continue;
+        if (std::filesystem::is_regular_file(destination, filesystemError)) continue;
+        std::filesystem::create_directories(destination.parent_path(), filesystemError);
+        if (filesystemError) {
+            if (error != nullptr) *error = QString::fromStdString(filesystemError.message());
+            return false;
+        }
+        if (!copyFileAtomically(source, destination, error)) return false;
+    }
+    return true;
 }
 
 bool storeImportSigningKeys(const std::filesystem::path &directory,

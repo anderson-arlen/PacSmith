@@ -52,13 +52,14 @@ public:
         const auto activity = index.data(projectActivityRole).toString();
         const auto visualState =
             static_cast<ProjectVisualState>(index.data(projectVisualStateRole).toInt());
-        const auto state = activity.isEmpty() ? visualState : ProjectVisualState::Preparing;
+        const bool checking = index.data(projectCheckingRole).toBool() || !activity.isEmpty();
+        const auto state = checking ? ProjectVisualState::Preparing : visualState;
         const auto row = option.rect.adjusted(2, 2, -2, -2);
 
         if (selected) {
             QColor background;
             QColor border;
-            switch (visualState) {
+            switch (state) {
             case ProjectVisualState::Current:
                 background = darkTheme ? QColor(24, 70, 42) : QColor(219, 244, 226);
                 border = darkTheme ? QColor(70, 205, 108) : QColor(31, 145, 66);
@@ -92,7 +93,6 @@ public:
                                                                 : QIcon::Disabled);
 
         const auto textLeft = iconRect.right() + 10;
-        const bool checking = index.data(projectCheckingRole).toBool() || !activity.isEmpty();
         const auto textWidth = std::max(0, row.right() - textLeft - 7 - (checking ? 24 : 0));
         const QRect nameRect(textLeft, row.top() + 8, textWidth, 21);
         const QRect subtitleRect(textLeft, row.top() + 31, textWidth, 19);
@@ -146,7 +146,7 @@ public:
                                     row.center().y() - spinnerSize / 2, spinnerSize, spinnerSize);
             painter->setRenderHint(QPainter::Antialiasing, true);
             painter->setBrush(Qt::NoBrush);
-            auto spinnerPen = QPen(option.palette.link().color(), 2.25);
+            auto spinnerPen = QPen(secondary, 2.25);
             spinnerPen.setCapStyle(Qt::RoundCap);
             painter->setPen(spinnerPen);
             painter->drawArc(spinnerRect, (spinnerFrame % 4) * 90 * 16, 270 * 16);

@@ -155,6 +155,12 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
         release.update.githubTag = release.acquisition.githubTag;
         release.update.githubPublisherDigest = release.acquisition.publisherDigest;
     }
+    if (!options.initialUpdate) {
+        if (previous != nullptr) inheritUpdateConfiguration(*previous, release);
+        else if (discovered != project.releases.end()) {
+            inheritUpdateConfiguration(*discovered, release);
+        }
+    }
 
     const auto directory = releasePath(release);
     std::error_code filesystemError;
@@ -179,6 +185,10 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     }
     if (!storeImportSigningKeys(directory, analysis->signingKeys, options,
                                 release.update, error)) return std::nullopt;
+    if (previous != nullptr &&
+        !copyInheritedSigningKeys(releasePath(*previous), directory, release.update, error)) {
+        return std::nullopt;
+    }
 
     if (progress) progress({ImportStage::CopyingSource, 0});
     if (!copyFileAtomically(debPath, sourcePath(release), error)) return std::nullopt;
@@ -233,7 +243,9 @@ std::optional<ImportResult> ProjectStore::importSource(
                     normalizedSourceIdentity(release->acquisition.canonicalIdentity);
             }
             release->sourceUrl = release->acquisition.originalUrl;
-            if (release->acquisition.kind == AcquisitionKind::GitHubRelease) {
+            if (release->acquisition.kind == AcquisitionKind::GitHubRelease &&
+                (release->update.strategy == UpdateStrategy::Manual ||
+                 release->update.strategy == UpdateStrategy::GitHubRelease)) {
                 release->update.strategy = UpdateStrategy::GitHubRelease;
                 release->update.githubOwner = release->acquisition.githubOwner;
                 release->update.githubRepository = release->acquisition.githubRepository;
@@ -410,25 +422,13 @@ std::optional<ImportResult> ProjectStore::importSource(
     } else if (!release.update.rpmCandidates.isEmpty()) {
         static_cast<void>(populateRpmCandidates(release));
     }
-    if (const auto *previous = newestPreparedRelease(project); previous != nullptr) {
+    const auto *previous = newestPreparedRelease(project);
+    if (previous != nullptr) {
         carryForward(*previous, release,
                      previous->pkgbuildManuallyModified
                          ? readPkgbuild(*previous, nullptr).value_or(QString{})
                          : QString{});
-        if (release.update.strategy == UpdateStrategy::Manual) {
-            release.update = previous->update;
-        } else if (release.update.strategy == UpdateStrategy::GitHubRelease) {
-            const auto releaseIdValue = release.update.githubReleaseId;
-            const auto assetIdValue = release.update.githubAssetId;
-            const auto tagValue = release.update.githubTag;
-            const auto digestValue = release.update.githubPublisherDigest;
-            release.update = previous->update;
-            release.update.strategy = UpdateStrategy::GitHubRelease;
-            release.update.githubReleaseId = releaseIdValue;
-            release.update.githubAssetId = assetIdValue;
-            release.update.githubTag = tagValue;
-            release.update.githubPublisherDigest = digestValue;
-        }
+        if (!options.initialUpdate) inheritUpdateConfiguration(*previous, release);
     }
     const auto discovered = std::find_if(project.releases.begin(), project.releases.end(),
                                          [&](const auto &candidate) {
@@ -459,6 +459,10 @@ std::optional<ImportResult> ProjectStore::importSource(
     }
     if (!storeImportSigningKeys(directory, analysis->signingKeys, options,
                                 release.update, error)) return std::nullopt;
+    if (previous != nullptr &&
+        !copyInheritedSigningKeys(releasePath(*previous), directory, release.update, error)) {
+        return std::nullopt;
+    }
     if (progress) progress({ImportStage::CopyingSource, 0});
     if (!copyFileAtomically(inputPath, sourcePath(release), error)) return std::nullopt;
     const auto sourceLink = directory / pathFromQString(release.originalSourceFilename);
