@@ -7618,7 +7618,6 @@ void MainWindow::showSettings() {
 
     auto *aboutPage = new QWidget(settingsTabs);
     auto *aboutLayout = new QVBoxLayout(aboutPage);
-    aboutLayout->addStretch(1);
     auto *hero = new QLabel(aboutPage);
     QPixmap heroPixmap(QStringLiteral(":/pacsmith/icons/pacsmith-hero.png"));
     const auto heroSide = qRound(192.0 * dialog.devicePixelRatioF());
@@ -7649,6 +7648,18 @@ void MainWindow::showSettings() {
     aboutLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
     aboutLink->setOpenExternalLinks(true);
     aboutLink->setAlignment(Qt::AlignCenter);
+    auto *licenseView = new QPlainTextEdit(aboutPage);
+    licenseView->setReadOnly(true);
+    licenseView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    licenseView->setTabChangesFocus(true);
+    QFile licenseFile(QStringLiteral(":/pacsmith/LICENSE"));
+    if (licenseFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        licenseView->setPlainText(QString::fromUtf8(licenseFile.readAll()).trimmed());
+    } else {
+        licenseView->setPlainText(QStringLiteral(
+            "MIT License\n\n"
+            "Copyright (c) 2026 Arlen Anderson and contributors"));
+    }
     aboutLayout->addWidget(hero);
     aboutLayout->addSpacing(12);
     aboutLayout->addWidget(aboutName);
@@ -7657,7 +7668,8 @@ void MainWindow::showSettings() {
     aboutLayout->addWidget(aboutSummary);
     aboutLayout->addSpacing(8);
     aboutLayout->addWidget(aboutLink);
-    aboutLayout->addStretch(2);
+    aboutLayout->addSpacing(16);
+    aboutLayout->addWidget(licenseView, 1);
     settingsTabs->addTab(aboutPage, QStringLiteral("About"));
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);

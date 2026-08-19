@@ -115,6 +115,10 @@ qt_add_resources(pacsmith-gui gui_resources
         resources/icons/pacsmith.png
         resources/icons/pacsmith-hero.png
         resources/icons/pacsmith-tray.png)
+qt_add_resources(pacsmith-gui license_resources
+    PREFIX "/pacsmith"
+    BASE ${CMAKE_CURRENT_SOURCE_DIR}
+    FILES LICENSE)
 pacsmith_target_defaults(pacsmith-gui)
 
 include(GNUInstallDirs)
@@ -126,7 +130,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(DIRECTORY resources/icons/hicolor
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
-install(FILES README.md docs/ARCHITECTURE.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/pacsmith)
+install(FILES LICENSE README.md docs/ARCHITECTURE.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/pacsmith)
 
 include(CTest)
 if(BUILD_TESTING)
