@@ -19,6 +19,7 @@ private:
         QTextCharFormat format;
     };
     QList<Rule> rules_;
+    QTextCharFormat commentFormat_;
 };
 
 } // namespace pacsmith::gui

@@ -889,7 +889,9 @@ void CoreTests::carriesInstallMappingAcrossGitHubVersions() {
     QCOMPARE(updated->lifecycleScript.contents,
              QStringLiteral("post_install() { /usr/bin/true; }\n"));
     QVERIFY(updated->generatedPkgbuild.contains(
-        QStringLiteral("install='vendorctl-bin.install'")));
+        QStringLiteral("install=\"${_PACSMITH_INSTALL}\"")));
+    QVERIFY(pacsmith::PkgbuildGenerator::identityVariables(*updated).contains(
+        QStringLiteral("_PACSMITH_INSTALL='vendorctl-bin.install'")));
     QFile lifecycle(QString::fromUtf8(store.lifecyclePath(*updated).string().c_str()));
     QVERIFY(lifecycle.open(QIODevice::ReadOnly));
     QCOMPARE(QString::fromUtf8(lifecycle.readAll()), updated->lifecycleScript.contents);

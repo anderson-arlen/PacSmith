@@ -213,7 +213,7 @@ AppImage import is static decomposition: PacSmith unpacks the SquashFS payload, 
 
 ## Persistent projects
 
-Projects use `$XDG_DATA_HOME/pacsmith/projects`, falling back to `~/.local/share/pacsmith/projects`. Each application has `project.json` plus `releases/<version-hash>/`. A release directory contains `release.json`, `PKGBUILD`, `sources/`, `files/`, `patches/`, `build/`, and `history/`. Acquisition identity, source kind, trusted keys, install mapping, and lifecycle files are release-specific.
+Projects use `$XDG_DATA_HOME/pacsmith/projects`, falling back to `~/.local/share/pacsmith/projects`. Each application has `project.json` plus `releases/<version-hash>/`. A release directory contains `release.json`, `PKGBUILD`, `pacsmith.vars`, `sources/`, `files/`, `patches/`, `build/`, and `history/`. Acquisition identity, source kind, trusted keys, install mapping, and lifecycle files are release-specific.
 
 Generated packages include pacman xdata linking the installed package to its PacSmith project, immutable release, acquisition identity, artifact type, and source SHA256. PacSmith can therefore identify managed packages even if the local project files are later missing.
 

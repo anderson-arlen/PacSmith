@@ -45,7 +45,7 @@ if(NOT release_count EQUAL 1)
 endif()
 list(GET release_directories 0 release_dir)
 if(NOT EXISTS "${project_dir}/project.json" OR NOT EXISTS "${release_dir}/release.json"
-   OR NOT EXISTS "${release_dir}/PKGBUILD"
+   OR NOT EXISTS "${release_dir}/PKGBUILD" OR NOT EXISTS "${release_dir}/pacsmith.vars"
    OR NOT EXISTS "${release_dir}/sources/sample.deb" OR NOT EXISTS "${release_dir}/sample.deb"
    OR NOT EXISTS "${release_dir}/files/icon.xpm")
     message(FATAL_ERROR "Import did not produce the expected persistent project")
@@ -61,10 +61,17 @@ foreach(expected IN ITEMS "postinst" "postrm" "unknown-vendor-runtime" "etc/apt"
     endif()
 endforeach()
 file(READ "${release_dir}/PKGBUILD" pkgbuild)
-foreach(expected IN ITEMS "pkgname='pacsmith-smoke-bin'" "depends=('glibc' 'gtk3')" "options=('!strip' '!debug')" "data.tar|data.tar.*" "rm -rf -- \"\${pkgdir}/etc/apt\"")
+foreach(expected IN ITEMS "pkgname=\"\${_PACSMITH_PKGNAME}\"" "depends=('glibc' 'gtk3')" "options=('!strip' '!debug')" "data.tar|data.tar.*" "rm -rf -- \"\${pkgdir}/etc/apt\"")
     string(FIND "${pkgbuild}" "${expected}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "PKGBUILD did not contain expected content: ${expected}")
+    endif()
+endforeach()
+file(READ "${release_dir}/pacsmith.vars" identity_vars)
+foreach(expected IN ITEMS "_PACSMITH_PKGNAME='pacsmith-smoke-bin'" "_PACSMITH_SOURCE='sample.deb'")
+    string(FIND "${identity_vars}" "${expected}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "pacsmith.vars did not contain expected content: ${expected}")
     endif()
 endforeach()
 

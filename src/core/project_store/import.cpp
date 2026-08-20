@@ -203,7 +203,7 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     if (progress) progress({ImportStage::GeneratingPkgbuild, 0});
     release.generatedPkgbuild = PkgbuildGenerator::generate(release);
     release.generatedPkgbuildSha256 = sha256Hex(release.generatedPkgbuild.toUtf8());
-    if (!writeBytes(pkgbuildPath(release), release.generatedPkgbuild.toUtf8(), error)) {
+    if (!writePkgbuildContents(release, release.generatedPkgbuild, error)) {
         return std::nullopt;
     }
     release.history.append({release.createdAt, QStringLiteral("created"),
@@ -339,10 +339,11 @@ std::optional<ImportResult> ProjectStore::importSource(
                         existing.generatedPkgbuild = PkgbuildGenerator::generate(existing);
                         existing.generatedPkgbuildSha256 =
                             sha256Hex(existing.generatedPkgbuild.toUtf8());
-                        if (!writeBytes(pkgbuildPath(existing),
-                                        existing.generatedPkgbuild.toUtf8(), error)) {
+                        if (!writePkgbuildContents(existing, existing.generatedPkgbuild, error)) {
                             return std::nullopt;
                         }
+                    } else if (!writeIdentityVariables(existing, error)) {
+                        return std::nullopt;
                     }
                     if (!save(project, error)) return std::nullopt;
                 }
@@ -476,7 +477,7 @@ std::optional<ImportResult> ProjectStore::importSource(
     if (progress) progress({ImportStage::GeneratingPkgbuild, 0});
     release.generatedPkgbuild = PkgbuildGenerator::generate(release);
     release.generatedPkgbuildSha256 = sha256Hex(release.generatedPkgbuild.toUtf8());
-    if (!writeBytes(pkgbuildPath(release), release.generatedPkgbuild.toUtf8(), error)) {
+    if (!writePkgbuildContents(release, release.generatedPkgbuild, error)) {
         return std::nullopt;
     }
     release.history.append({release.createdAt, QStringLiteral("import"),
@@ -612,7 +613,7 @@ std::optional<ImportResult> ProjectStore::reanalyzeRelease(
     if (progress) progress({ImportStage::GeneratingPkgbuild, 0});
     reset.generatedPkgbuild = PkgbuildGenerator::generate(reset);
     reset.generatedPkgbuildSha256 = sha256Hex(reset.generatedPkgbuild.toUtf8());
-    if (!writeBytes(pkgbuildPath(reset), reset.generatedPkgbuild.toUtf8(), error)) {
+    if (!writePkgbuildContents(reset, reset.generatedPkgbuild, error)) {
         return std::nullopt;
     }
 

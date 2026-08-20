@@ -429,6 +429,8 @@ private:
     QNetworkReply *iconReply_{nullptr};
     QPlainTextEdit *pkgbuildEditor_{nullptr};
     QPlainTextEdit *pkgbuildPreview_{nullptr};
+    QPlainTextEdit *pkgbuildVarsPreview_{nullptr};
+    QPlainTextEdit *resultPkgbuildVarsPreview_{nullptr};
     QLabel *pkgbuildState_{nullptr};
     QLabel *pkgbuildPreviewNotice_{nullptr};
     QComboBox *updateStrategy_{nullptr};

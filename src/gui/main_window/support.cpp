@@ -18,6 +18,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QFontMetrics>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -32,6 +33,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSet>
+#include <QSizePolicy>
 #include <QSysInfo>
 #include <QTimer>
 #include <QTreeWidget>
@@ -675,6 +677,14 @@ void makeReadOnlyCodeEditor(QPlainTextEdit *editor) {
     editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
 }
 
+void configureIdentityVariablesEditor(QPlainTextEdit *editor) {
+    makeReadOnlyCodeEditor(editor);
+    const auto lineHeight = QFontMetrics(editor->font()).lineSpacing();
+    editor->setMinimumHeight(lineHeight * 6 + 8);
+    editor->setMaximumHeight(lineHeight * 12 + 8);
+    editor->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+}
+
 QTreeWidgetItem *ensureInstallPlanNode(QTreeWidget *tree, QHash<QString, QTreeWidgetItem *> *nodes,
                                        const QString &absolutePath) {
     QString path = absolutePath;
@@ -922,6 +932,12 @@ bool unsafePackageSymlink(const PayloadEntry &entry) {
 }
 bool pkgbuildReferencesLifecycle(const QString &pkgbuild, const QString &fileName) {
     if (fileName.isEmpty()) return false;
+    const auto reference = pkgbuildLifecycleReference(pkgbuild);
+    if (reference == fileName) return true;
+    if (reference == QStringLiteral("$_PACSMITH_INSTALL") ||
+        reference == QStringLiteral("${_PACSMITH_INSTALL}")) {
+        return true;
+    }
     const auto escaped = QRegularExpression::escape(fileName);
     const QRegularExpression assignment(
         QStringLiteral("(?m)^\\s*install\\s*=\\s*(?:'%1'|\"%1\"|%1)\\s*(?:#.*)?$")
@@ -931,7 +947,7 @@ bool pkgbuildReferencesLifecycle(const QString &pkgbuild, const QString &fileNam
 
 QString pkgbuildLifecycleReference(const QString &pkgbuild) {
     const QRegularExpression assignment(
-        QStringLiteral("(?m)^\\s*install\\s*=\\s*(?:'([^']+)'|\"([^\"]+)\"|([^\\s#]+))"));
+        QStringLiteral("(?m)(?:^|&&\\s*)install\\s*=\\s*(?:'([^']+)'|\"([^\"]+)\"|([^\\s#]+))"));
     const auto match = assignment.match(pkgbuild);
     if (!match.hasMatch()) return {};
     for (int capture = 1; capture <= 3; ++capture) {

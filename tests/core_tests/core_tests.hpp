@@ -72,6 +72,7 @@ private slots:
     void generatesPkgbuild();
     void generatesMultiSourcePkgbuilds();
     void parsesPkgbuildInstallPlans();
+    void writesPacsmithIdentityVariablesAcrossUpdates();
     void synchronizesIntegrationIconSource();
     void parsesRpmHeadersWithoutExecutingScripts();
     void inspectsArchiveIconsRepositoryEvidenceAndPrivilegedModes();

@@ -33,6 +33,10 @@ void MainWindow::populatePkgbuild() {
     if (pkgbuildPreviewNotice_ != nullptr) {
         pkgbuildPreviewNotice_->setText(state);
     }
+    const auto vars = store_.readIdentityVariables(*currentRelease(), nullptr)
+                          .value_or(PkgbuildGenerator::identityVariables(*currentRelease()));
+    if (pkgbuildVarsPreview_ != nullptr) pkgbuildVarsPreview_->setPlainText(vars);
+    if (resultPkgbuildVarsPreview_ != nullptr) resultPkgbuildVarsPreview_->setPlainText(vars);
     if (isSectionActive(EditorSection::ResultBuild) || buildButton_ != nullptr) populateBuild();
 }
 

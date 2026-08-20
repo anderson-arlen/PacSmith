@@ -25,6 +25,7 @@ $XDG_DATA_HOME/pacsmith/projects/<id>/
     └── <vendor-version>-<source-hash>/
         ├── release.json
         ├── PKGBUILD
+        ├── pacsmith.vars
         ├── <package-name>.install  # only when configured
         ├── <artifact> → sources/<artifact>
         ├── sources/<artifact>
@@ -36,7 +37,7 @@ $XDG_DATA_HOME/pacsmith/projects/<id>/
 
 `project.json` is the application-level index: identity, release IDs, installed package reconciliation, and project history. Every `release.json` independently stores its immutable artifact and acquisition identity, source hash, parsed analysis, install mapping, content-specific review decisions, lifecycle policy, editable update evidence/configuration, generated-recipe baseline, build records, statically inspected artifact metadata, and history. The install mapping includes `/opt` root handling, any number of command launchers and desktop entries, and one selected application icon with content hash/provenance. Acquisition says where those exact bytes came from and is never repurposed as a future-download setting. Future retrieval is configured only through that release's update strategy. The active tracker is the installed known release, or the newest fully analyzed release while the project is not installed. A discovered or still-preparing release cannot take ownership merely by appearing. Checks pause only when no analyzed release exists or pacman's installed version cannot be matched safely. Full AI conversations and credentials are deliberately absent.
 
-The PKGBUILD remains an ordinary text file. Its current hash is compared with the last generated hash when a project is loaded, so edits are recognized without making the JSON file authoritative over user content. PacSmith does not overwrite a manually edited recipe during project load.
+The PKGBUILD remains an ordinary text file. Its current hash is compared with the last generated hash when a project is loaded, so edits are recognized without making the JSON file authoritative over user content. PacSmith does not overwrite a manually edited recipe during project load. Per-release identity (`pkgver`, vendor filename, SHA256, and related values) is rewritten into `pacsmith.vars` beside the PKGBUILD; generated and Custom recipes source that file and use `_PACSMITH_*` variables so a copied Custom recipe does not keep stale artifact names.
 
 ## Source analysis
 

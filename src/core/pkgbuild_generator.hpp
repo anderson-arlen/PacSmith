@@ -10,6 +10,7 @@ namespace pacsmith {
 class PkgbuildGenerator final {
 public:
     [[nodiscard]] static QString generate(const PackageRelease &release);
+    [[nodiscard]] static QString identityVariables(const PackageRelease &release);
     [[nodiscard]] static QString installedPayloadPath(const PackageRelease &release,
                                                       const QString &payloadPath);
     [[nodiscard]] static QString sanitizePackageName(const QString &name);

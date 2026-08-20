@@ -1,5 +1,7 @@
 #include "core/pkgbuild_install_plan.hpp"
 
+#include "core/pkgbuild_generator.hpp"
+
 #include <QHash>
 #include <QMap>
 #include <QRegularExpression>
@@ -116,8 +118,8 @@ QString parseArrayFirst(const QString &value) {
     return tokens.isEmpty() ? QString{} : unquote(tokens.first());
 }
 
-QHash<QString, QString> parseAssignments(const QString &pkgbuild, QString *installFile, QString *sourceName) {
-    QHash<QString, QString> vars;
+QHash<QString, QString> parseAssignments(const QString &pkgbuild, QString *installFile,
+                                         QString *sourceName, QHash<QString, QString> vars = {}) {
     vars.insert(QStringLiteral("pkgdir"), {});
     vars.insert(QStringLiteral("srcdir"), {});
     const auto lines = QStringView{pkgbuild}.split(QLatin1Char('\n'));
@@ -248,10 +250,13 @@ InstallPlan PkgbuildInstallPlan::parse(const QString &pkgbuild, const PackageRel
     InstallPlan plan;
     QString installFile;
     QString sourceName = release.originalSourceFilename;
-    auto vars = parseAssignments(pkgbuild, &installFile, &sourceName);
+    auto vars = parseAssignments(PkgbuildGenerator::identityVariables(release), nullptr, nullptr);
+    vars = parseAssignments(pkgbuild, &installFile, &sourceName, std::move(vars));
     if (vars.value(QStringLiteral("pkgname")).isEmpty()) {
         vars.insert(QStringLiteral("pkgname"), release.archPackageName);
     }
+    if (installFile.isEmpty()) installFile = vars.value(QStringLiteral("_PACSMITH_INSTALL"));
+    if (sourceName.isEmpty()) sourceName = vars.value(QStringLiteral("_PACSMITH_SOURCE"));
     if (sourceName.isEmpty()) sourceName = release.originalSourceFilename;
 
     const auto packageBody = extractFunctionBody(pkgbuild, QStringLiteral("package"));

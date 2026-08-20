@@ -360,7 +360,7 @@ void CoreTests::appliesAiAppRunRewriteForExtractedAppImage() {
     const auto pkgbuild = pacsmith::PkgbuildGenerator::generate(project);
     QVERIFY(pkgbuild.contains(QStringLiteral("exec \"$APPDIR/freac\" \"$@\"")));
     QVERIFY(pkgbuild.contains(QStringLiteral("unset APPIMAGE")));
-    QVERIFY(pkgbuild.contains(QStringLiteral("exec \"/opt/freac/AppRun\" \"$@\"")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("exec \"/opt/${_PACSMITH_OPT}/AppRun\" \"\\$@\"")));
 
     pacsmith::AiResolution second;
     second.success = true;

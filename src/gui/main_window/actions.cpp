@@ -853,7 +853,11 @@ void MainWindow::startBuild(const bool installWhenSuccessful) {
     }
     if (!savePkgbuild()) return;
     const auto pkgbuildText = currentPkgbuildText();
-    const auto lifecycleReference = pkgbuildLifecycleReference(pkgbuildText);
+    auto lifecycleReference = pkgbuildLifecycleReference(pkgbuildText);
+    if (lifecycleReference == QStringLiteral("$_PACSMITH_INSTALL") ||
+        lifecycleReference == QStringLiteral("${_PACSMITH_INSTALL}")) {
+        lifecycleReference = currentRelease()->lifecycleScript.fileName;
+    }
     if (!lifecycleReference.isEmpty() &&
         (lifecycleReference.contains(QLatin1Char('/')) ||
          (!lifecycleReference.contains(QLatin1Char('$')) &&
@@ -880,7 +884,7 @@ void MainWindow::startBuild(const bool installWhenSuccessful) {
         QMessageBox::warning(
             this, QStringLiteral("PKGBUILD omits lifecycle script"),
             QStringLiteral("The validated lifecycle script '%1' is not referenced by the PKGBUILD. "
-                           "Add install='%1' in Custom mode or switch back to Guided before building.")
+                           "Add install='%1' or install=\"${_PACSMITH_INSTALL}\" in Custom mode or switch back to Guided before building.")
                 .arg(currentRelease()->lifecycleScript.fileName));
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
         rightStack_->setCurrentIndex(1);

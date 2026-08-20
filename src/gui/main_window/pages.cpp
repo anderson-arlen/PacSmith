@@ -678,6 +678,13 @@ QWidget *MainWindow::createPkgbuildPage() {
         QStringLiteral("This PKGBUILD is what makepkg executes in Custom mode."),
         page,
         QStringLiteral("Guided configuration is ignored until you switch back. Saving keeps this file user-owned.")));
+    auto *varsNotice = new QLabel(
+        QStringLiteral("PacSmith rewrites pacsmith.vars for each vendor artifact. Use $_PACSMITH_* instead of versioned filenames."),
+        page);
+    varsNotice->setWordWrap(true);
+    pkgbuildVarsPreview_ = new QPlainTextEdit(page);
+    configureIdentityVariablesEditor(pkgbuildVarsPreview_);
+    new PkgbuildHighlighter(pkgbuildVarsPreview_->document());
     pkgbuildState_ = new QLabel(page);
     pkgbuildEditor_ = new QPlainTextEdit(page);
     pkgbuildEditor_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -695,6 +702,8 @@ QWidget *MainWindow::createPkgbuildPage() {
     buttons->addWidget(guidedButton);
     buttons->addWidget(pkgbuildBuildButton_);
     buttons->addStretch();
+    layout->addWidget(varsNotice);
+    layout->addWidget(pkgbuildVarsPreview_);
     layout->addWidget(pkgbuildState_);
     layout->addWidget(pkgbuildEditor_, 1);
     layout->addLayout(buttons);
@@ -723,6 +732,13 @@ QWidget *MainWindow::createResultPkgbuildPage() {
         QStringLiteral("Change Guided settings to regenerate it, or switch Configuration to Custom to edit it.")));
     pkgbuildPreviewNotice_ = new QLabel(page);
     pkgbuildPreviewNotice_->setWordWrap(true);
+    auto *varsNotice = new QLabel(
+        QStringLiteral("PacSmith rewrites pacsmith.vars for each vendor artifact. Use $_PACSMITH_* instead of versioned filenames."),
+        page);
+    varsNotice->setWordWrap(true);
+    resultPkgbuildVarsPreview_ = new QPlainTextEdit(page);
+    configureIdentityVariablesEditor(resultPkgbuildVarsPreview_);
+    new PkgbuildHighlighter(resultPkgbuildVarsPreview_->document());
     pkgbuildPreview_ = new QPlainTextEdit(page);
     makeReadOnlyCodeEditor(pkgbuildPreview_);
     new PkgbuildHighlighter(pkgbuildPreview_->document());
@@ -735,6 +751,8 @@ QWidget *MainWindow::createResultPkgbuildPage() {
     buttons->addWidget(resultPkgbuildBuildButton_);
     buttons->addStretch();
     layout->addWidget(pkgbuildPreviewNotice_);
+    layout->addWidget(varsNotice);
+    layout->addWidget(resultPkgbuildVarsPreview_);
     layout->addWidget(pkgbuildPreview_, 1);
     layout->addLayout(buttons);
     connect(validateButton, &QPushButton::clicked, this, [this]() {

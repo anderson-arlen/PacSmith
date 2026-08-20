@@ -65,6 +65,7 @@ public:
                                                     const QString &releaseId) const;
     [[nodiscard]] std::filesystem::path releasePath(const PackageRelease &release) const;
     [[nodiscard]] std::filesystem::path pkgbuildPath(const PackageRelease &release) const;
+    [[nodiscard]] std::filesystem::path identityVariablesPath(const PackageRelease &release) const;
     [[nodiscard]] std::filesystem::path sourcePath(const PackageRelease &release) const;
     [[nodiscard]] std::filesystem::path iconPath(const Project &project) const;
     [[nodiscard]] std::filesystem::path releaseIconPath(const PackageRelease &release) const;
@@ -109,6 +110,8 @@ public:
                                             QString *error = nullptr) const;
     [[nodiscard]] std::optional<QString> readPkgbuild(const PackageRelease &release,
                                                      QString *error = nullptr) const;
+    [[nodiscard]] std::optional<QString> readIdentityVariables(const PackageRelease &release,
+                                                              QString *error = nullptr) const;
 
     [[nodiscard]] bool reconcileInstalled(Project &project, QString *error = nullptr) const;
     [[nodiscard]] CleanupResult cleanup(Project &project, const RetentionPolicy &policy,
@@ -136,6 +139,10 @@ private:
         const QString &id, const QJsonObject &legacyObject, QString *error) const;
     [[nodiscard]] bool synchronizeIntegrationSources(
         const PackageRelease &release, QString *error) const;
+    [[nodiscard]] bool writeIdentityVariables(const PackageRelease &release,
+                                              QString *error) const;
+    [[nodiscard]] bool writePkgbuildContents(const PackageRelease &release,
+                                             const QString &contents, QString *error) const;
 
     std::filesystem::path root_;
 };

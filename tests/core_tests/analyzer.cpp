@@ -306,8 +306,12 @@ void CoreTests::parsesRpmHeadersWithoutExecutingScripts() {
     release.sourceType = pacsmith::SourcePackageType::Rpm;
     release.debian = analyzed->metadata;
     const auto pkgbuild = pacsmith::PkgbuildGenerator::generate(release);
-    QVERIFY(pkgbuild.contains(QStringLiteral("pacsmith.artifact=rpm")));
-    QVERIFY(pkgbuild.contains(QStringLiteral("bsdtar -xpf \"$srcdir/vendor.rpm\"")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("pacsmith.artifact=${_PACSMITH_ARTIFACT}")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("bsdtar -xpf \"$srcdir/${_PACSMITH_SOURCE}\"")));
+    QVERIFY(pacsmith::PkgbuildGenerator::identityVariables(release).contains(
+        QStringLiteral("_PACSMITH_ARTIFACT='rpm'")));
+    QVERIFY(pacsmith::PkgbuildGenerator::identityVariables(release).contains(
+        QStringLiteral("_PACSMITH_SOURCE='vendor.rpm'")));
 }
 
 void CoreTests::inspectsArchiveIconsRepositoryEvidenceAndPrivilegedModes() {

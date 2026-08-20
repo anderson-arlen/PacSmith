@@ -126,6 +126,7 @@ QString acquisitionKindTitle(AcquisitionKind kind);
 QString reasoningEffortLabel(AiReasoningEffort effort);
 QList<AiReasoningEffort> supportedReasoningEfforts(AiProviderKind provider, const QString &model);
 void makeReadOnlyCodeEditor(QPlainTextEdit *editor);
+void configureIdentityVariablesEditor(QPlainTextEdit *editor);
 QTreeWidgetItem *ensureInstallPlanNode(QTreeWidget *tree, QHash<QString, QTreeWidgetItem *> *nodes,
                                        const QString &absolutePath);
 void addInstallPlanEntry(QTreeWidget *tree, QHash<QString, QTreeWidgetItem *> *nodes,

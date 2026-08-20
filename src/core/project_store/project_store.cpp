@@ -103,6 +103,10 @@ std::filesystem::path ProjectStore::pkgbuildPath(const PackageRelease &release) 
     return releasePath(release) / "PKGBUILD";
 }
 
+std::filesystem::path ProjectStore::identityVariablesPath(const PackageRelease &release) const {
+    return releasePath(release) / "pacsmith.vars";
+}
+
 std::filesystem::path ProjectStore::sourcePath(const PackageRelease &release) const {
     return releasePath(release) / "sources" / pathFromQString(release.originalSourceFilename);
 }
@@ -279,16 +283,23 @@ std::optional<Project> ProjectStore::loadById(const QString &id, QString *error)
         }
         const bool generatedRecipeNeedsMigration =
             !release.generatedPkgbuild.contains(QStringLiteral("xdata=(")) ||
+            !release.generatedPkgbuild.contains(QStringLiteral("pacsmith.vars")) ||
             (release.sourceType == SourcePackageType::AppImage &&
              !release.generatedPkgbuild.contains(
                  QStringLiteral("Preserve the complete AppDir below /opt")));
         if (mappingsChanged || project.formatVersion < 5 || generatedRecipeNeedsMigration) {
             release.generatedPkgbuild = PkgbuildGenerator::generate(release);
             release.generatedPkgbuildSha256 = sha256Hex(release.generatedPkgbuild.toUtf8());
+            changed = true;
             if (!release.pkgbuildManuallyModified &&
-                !writeBytes(pkgbuildPath(release), release.generatedPkgbuild.toUtf8(), error)) {
+                !writePkgbuildContents(release, release.generatedPkgbuild, error)) {
                 return std::nullopt;
             }
+        }
+        if (release.state != ReleaseState::Discovered &&
+            release.state != ReleaseState::Preparing &&
+            !writeIdentityVariables(release, error)) {
+            return std::nullopt;
         }
         project.releases.append(std::move(release));
     }
@@ -346,6 +357,11 @@ bool ProjectStore::save(Project &project, QString *error) const {
             return false;
         }
         if (!synchronizeIntegrationSources(release, error)) return false;
+        if (release.state != ReleaseState::Discovered &&
+            release.state != ReleaseState::Preparing &&
+            !writeIdentityVariables(release, error)) {
+            return false;
+        }
         if (!writeBytes(releasePath(release) / "release.json",
                         QJsonDocument(release.toJson()).toJson(QJsonDocument::Indented), error)) {
             return false;
@@ -409,6 +425,7 @@ std::optional<Project> ProjectStore::migrateLegacyProject(const QString &id,
             moveOk = moveOk && moveEntry(directory / name, staging / name);
         }
         moveOk = moveOk && moveEntry(directory / "PKGBUILD", staging / "PKGBUILD");
+        moveOk = moveOk && moveEntry(directory / "pacsmith.vars", staging / "pacsmith.vars");
         if (!release.originalSourceFilename.isEmpty()) {
             moveOk = moveOk && moveEntry(directory / pathFromQString(release.originalSourceFilename),
                                          staging / pathFromQString(release.originalSourceFilename));
@@ -678,7 +695,7 @@ bool ProjectStore::savePkgbuild(Project &project, PackageRelease &release,
 
 bool ProjectStore::activateGuidedPkgbuild(Project &project, PackageRelease &release,
                                          QString *error) const {
-    if (!writeBytes(pkgbuildPath(release), release.generatedPkgbuild.toUtf8(), error)) return false;
+    if (!writePkgbuildContents(release, release.generatedPkgbuild, error)) return false;
     release.pkgbuildManuallyModified = false;
     return save(project, error);
 }
@@ -686,7 +703,7 @@ bool ProjectStore::activateGuidedPkgbuild(Project &project, PackageRelease &rele
 bool ProjectStore::activateCustomPkgbuild(Project &project, PackageRelease &release,
                                          QString *error) const {
     if (release.customPkgbuild.isEmpty()) release.customPkgbuild = release.generatedPkgbuild;
-    if (!writeBytes(pkgbuildPath(release), release.customPkgbuild.toUtf8(), error)) return false;
+    if (!writePkgbuildContents(release, release.customPkgbuild, error)) return false;
     release.pkgbuildManuallyModified = true;
     return save(project, error);
 }
@@ -695,7 +712,7 @@ bool ProjectStore::saveCustomPkgbuild(Project &project, PackageRelease &release,
                                       const QString &contents, QString *error) const {
     release.customPkgbuild = contents;
     release.pkgbuildManuallyModified = true;
-    if (!writeBytes(pkgbuildPath(release), contents.toUtf8(), error)) return false;
+    if (!writePkgbuildContents(release, contents, error)) return false;
     return save(project, error);
 }
 
@@ -790,6 +807,27 @@ std::optional<QString> ProjectStore::readPkgbuild(const PackageRelease &release,
         return std::nullopt;
     }
     return QString::fromUtf8(file.readAll());
+}
+
+std::optional<QString> ProjectStore::readIdentityVariables(const PackageRelease &release,
+                                                           QString *error) const {
+    QFile file(qStringFromPath(identityVariablesPath(release)));
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (error != nullptr) *error = file.errorString();
+        return std::nullopt;
+    }
+    return QString::fromUtf8(file.readAll());
+}
+
+bool ProjectStore::writeIdentityVariables(const PackageRelease &release, QString *error) const {
+    return writeBytes(identityVariablesPath(release),
+                      PkgbuildGenerator::identityVariables(release).toUtf8(), error);
+}
+
+bool ProjectStore::writePkgbuildContents(const PackageRelease &release, const QString &contents,
+                                         QString *error) const {
+    if (!writeIdentityVariables(release, error)) return false;
+    return writeBytes(pkgbuildPath(release), contents.toUtf8(), error);
 }
 
 CleanupResult ProjectStore::cleanup(Project &project, const RetentionPolicy &policy,

@@ -318,8 +318,11 @@ void CoreTests::reanalyzesReleaseFromBlankPackageSetup() {
     QFile pkgbuild(QString::fromUtf8(store.pkgbuildPath(*reset).string().c_str()));
     QVERIFY(pkgbuild.open(QIODevice::ReadOnly));
     const auto regenerated = pkgbuild.readAll();
-    QVERIFY(regenerated.contains("pkgname='vendor-bin'"));
+    QVERIFY(regenerated.contains("pkgname=\"${_PACSMITH_PKGNAME}\""));
     QVERIFY(!regenerated.contains("user-owned recipe"));
+    QFile vars(QString::fromUtf8(store.identityVariablesPath(*reset).string().c_str()));
+    QVERIFY(vars.open(QIODevice::ReadOnly));
+    QVERIFY(vars.readAll().contains("_PACSMITH_PKGNAME='vendor-bin'"));
 }
 
 void CoreTests::generatesPkgbuild() {
@@ -342,23 +345,29 @@ void CoreTests::generatesPkgbuild() {
     project.lifecycleScript.contents = QStringLiteral("post_install() {\n  :\n}\n");
     project.lifecycleScript.validationPassed = true;
     const auto pkgbuild = pacsmith::PkgbuildGenerator::generate(project);
-    QVERIFY(pkgbuild.contains(QStringLiteral("pkgname='vendor-app-bin'")));
-    QVERIFY(pkgbuild.contains(QStringLiteral("epoch=2")));
-    QVERIFY(pkgbuild.contains(QStringLiteral("pkgver='1.2.3'")));
-    QVERIFY(pkgbuild.contains(QStringLiteral("arch=('x86_64')")));
+    const auto vars = pacsmith::PkgbuildGenerator::identityVariables(project);
+    QVERIFY(pkgbuild.contains(QStringLiteral("source \"${startdir:-.}/pacsmith.vars\"")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("pkgname=\"${_PACSMITH_PKGNAME}\"")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_PKGNAME='vendor-app-bin'")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_EPOCH='2'")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_PKGVER='1.2.3'")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_ARCH='x86_64'")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_SOURCE='vendor app_1.2_amd64.deb'")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_INSTALL='vendor-app-bin.install'")));
     QVERIFY(pkgbuild.contains(QStringLiteral("depends=('gtk3')")));
     QVERIFY(pkgbuild.contains(QStringLiteral("options=('!strip' '!debug')")));
-    QVERIFY(pkgbuild.contains(QStringLiteral(
-        "source=('vendor app_1.2_amd64.deb') # primary source -> sources/vendor app_1.2_amd64.deb")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("source=(\"${_PACSMITH_SOURCE}\")")));
     QVERIFY(pkgbuild.contains(QStringLiteral("data.tar|data.tar.*")));
     QVERIFY(pkgbuild.contains(QStringLiteral("--no-same-owner")));
-    QVERIFY(pkgbuild.contains(QStringLiteral("install='vendor-app-bin.install'")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("install=\"${_PACSMITH_INSTALL}\"")));
     QVERIFY(pkgbuild.contains(QStringLiteral("${pkgdir}/etc/apt/sources.list.d/vendor.list")));
     QVERIFY(!pkgbuild.contains(QStringLiteral("postinst")));
 
     project.lifecycleScript.validationPassed = false;
     const auto blockedLifecycle = pacsmith::PkgbuildGenerator::generate(project);
-    QVERIFY(!blockedLifecycle.contains(QStringLiteral("install='vendor-app-bin.install'")));
+    QVERIFY(blockedLifecycle.contains(QStringLiteral("install=\"${_PACSMITH_INSTALL}\"")));
+    QVERIFY(!pacsmith::PkgbuildGenerator::identityVariables(project).contains(
+        QStringLiteral("_PACSMITH_INSTALL='vendor-app-bin.install'")));
 }
 
 void CoreTests::generatesMultiSourcePkgbuilds() {
@@ -396,17 +405,20 @@ void CoreTests::generatesMultiSourcePkgbuilds() {
     release.installMapping.icon.format = QStringLiteral("svg");
     release.installMapping.icon.iconName = QStringLiteral("vendor-tool");
     const auto archive = pacsmith::PkgbuildGenerator::generate(release);
+    const auto archiveVars = pacsmith::PkgbuildGenerator::identityVariables(release);
     QVERIFY(archive.contains(QStringLiteral("options=('!strip' '!debug')")));
     QVERIFY(archive.contains(QStringLiteral("pacsmith.schema=1")));
-    QVERIFY(archive.contains(QStringLiteral("pacsmith.source=github%3Avendor%2Ftool")));
-    QVERIFY(archive.contains(QStringLiteral("$pkgdir/opt/vendor-tool")));
+    QVERIFY(archive.contains(QStringLiteral("pacsmith.source=${_PACSMITH_SOURCE_IDENTITY}")));
+    QVERIFY(archiveVars.contains(QStringLiteral("_PACSMITH_SOURCE_IDENTITY='github%3Avendor%2Ftool'")));
+    QVERIFY(archive.contains(QStringLiteral("$pkgdir/opt/${_PACSMITH_OPT}")));
     QCOMPARE(pacsmith::PkgbuildGenerator::installedPayloadPath(
                  release, QStringLiteral("vendor-tool-2.1/bin/tool")),
              QStringLiteral("/opt/vendor-tool/bin/tool"));
     QVERIFY(archive.contains(QStringLiteral("--strip-components 1")));
-    QVERIFY(archive.contains(QStringLiteral("../../opt/vendor-tool/bin/tool")));
+    QVERIFY(archive.contains(QStringLiteral("../../opt/${_PACSMITH_OPT}/bin/tool")));
     QVERIFY(archive.contains(QStringLiteral("$pkgdir/usr/bin/tool")));
-    QVERIFY(archive.contains(QStringLiteral("'pacsmith-icon.svg'")));
+    QVERIFY(archive.contains(QStringLiteral("source+=(\"${_PACSMITH_ICON}\")")));
+    QVERIFY(archiveVars.contains(QStringLiteral("_PACSMITH_ICON='pacsmith-icon.svg'")));
     QVERIFY(archive.contains(QStringLiteral("/usr/share/applications/vendor-tool.desktop")));
     QVERIFY(archive.contains(QStringLiteral("/usr/share/icons/hicolor/scalable/apps/vendor-tool.svg")));
     QVERIFY(archive.contains(QStringLiteral("--no-same-owner")));
@@ -434,14 +446,14 @@ void CoreTests::generatesMultiSourcePkgbuilds() {
     const auto appImage = pacsmith::PkgbuildGenerator::generate(release);
     QVERIFY(appImage.contains(QStringLiteral("makedepends=('squashfs-tools')")));
     QVERIFY(appImage.contains(QStringLiteral("Preserve the complete AppDir below /opt")));
-    QVERIFY(appImage.contains(QStringLiteral("unsquashfs -no-progress -no-xattrs -f -o 4096")));
+    QVERIFY(appImage.contains(QStringLiteral("unsquashfs -no-progress -no-xattrs -f -o ${_PACSMITH_APPIMAGE_OFFSET}")));
     QVERIFY(appImage.contains(QStringLiteral("-type f -exec chmod u-s,g-s")));
-    QVERIFY(appImage.contains(QStringLiteral("APPDIR='/opt/vendor-tool'")));
+    QVERIFY(appImage.contains(QStringLiteral("APPDIR='/opt/${_PACSMITH_OPT}'")));
     QVERIFY(appImage.contains(QStringLiteral("unset APPIMAGE")));
-    QVERIFY(appImage.contains(QStringLiteral("exec \"/opt/vendor-tool/AppRun\" \"$@\"")));
+    QVERIFY(appImage.contains(QStringLiteral("exec \"/opt/${_PACSMITH_OPT}/AppRun\" \"\\$@\"")));
     QVERIFY(!appImage.contains(QStringLiteral("exec -a")));
     QVERIFY(!appImage.contains(QStringLiteral("APPIMAGE=extracted")));
-    QVERIFY(!appImage.contains(QStringLiteral("$pkgdir/opt/vendor-tool/AppRun")));
+    QVERIFY(!appImage.contains(QStringLiteral("$pkgdir/opt/${_PACSMITH_OPT}/AppRun")));
     QVERIFY(appImage.contains(QStringLiteral("printf '%s'")));
     QVERIFY(!appImage.contains(QStringLiteral("printf '%%s'")));
     QVERIFY(!appImage.contains(QStringLiteral("$pkgdir/opt/vendor-tool/vendor-tool.desktop")));
@@ -456,23 +468,26 @@ void CoreTests::generatesMultiSourcePkgbuilds() {
         QStringLiteral("#!/bin/sh\nexec \"$APPDIR/vendor-tool\" \"$@\"\n");
     release.installMapping.appRun.userModified = true;
     const auto overlaid = pacsmith::PkgbuildGenerator::generate(release);
-    QVERIFY(overlaid.contains(QStringLiteral("$pkgdir/opt/vendor-tool/AppRun")));
+    QVERIFY(overlaid.contains(QStringLiteral("$pkgdir/opt/${_PACSMITH_OPT}/AppRun")));
     QVERIFY(overlaid.contains(QStringLiteral("exec \"$APPDIR/vendor-tool\" \"$@\"")));
     QVERIFY(overlaid.contains(QStringLiteral("unset APPIMAGE")));
-    QVERIFY(overlaid.contains(QStringLiteral("exec \"/opt/vendor-tool/AppRun\" \"$@\"")));
+    QVERIFY(overlaid.contains(QStringLiteral("exec \"/opt/${_PACSMITH_OPT}/AppRun\" \"\\$@\"")));
 
     release.sourceType = pacsmith::SourcePackageType::ElfBinary;
     release.originalSourceFilename = QStringLiteral("tool");
     release.installMapping.binaryDestination = QStringLiteral("/usr/bin/tool");
     release.installMapping.launchers.clear();
     const auto elf = pacsmith::PkgbuildGenerator::generate(release);
-    QVERIFY(elf.contains(QStringLiteral("install -Dm755 \"$srcdir/tool\" \"$pkgdir/usr/bin/tool\"")));
+    QVERIFY(elf.contains(QStringLiteral(
+        "install -Dm755 \"$srcdir/${_PACSMITH_SOURCE}\" \"$pkgdir/usr/bin/tool\"")));
 
     release.sourceType = pacsmith::SourcePackageType::ArchPackage;
     release.originalSourceFilename = QStringLiteral("vendor-tool-2.1-1-x86_64.pkg.tar.zst");
     release.archPkgrelOverride = QStringLiteral("1.1");
     const auto archPackage = pacsmith::PkgbuildGenerator::generate(release);
-    QVERIFY(archPackage.contains(QStringLiteral("pkgrel=1.1")));
+    QVERIFY(archPackage.contains(QStringLiteral("pkgrel=\"${_PACSMITH_PKGREL}\"")));
+    QVERIFY(pacsmith::PkgbuildGenerator::identityVariables(release).contains(
+        QStringLiteral("_PACSMITH_PKGREL='1.1'")));
     QVERIFY(archPackage.contains(QStringLiteral("--exclude './.PKGINFO'")));
     QVERIFY(archPackage.contains(QStringLiteral("--exclude './.INSTALL'")));
     QVERIFY(archPackage.contains(QStringLiteral("--no-same-owner")));
@@ -566,6 +581,81 @@ void CoreTests::parsesPkgbuildInstallPlans() {
     QVERIFY(!opaque.warnings.isEmpty());
     QVERIFY(opaque.warnings.first().contains(QStringLiteral("DESTDIR")) ||
             opaque.warnings.first().contains(QStringLiteral("build-system")));
+}
+
+void CoreTests::writesPacsmithIdentityVariablesAcrossUpdates() {
+    const auto executable = QStandardPaths::findExecutable(QStringLiteral("true"));
+    QVERIFY(!executable.isEmpty());
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto firstPath = temporary.filePath(QStringLiteral("vendorctl-1.0.0-linux-x86_64"));
+    const auto secondPath = temporary.filePath(QStringLiteral("vendorctl-2.0.0-linux-x86_64"));
+    QVERIFY(QFile::copy(executable, firstPath));
+    QVERIFY(QFile::copy(executable, secondPath));
+    QFile second(secondPath);
+    QVERIFY(second.open(QIODevice::Append));
+    QCOMPARE(second.write("\0", 1), 1);
+    second.close();
+
+    pacsmith::ProjectStore store(
+        std::filesystem::path(temporary.path().toUtf8().constData()) / "projects");
+    pacsmith::ImportOptions firstOptions;
+    firstOptions.version = QStringLiteral("1.0.0");
+    firstOptions.acquisition.kind = pacsmith::AcquisitionKind::GitHubRelease;
+    firstOptions.acquisition.canonicalIdentity = QStringLiteral("github:vendor/vendorctl");
+    firstOptions.acquisition.originalUrl = QStringLiteral("https://example.invalid/v1");
+    firstOptions.acquisition.githubOwner = QStringLiteral("vendor");
+    firstOptions.acquisition.githubRepository = QStringLiteral("vendorctl");
+    firstOptions.acquisition.githubReleaseId = 10;
+    firstOptions.acquisition.githubAssetId = 11;
+    QString error;
+    auto first = store.importSource(
+        std::filesystem::path(firstPath.toUtf8().constData()), firstOptions, &error);
+    QVERIFY2(first.has_value(), qPrintable(error));
+    auto *tracker = first->project.release(first->releaseId);
+    QVERIFY(tracker != nullptr);
+    QFile firstVars(QString::fromUtf8(store.identityVariablesPath(*tracker).string().c_str()));
+    QVERIFY(firstVars.open(QIODevice::ReadOnly));
+    QVERIFY(firstVars.readAll().contains("_PACSMITH_SOURCE='vendorctl-1.0.0-linux-x86_64'"));
+    const auto custom = QStringLiteral(
+        "source \"${startdir:-.}/pacsmith.vars\"\n"
+        "pkgname=\"${_PACSMITH_PKGNAME}\"\n"
+        "pkgver=\"${_PACSMITH_PKGVER}\"\n"
+        "pkgrel=\"${_PACSMITH_PKGREL}\"\n"
+        "arch=(\"${_PACSMITH_ARCH}\")\n"
+        "source=(\"${_PACSMITH_SOURCE}\")\n"
+        "sha256sums=(\"${_PACSMITH_SHA256}\")\n"
+        "package() {\n"
+        "  install -Dm755 \"$srcdir/${_PACSMITH_SOURCE}\" \"$pkgdir/usr/bin/vendorctl\"\n"
+        "}\n");
+    QVERIFY2(store.saveCustomPkgbuild(first->project, *tracker, custom, &error), qPrintable(error));
+
+    pacsmith::ImportOptions secondOptions = firstOptions;
+    secondOptions.version = QStringLiteral("2.0.0");
+    secondOptions.acquisition.originalUrl = QStringLiteral("https://example.invalid/v2");
+    secondOptions.acquisition.githubReleaseId = 20;
+    secondOptions.acquisition.githubAssetId = 21;
+    auto imported = store.importSource(
+        std::filesystem::path(secondPath.toUtf8().constData()), secondOptions, &error);
+    QVERIFY2(imported.has_value(), qPrintable(error));
+    const auto *updated = imported->project.release(imported->releaseId);
+    QVERIFY(updated != nullptr);
+    QVERIFY(!updated->pkgbuildManuallyModified);
+    QVERIFY(updated->previousManualPkgbuild.contains(QStringLiteral("${_PACSMITH_SOURCE}")));
+    QFile nextVars(QString::fromUtf8(store.identityVariablesPath(*updated).string().c_str()));
+    QVERIFY(nextVars.open(QIODevice::ReadOnly));
+    const auto nextIdentity = QString::fromUtf8(nextVars.readAll());
+    QVERIFY(nextIdentity.contains("_PACSMITH_SOURCE='vendorctl-2.0.0-linux-x86_64'"));
+    QVERIFY(!nextIdentity.contains("vendorctl-1.0.0-linux-x86_64"));
+
+    auto copied = imported->project;
+    auto *copiedRelease = copied.release(imported->releaseId);
+    QVERIFY2(store.saveCustomPkgbuild(copied, *copiedRelease, custom, &error), qPrintable(error));
+    const auto plan = pacsmith::PkgbuildInstallPlan::parse(custom, *copiedRelease);
+    QVERIFY2(plan.warnings.isEmpty(), qPrintable(plan.warnings.join(QLatin1Char('\n'))));
+    QVERIFY(std::any_of(plan.entries.cbegin(), plan.entries.cend(), [](const auto &entry) {
+        return entry.path == QStringLiteral("/usr/bin/vendorctl") && !entry.excluded;
+    }));
 }
 
 void CoreTests::synchronizesIntegrationIconSource() {

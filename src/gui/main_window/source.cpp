@@ -502,9 +502,9 @@ void MainWindow::populateScripts() {
         discardLifecycleButton_->setEnabled(true);
     } else if (lifecycle.requiresAcknowledgement()) {
         const auto integration = currentRelease()->pkgbuildManuallyModified
-                                     ? QStringLiteral("⚠ The PKGBUILD is user-owned; add install='%1' manually or restore the generated PKGBUILD.")
+                                     ? QStringLiteral("⚠ The PKGBUILD is user-owned; add install='%1' or install=\"${_PACSMITH_INSTALL}\" manually or restore the generated PKGBUILD.")
                                            .arg(lifecycle.fileName)
-                                     : QStringLiteral("✓ The generated PKGBUILD contains install='%1'.")
+                                     : QStringLiteral("✓ The generated PKGBUILD sets install=\"${_PACSMITH_INSTALL}\" (%1).")
                                            .arg(lifecycle.fileName);
         lifecycleStatus_->setText(QStringLiteral("%1 · "
                                                  "<span style='color:#e5b93d'>⚠ user approval required before installation</span><br>"
@@ -514,9 +514,9 @@ void MainWindow::populateScripts() {
         discardLifecycleButton_->setEnabled(true);
     } else {
         const auto integration = currentRelease()->pkgbuildManuallyModified
-                                     ? QStringLiteral("⚠ The PKGBUILD is user-owned; verify it contains install='%1'.")
+                                     ? QStringLiteral("⚠ The PKGBUILD is user-owned; verify it contains install='%1' or install=\"${_PACSMITH_INSTALL}\".")
                                            .arg(lifecycle.fileName)
-                                     : QStringLiteral("✓ The generated PKGBUILD contains install='%1'.")
+                                     : QStringLiteral("✓ The generated PKGBUILD sets install=\"${_PACSMITH_INSTALL}\" (%1).")
                                            .arg(lifecycle.fileName);
         lifecycleStatus_->setText(QStringLiteral("%1 · ✓ exact privileged content approved<br>%2<br>%3")
                                       .arg(lifecycleOrigin, lifecycle.validationMessage.toHtmlEscaped(), integration));
@@ -667,7 +667,7 @@ void MainWindow::saveLifecycleEdit() {
     } else if (currentRelease()->pkgbuildManuallyModified) {
         QMessageBox::warning(
             this, QStringLiteral("Lifecycle script saved; PKGBUILD needs attention"),
-            QStringLiteral("The script validated, but Configuration is in Custom mode. Add install='%1' to the PKGBUILD or switch back to Guided. Then review and approve the exact script before installation.")
+            QStringLiteral("The script validated, but Configuration is in Custom mode. Add install='%1' or install=\"${_PACSMITH_INSTALL}\" to the PKGBUILD or switch back to Guided. Then review and approve the exact script before installation.")
                 .arg(lifecycleFileName));
     } else {
         statusBar()->showMessage(
