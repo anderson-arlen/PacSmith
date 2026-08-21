@@ -16,8 +16,8 @@ jobs:
       - name: Install official Arch dependencies
         run: >-
           pacman -Syu --noconfirm --needed
-          cmake ninja qt6-base libarchive pacman polkit gnupg age libsecret
-          desktop-file-utils github-cli git
+          cmake ninja go qt6-base qt6-svg libarchive pacman polkit gnupg age libsecret
+          desktop-file-utils openssl github-cli git
 
       - uses: actions/checkout@v4
 

@@ -2,6 +2,8 @@
 /build-*/
 /cmake-build-*/
 /.cache/
+/pacsmithd
+/server/pacsmithd
 compile_commands.json
 *.user
 *.swp

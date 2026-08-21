@@ -1,0 +1,18 @@
+[Unit]
+Description=PacSmith library daemon
+Documentation=https://github.com/anderson-arlen/pacsmith
+# User unit. loginctl enable-linger keeps the user manager at boot without a
+# graphical login, which is the headless-server path.
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/pacsmithd
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+RuntimeDirectory=pacsmith
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=default.target

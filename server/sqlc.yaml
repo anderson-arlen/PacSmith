@@ -1,0 +1,16 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema:
+      - internal/sqlite/schema.sql
+    queries:
+      - internal/sqlite/queries
+    gen:
+      go:
+        package: "sqlcdb"
+        out: "internal/sqlite/sqlcdb"
+        sql_package: "database/sql"
+        emit_json_tags: true
+        overrides:
+          - column: "artifacts.size_bytes"
+            go_type: "int64"

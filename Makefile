@@ -8,7 +8,7 @@ PACMAN := /usr/bin/pacman
 ARCH_RELEASE ?= /etc/arch-release
 OS_RELEASE ?= /etc/os-release
 
-DEPENDENCIES := base-devel cmake ninja qt6-base qt6-svg libarchive squashfs-tools polkit gnupg age libsecret desktop-file-utils
+DEPENDENCIES := base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools polkit gnupg age libsecret desktop-file-utils openssl
 
 .DEFAULT_GOAL := all
 .NOTPARALLEL:
@@ -83,7 +83,11 @@ install: check-user deps test
 	fi
 	@echo "PacSmith installed for the current user under $(PREFIX)."
 	@echo "Run '$(PREFIX)/bin/pacsmith-gui' or add '$(PREFIX)/bin' to PATH."
-	@echo "Optional login autostart, tray, and periodic checks are in PacSmith Settings."
+	@echo "The library daemon is $(PREFIX)/bin/pacsmithd (systemd user unit pacsmithd.service)."
+	@if command -v systemctl >/dev/null 2>&1; then \
+		systemctl --user enable --now pacsmithd.service || \
+			echo "warning: could not enable pacsmithd.service; start it with 'systemctl --user enable --now pacsmithd.service'." >&2; \
+	fi
 
 uninstall: check-user
 	@set -eu; \
@@ -93,7 +97,7 @@ uninstall: check-user
 		exit 1; \
 	fi; \
 	if command -v systemctl >/dev/null 2>&1; then \
-		systemctl --user disable --now pacsmith-update.timer pacsmith-tray.service >/dev/null 2>&1 || true; \
+		systemctl --user disable --now pacsmithd.service pacsmith-update.timer pacsmith-tray.service >/dev/null 2>&1 || true; \
 		systemctl --user stop pacsmith-update.service >/dev/null 2>&1 || true; \
 	fi; \
 	while IFS= read -r file; do \
@@ -112,7 +116,7 @@ uninstall: check-user
 			echo "warning: systemd user manager was not available; run 'systemctl --user daemon-reload' later." >&2; \
 	fi; \
 	echo "PacSmith uninstalled using $$manifest."; \
-	echo "Project data under ~/.local/share/pacsmith was left in place."
+	echo "Uninstall left both the legacy library under ~/.local/share/pacsmith/projects and any new server data under ~/.local/share/pacsmith/server."
 
 clean: check-arch
 	@if [ -f "$(BUILD_DIR)/build.ninja" ]; then \

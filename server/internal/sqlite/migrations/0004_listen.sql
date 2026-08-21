@@ -1,0 +1,3 @@
+ALTER TABLE server_state ADD COLUMN listen_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE server_state ADD COLUMN listen_port INTEGER NOT NULL DEFAULT 8443;
+ALTER TABLE server_state ADD COLUMN listen_hosts TEXT NOT NULL DEFAULT '["0.0.0.0"]';

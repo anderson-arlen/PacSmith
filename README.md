@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="resources/icons/pacsmith-hero.png" alt="PacSmith" width="192">
+  <img src="client/resources/icons/pacsmith-hero.png" alt="PacSmith" width="192">
 </p>
 
 # PacSmith
@@ -118,7 +118,7 @@ Imported packages are untrusted data, even when they come from a known developer
 
 Signed APT and RPM checks do not trust HTTPS alone. A project-local public key and a pinned signer fingerprint are required. GitHub tracking records a publisher `sha256:` digest when GitHub provides one, always hashes the downloaded bytes, and marks releases without a publisher digest as unsigned.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries, the project format, artifact analysis, and update trust flows.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the client/server architecture, artifact analysis, and update trust flows. The repository keeps those programs in separate trees: `client/` is the C++/Qt GUI and CLI, `server/` is `pacsmithd`.
 
 ## Using PacSmith
 
@@ -126,12 +126,14 @@ The GUI is the main workbench. New projects can start from **GitHub Link…**, *
 
 Each application becomes a local project with a dashboard (project info, version history, update configuration) and a numbered setup workbench that ends at PKGBUILD and Build. The package list shows install state: not installed, current, or update available. Use the [AI helper](#the-ai-helper-is-what-makes-this-practical) on any workbench step that still needs script or dependency conversion.
 
+The library daemon (`pacsmithd`) does not accept remote HTTPS clients until you turn that on. From the library host, use Settings → Library or `pacsmith server listen on`. Another computer can then manage that library from the connection control on the status bar or `pacsmith connect remote <host>[:port]`. Local management is the default and starts `pacsmithd.service`; remote management stops it.
+
 ## Build on Arch Linux
 
 Install dependencies from the official repositories:
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja qt6-base qt6-svg libarchive squashfs-tools polkit gnupg age libsecret desktop-file-utils
+sudo pacman -S --needed base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools polkit gnupg age libsecret desktop-file-utils openssl
 ```
 
 The top-level Makefile can perform the complete Arch-only setup, build, test, and current-user installation. It checks `/etc/arch-release` and `/etc/os-release` plus the system `pacman` before changing anything. Run it as your normal user. Pacman elevation is used only to install official repository dependencies; PacSmith itself is installed without elevation:
@@ -149,13 +151,9 @@ make test
 make uninstall
 ```
 
-The default installation prefix is `~/.local`. Executables go to `~/.local/bin`, desktop integration to `~/.local/share/applications`, and the update timer/service to `~/.local/share/systemd/user`. The timer is not enabled automatically; opt in with:
+The development prefix is `~/.local`. Executables go to `~/.local/bin`, desktop integration to `~/.local/share/applications`, and the library daemon unit to `~/.local/share/systemd/user`. `make install` enables `pacsmithd.service` for the current user when systemd is available. The packaged install path is the Arch package from GitHub releases, which ships the same user unit under `/usr/lib/systemd/user`.
 
-```bash
-systemctl --user enable --now pacsmith-update.timer
-```
-
-`make uninstall` removes the files recorded by the last install. It does not delete project data under `~/.local/share/pacsmith`.
+`make uninstall` removes the files recorded by the last install. It does not delete the legacy library under `~/.local/share/pacsmith/projects` or new server data under `~/.local/share/pacsmith/server`.
 
 `SUDO=doas` may be supplied on systems using `doas` instead of `sudo`. `PREFIX=/another/user/writable/prefix` can override the installation location.
 If `~/.local/bin` is not already on the shell's `PATH`, add it or launch `~/.local/bin/pacsmith-gui` directly.
@@ -179,6 +177,7 @@ cmake --build build-asan
 Run directly from the build tree:
 
 ```bash
+./build/pacsmithd --version
 ./build/pacsmith add /path/to/vendor-package.deb
 ./build/pacsmith add /path/to/vendor-tool.tar.gz
 ./build/pacsmith add https://github.com/owner/project --asset-regex 'project-.*-linux-x86_64\.tar\.gz'
