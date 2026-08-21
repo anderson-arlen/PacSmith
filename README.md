@@ -106,6 +106,16 @@ For most packages, that is enough to go from import to a buildable recipe with l
 
 The AI is a helper, not a requirement. Every step still works fully manually. Deterministic inspection always runs first, with no model involved. If you turn the helper on, it proposes; you accept, edit, or ignore. It cannot invent signing keys, elevate privileges, run a package manager, or silently overwrite your edits. You can use a ChatGPT subscription through PacSmith's own sign-in, or OpenAI / xAI API keys.
 
+### One library, many machines
+
+The conversion workbench is a client. The library is a server.
+
+`pacsmithd` owns projects, reviewed recipes, vendor artifacts, and built packages. The GUI and CLI talk to that daemon; they do not keep their own copy of the library. On the machine that holds the library, that is a Unix socket. Turn remote listening on, and other computers enroll over HTTPS with mTLS and use the same library.
+
+That is a major part of the product, not a networking extra. Inspect a vendor artifact once. Keep the PKGBUILD, desktop entries, icon, and dependency mappings in one place. Build on the library host. Any enrolled machine can open those projects and install the packages that already exist. You are not copying `~/pacsmith` folders around, and you are not repeating the workbench on every box.
+
+Remote access is off until you enable it on the library host. Local management stays the default. See [Using PacSmith](#using-pacsmith) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## How the trust chain works
 
 ```text
@@ -124,9 +134,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the client/server architect
 
 The GUI is the main workbench. New projects can start from **GitHub Link…**, **Package File…**, **Direct Download URL…**, **APT Repository…**, or **RPM Repository…**. Supported files and links can also be dropped onto the window.
 
-Each application becomes a local project with a dashboard (project info, version history, update configuration) and a numbered setup workbench that ends at PKGBUILD and Build. The package list shows install state: not installed, current, or update available. Use the [AI helper](#the-ai-helper-is-what-makes-this-practical) on any workbench step that still needs script or dependency conversion.
+Each application becomes a library project with a dashboard (project info, version history, update configuration) and a numbered setup workbench that ends at PKGBUILD and Build. The package list shows install state: not installed, current, or update available. Use the [AI helper](#the-ai-helper-is-what-makes-this-practical) on any workbench step that still needs script or dependency conversion.
 
-The library daemon (`pacsmithd`) does not accept remote HTTPS clients until you turn that on. From the library host, use Settings → Library or `pacsmith server listen on`. Another computer can then manage that library from the connection control on the status bar or `pacsmith connect remote <host>[:port]`. Local management is the default and starts `pacsmithd.service`; remote management stops it.
+Local management is the default: the GUI or CLI talks to `pacsmithd` over a Unix socket and `pacsmithd.service` stays running. `pacsmithd` does not accept remote HTTPS clients until you turn that on. From the library host, use Settings → Library or `pacsmith server listen on`. Another computer can then use that same library — projects, configurations, and builds — from the connection control on the status bar or `pacsmith connect remote <host>[:port]`. Connecting as a remote client stops the local user unit; that machine is a client, not a second library.
 
 ## Build on Arch Linux
 
