@@ -209,7 +209,8 @@ void CoreTests::serializesProjectsAndOverrides() {
          {project.update.trustedSigningFingerprint}, QStringLiteral("control/postinst:KEY"),
          QStringLiteral("source-fingerprint"), true,
          {pacsmith::ValueOrigin::Deterministic, {}, {}, QStringLiteral("source-fingerprint"),
-          QStringLiteral("vendor key"), QDateTime::currentDateTimeUtc(), false}});
+          QStringLiteral("vendor key"), QDateTime::currentDateTimeUtc(), false},
+         {}, {}});
     project.scriptFindings.append(
         {QStringLiteral("postinst"), QStringLiteral("apt-repository"), QStringLiteral("handled"),
          QStringLiteral("evidence"), QStringLiteral("finding-sha"),

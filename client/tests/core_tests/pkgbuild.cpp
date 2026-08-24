@@ -361,7 +361,16 @@ void CoreTests::generatesPkgbuild() {
     QVERIFY(pkgbuild.contains(QStringLiteral("--no-same-owner")));
     QVERIFY(pkgbuild.contains(QStringLiteral("install=\"${_PACSMITH_INSTALL}\"")));
     QVERIFY(pkgbuild.contains(QStringLiteral("${pkgdir}/etc/apt/sources.list.d/vendor.list")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("provides=(\"${_PACSMITH_PROVIDES[@]}\")")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("if [[ -n ${_PACSMITH_COMPAT_PKGNAME} ]]; then")));
+    QVERIFY(pkgbuild.contains(QStringLiteral("provides+=(\"${_PACSMITH_COMPAT_PKGNAME}=${pkgver}\")")));
     QVERIFY(!pkgbuild.contains(QStringLiteral("postinst")));
+
+    project.debian.provides = QStringLiteral("vendor-app, extra-app");
+    project.debian.conflicts = QStringLiteral("old-vendor-app");
+    const auto varsWithMeta = pacsmith::PkgbuildGenerator::identityVariables(project);
+    QVERIFY(varsWithMeta.contains(QStringLiteral("_PACSMITH_PROVIDES=('vendor-app' 'extra-app')")));
+    QVERIFY(varsWithMeta.contains(QStringLiteral("_PACSMITH_CONFLICTS=('old-vendor-app')")));
 
     project.lifecycleScript.validationPassed = false;
     const auto blockedLifecycle = pacsmith::PkgbuildGenerator::generate(project);

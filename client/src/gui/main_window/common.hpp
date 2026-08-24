@@ -88,6 +88,7 @@
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScrollArea>
 #include <QPixmap>
 #include <QPushButton>
 #include <QSizePolicy>

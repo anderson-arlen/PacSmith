@@ -73,6 +73,68 @@ Project projectFromObject(const LibraryClient &client, const QJsonObject &object
 
 } // namespace
 
+namespace {
+
+QStringList jsonStringList(const QJsonValue &value) {
+    QStringList out;
+    for (const auto &item : value.toArray()) {
+        const auto text = item.toString().trimmed();
+        if (!text.isEmpty()) out.append(text);
+    }
+    return out;
+}
+
+QJsonArray jsonStringArray(const QStringList &values) {
+    QJsonArray array;
+    for (const auto &value : values) array.append(value);
+    return array;
+}
+
+RepoSettings repoSettingsFromObject(const QJsonObject &object) {
+    RepoSettings settings;
+    settings.revision = object.value(QStringLiteral("revision")).toInteger(1);
+    settings.enabled = object.value(QStringLiteral("enabled")).toBool();
+    settings.listenHosts = jsonStringList(object.value(QStringLiteral("listen_hosts")));
+    if (settings.listenHosts.isEmpty()) settings.listenHosts.append(QStringLiteral("127.0.0.1"));
+    settings.listenPort = object.value(QStringLiteral("listen_port")).toInt(8080);
+    settings.advertisedUrl = object.value(QStringLiteral("advertised_url")).toString();
+    settings.soakSeconds = object.value(QStringLiteral("soak_seconds")).toInteger(2592000);
+    settings.packageNamePrefix = object.value(QStringLiteral("package_name_prefix")).toString();
+    settings.trustMode = object.value(QStringLiteral("trust_mode")).toString();
+    settings.signingInitialized = object.value(QStringLiteral("signing_initialized")).toBool();
+    settings.certified = object.value(QStringLiteral("certified")).toBool();
+    settings.fingerprint = object.value(QStringLiteral("fingerprint")).toString();
+    settings.fingerprintSpaced = object.value(QStringLiteral("fingerprint_spaced")).toString();
+    settings.rootFingerprint = object.value(QStringLiteral("root_fingerprint")).toString();
+    settings.rootFingerprintSpaced = object.value(QStringLiteral("root_fingerprint_spaced")).toString();
+    settings.keyringVersion = object.value(QStringLiteral("keyring_version")).toInteger();
+    settings.keyringPackage = object.value(QStringLiteral("keyring_package")).toString();
+    settings.keyringUrl = object.value(QStringLiteral("keyring_url")).toString();
+    settings.bound = jsonStringList(object.value(QStringLiteral("bound")));
+    settings.certificationHelp = object.value(QStringLiteral("certification_help")).toString();
+    settings.certificationCommands = object.value(QStringLiteral("certification_commands")).toString();
+    if (settings.trustMode.isEmpty()) settings.trustMode = QStringLiteral("direct");
+    return settings;
+}
+
+QJsonObject repoSettingsToObject(const RepoSettings &settings) {
+    QJsonObject object{
+        {QStringLiteral("revision"), settings.revision},
+        {QStringLiteral("enabled"), settings.enabled},
+        {QStringLiteral("listen_hosts"), jsonStringArray(settings.listenHosts)},
+        {QStringLiteral("listen_port"), settings.listenPort},
+        {QStringLiteral("advertised_url"), settings.advertisedUrl},
+        {QStringLiteral("soak_seconds"), settings.soakSeconds},
+        {QStringLiteral("package_name_prefix"), settings.packageNamePrefix},
+    };
+    if (settings.trustMode != QStringLiteral("root-certified") || settings.certified) {
+        object.insert(QStringLiteral("trust_mode"), settings.trustMode);
+    }
+    return object;
+}
+
+} // namespace
+
 LibraryClient::LibraryClient(ConnectionConfig config)
     : config_(std::move(config)), transport_(config_) {}
 
@@ -540,6 +602,96 @@ std::optional<LibrarySettings> LibraryClient::saveLibrarySettings(const LibraryS
                                  librarySettingsToObject(settings), error, 200);
     if (!object) return std::nullopt;
     return librarySettingsFromObject(*object);
+}
+
+std::optional<RepoSettings> LibraryClient::repoSettings(QString *error) const {
+    const auto object = getJson(QStringLiteral("/api/v1/repo"), error);
+    if (!object) return std::nullopt;
+    return repoSettingsFromObject(*object);
+}
+
+std::optional<RepoSettings> LibraryClient::saveRepoSettings(const RepoSettings &settings,
+                                                            QString *error) const {
+    const auto object = sendJson(QStringLiteral("PATCH"), QStringLiteral("/api/v1/repo"),
+                                 repoSettingsToObject(settings), error, 200);
+    if (!object) return std::nullopt;
+    return repoSettingsFromObject(*object);
+}
+
+std::optional<QString> LibraryClient::repoBootstrapScript(const QString &channel,
+                                                          QString *error) const {
+    const auto object = getJson(QStringLiteral("/api/v1/repo/bootstrap?channel=") + channel, error);
+    if (!object) return std::nullopt;
+    const auto script = object->value(QStringLiteral("script")).toString();
+    if (script.isEmpty()) {
+        if (error != nullptr) *error = QStringLiteral("The library daemon returned an empty bootstrap script");
+        return std::nullopt;
+    }
+    return script;
+}
+
+std::optional<RepoSettings> LibraryClient::initRepoSigning(QString *error) const {
+    const auto object = sendJson(QStringLiteral("POST"), QStringLiteral("/api/v1/repo/signing/init"),
+                                 {}, error, 200);
+    if (!object) return std::nullopt;
+    return repoSettingsFromObject(*object);
+}
+
+bool LibraryClient::downloadRepoPublicKey(const QString &destination, QString *error) const {
+    return transport_.downloadToFile(QStringLiteral("/api/v1/repo/signing/public-key"),
+                                     destination, error);
+}
+
+std::optional<RepoSettings> LibraryClient::uploadRepoRootKey(const QString &publicKey,
+                                                             QString *error) const {
+    const auto object = sendJson(QStringLiteral("POST"), QStringLiteral("/api/v1/repo/signing/root"),
+                                 {{QStringLiteral("public_key"), publicKey}}, error, 200);
+    if (!object) return std::nullopt;
+    return repoSettingsFromObject(*object);
+}
+
+std::optional<RepoSettings> LibraryClient::uploadRepoCertifiedKey(const QString &publicKey,
+                                                                 QString *error) const {
+    const auto object =
+        sendJson(QStringLiteral("POST"), QStringLiteral("/api/v1/repo/signing/certified"),
+                 {{QStringLiteral("public_key"), publicKey}}, error, 200);
+    if (!object) return std::nullopt;
+    return repoSettingsFromObject(*object);
+}
+
+std::optional<ProjectRepository> LibraryClient::projectRepo(const QString &projectId,
+                                                           QString *error) const {
+    const auto object = getJson(QStringLiteral("/api/v1/projects/") + projectId +
+                                    QStringLiteral("/repo"),
+                                error);
+    if (!object) return std::nullopt;
+    return ProjectRepository::fromJson(*object);
+}
+
+std::optional<ProjectRepository> LibraryClient::saveProjectRepo(const QString &projectId,
+                                                               bool publish,
+                                                               const QString &packageNameOverride,
+                                                               qint64 revision,
+                                                               QString *error) const {
+    QJsonObject body{{QStringLiteral("revision"), revision},
+                     {QStringLiteral("publish"), publish},
+                     {QStringLiteral("package_name_override"), packageNameOverride}};
+    const auto object = sendJson(QStringLiteral("PATCH"),
+                                 QStringLiteral("/api/v1/projects/") + projectId +
+                                     QStringLiteral("/repo"),
+                                 body, error, 200);
+    if (!object) return std::nullopt;
+    return ProjectRepository::fromJson(*object);
+}
+
+std::optional<ProjectRepository> LibraryClient::promoteProjectRepo(const QString &projectId,
+                                                                  QString *error) const {
+    const auto object = sendJson(QStringLiteral("POST"),
+                                 QStringLiteral("/api/v1/projects/") + projectId +
+                                     QStringLiteral("/repo/promote"),
+                                 {}, error, 200);
+    if (!object) return std::nullopt;
+    return ProjectRepository::fromJson(*object);
 }
 
 QList<RemoteClient> LibraryClient::clients(QString *error) const {

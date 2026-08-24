@@ -25,6 +25,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
 	"github.com/anderson-arlen/pacsmith/server/internal/paths"
 	"github.com/anderson-arlen/pacsmith/server/internal/pki"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 	"github.com/anderson-arlen/pacsmith/server/internal/version"
@@ -504,6 +505,8 @@ func NewHandler(t *testing.T) (http.Handler, paths.Dirs) {
 	}
 	registry := &artifact.Registry{DB: db, Store: store}
 	lib := &library.Service{DB: db, Artifacts: registry, WorkDir: filepath.Join(dirs.Work, "releases")}
+	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(dirs.Work, "repo"), filepath.Join(dirs.Data, "gnupg"))
+	lib.Repo = repoSvc
 	manager, err := jobs.New(db, filepath.Join(dirs.Work, "jobs"), daemon.JobHandler(lib, opened.Store))
 	if err != nil {
 		t.Fatal(err)
@@ -520,6 +523,7 @@ func NewHandler(t *testing.T) (http.Handler, paths.Dirs) {
 		Secrets:   opened.Store,
 		PKI:       runtime,
 		Principal: auth.LocalUnix(),
+		Repo:      repoSvc,
 	}), dirs
 }
 

@@ -96,6 +96,17 @@ func (r *Registry) Get(ctx context.Context, id string) (Record, error) {
 	return recordFrom(row), nil
 }
 
+func (r *Registry) Delete(ctx context.Context, id string) error {
+	record, err := r.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := r.DB.Queries.DeleteArtifact(ctx, id); err != nil {
+		return err
+	}
+	return r.Store.Remove(record.SHA256)
+}
+
 func (r *Registry) Open(ctx context.Context, id string) (Record, *os.File, error) {
 	record, err := r.Get(ctx, id)
 	if err != nil {

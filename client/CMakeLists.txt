@@ -99,6 +99,7 @@ add_executable(pacsmith-gui
     src/gui/gui_instance.cpp
     src/gui/import_worker.cpp
     src/gui/reanalyze_worker.cpp
+    src/gui/wheel_scroll_guard.cpp
     src/gui/main_window/main_window.hpp
     src/gui/main_window/main_window.cpp
     src/gui/main_window/help_widgets.cpp
@@ -151,6 +152,14 @@ if(BUILD_TESTING)
     target_link_libraries(pacsmith-tests PRIVATE pacsmith_core Qt6::Test)
     pacsmith_target_defaults(pacsmith-tests)
     add_test(NAME pacsmith-core-tests COMMAND pacsmith-tests)
+    add_executable(pacsmith-gui-tests
+        tests/gui_tests/wheel_scroll_guard_test.cpp
+        src/gui/wheel_scroll_guard.cpp)
+    target_include_directories(pacsmith-gui-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(pacsmith-gui-tests PRIVATE Qt6::Widgets Qt6::Test)
+    pacsmith_target_defaults(pacsmith-gui-tests)
+    add_test(NAME pacsmith-gui-tests COMMAND pacsmith-gui-tests)
+    set_tests_properties(pacsmith-gui-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME pacsmith-import-test
         COMMAND ${CMAKE_COMMAND}
             "-DPACSMITH_EXE=$<TARGET_FILE:pacsmith>"

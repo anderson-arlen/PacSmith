@@ -21,6 +21,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/listen"
 	"github.com/anderson-arlen/pacsmith/server/internal/paths"
 	"github.com/anderson-arlen/pacsmith/server/internal/pki"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 )
@@ -31,18 +32,23 @@ type Config struct {
 }
 
 type Daemon struct {
-	Dirs      paths.Dirs
-	server    *http.Server
-	handler   http.Handler
-	pki       *pki.Runtime
-	listen    *listen.State
-	tlsMu     sync.Mutex
-	tlsServes []tlsServe
-	tlsAddr   string
-	db        *sqlite.DB
-	jobs      *jobs.Manager
-	closeOnce sync.Once
-	closeErr  error
+	Dirs       paths.Dirs
+	server     *http.Server
+	handler    http.Handler
+	pki        *pki.Runtime
+	listen     *listen.State
+	tlsMu      sync.Mutex
+	tlsServes  []tlsServe
+	tlsAddr    string
+	repo       *repo.Service
+	repoMu     sync.Mutex
+	repoListen listen.Config
+	repoServes []repoServe
+	stopSoak   context.CancelFunc
+	db         *sqlite.DB
+	jobs       *jobs.Manager
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 type tlsServe struct {
@@ -84,6 +90,8 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		Artifacts: registry,
 		WorkDir:   filepath.Join(cfg.Dirs.Work, "releases"),
 	}
+	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(cfg.Dirs.Work, "repo"), filepath.Join(cfg.Dirs.Data, "gnupg"))
+	lib.Repo = repoSvc
 	manager, err := jobs.New(db, filepath.Join(cfg.Dirs.Work, "jobs"), JobHandler(lib, opened.Store))
 	if err != nil {
 		_ = db.Close()
@@ -115,6 +123,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		Dirs:   cfg.Dirs,
 		pki:    runtime,
 		listen: listenState,
+		repo:   repoSvc,
 		db:     db,
 		jobs:   manager,
 	}
@@ -128,6 +137,9 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		Principal:   auth.LocalUnix(),
 		Listen:      listenState,
 		ApplyListen: d.SetListen,
+		Repo:        repoSvc,
+		ApplyRepo:   d.SetRepoListen,
+		RepoBound:   d.RepoBound,
 	})
 	d.handler = handler
 	listener, err := listenUnix(cfg.Dirs.Socket)
@@ -153,6 +165,13 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		_ = d.Close()
 		return nil, err
 	}
+	if settings, err := repoSvc.Settings(ctx); err == nil && settings.Enabled {
+		if err := d.SetRepoListen(settings.ListenConfig()); err != nil {
+			_ = d.Close()
+			return nil, err
+		}
+	}
+	d.startRepoMaintenance()
 	return d, nil
 }
 
@@ -272,6 +291,12 @@ func (d *Daemon) Close() error {
 	}
 	d.closeOnce.Do(func() {
 		var errs []error
+		if d.stopSoak != nil {
+			d.stopSoak()
+		}
+		d.repoMu.Lock()
+		d.stopRepoLocked()
+		d.repoMu.Unlock()
 		if d.jobs != nil {
 			d.jobs.Stop()
 		}

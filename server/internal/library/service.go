@@ -20,6 +20,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
 	"github.com/anderson-arlen/pacsmith/server/internal/recipe"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 	"github.com/google/uuid"
@@ -29,6 +30,7 @@ type Service struct {
 	DB        *sqlite.DB
 	Artifacts *artifact.Registry
 	WorkDir   string
+	Repo      *repo.Service
 }
 
 func (s *Service) ListProjects(ctx context.Context) ([]Project, error) {
@@ -74,7 +76,13 @@ func (s *Service) DeleteProject(ctx context.Context, id string) error {
 	if _, err := s.GetProject(ctx, id); err != nil {
 		return err
 	}
-	return s.DB.Queries.DeleteProject(ctx, id)
+	if err := s.DB.Queries.DeleteProject(ctx, id); err != nil {
+		return err
+	}
+	if s.Repo != nil {
+		_ = s.Repo.OnProjectDeleted(ctx, id)
+	}
+	return nil
 }
 
 func (s *Service) DeleteRelease(ctx context.Context, id string) error {
@@ -744,12 +752,6 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 			return BuildResult{}, err
 		}
 	}
-	if err := os.WriteFile(filepath.Join(work, "PKGBUILD"), []byte(pkgbuild), 0o600); err != nil {
-		return BuildResult{}, err
-	}
-	if err := os.WriteFile(filepath.Join(work, "pacsmith.vars"), []byte(vars), 0o600); err != nil {
-		return BuildResult{}, err
-	}
 	if err := s.writeReleaseIcon(ctx, row, work); err != nil {
 		return BuildResult{}, err
 	}
@@ -761,6 +763,17 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 				return BuildResult{}, err
 			}
 		}
+	}
+
+	row, vars, pkgbuild, err = s.prepareBuildIdentity(ctx, row, pkgbuild, vars)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(work, "PKGBUILD"), []byte(pkgbuild), 0o600); err != nil {
+		return BuildResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(work, "pacsmith.vars"), []byte(vars), 0o600); err != nil {
+		return BuildResult{}, err
 	}
 
 	cmd := exec.CommandContext(ctx, "/usr/bin/makepkg", "--force", "--nodeps")
@@ -806,6 +819,12 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 			Role:       "built_package",
 		})
 		result.Artifacts = append(result.Artifacts, record.ID)
+	}
+	if s.Repo != nil && len(result.Artifacts) > 0 {
+		if err := s.Repo.PublishBuild(ctx, row.ProjectID, releaseID, result.Artifacts); err != nil {
+			result.Log += "\nrepository publish: " + err.Error() + "\n"
+			return result, err
+		}
 	}
 	return result, nil
 }
@@ -935,6 +954,206 @@ func (s *Service) writeReleaseIcon(ctx context.Context, row sqlcdb.Release, work
 		return err
 	}
 	return os.WriteFile(dest, data, 0o600)
+}
+
+func (s *Service) prepareBuildIdentity(ctx context.Context, row sqlcdb.Release, pkgbuild, vars string) (sqlcdb.Release, string, string, error) {
+	arts, err := s.DB.Queries.ListReleaseArtifacts(ctx, row.ID)
+	if err != nil {
+		return row, vars, pkgbuild, err
+	}
+	hasBuilt := false
+	for _, art := range arts {
+		if art.Role == "built_package" {
+			hasBuilt = true
+			break
+		}
+	}
+	if hasBuilt {
+		row.ArchPkgrel++
+		var body map[string]any
+		if err := json.Unmarshal([]byte(row.BodyJson), &body); err != nil {
+			body = map[string]any{}
+		}
+		body["archPkgrel"] = int(row.ArchPkgrel)
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return row, vars, pkgbuild, err
+		}
+		updated, err := s.DB.Queries.UpdateReleasePkgrel(ctx, sqlcdb.UpdateReleasePkgrelParams{
+			ArchPkgrel: row.ArchPkgrel,
+			BodyJson:   string(raw),
+			ModifiedAt: nowUTC(),
+			ID:         row.ID,
+		})
+		if err != nil {
+			return row, vars, pkgbuild, err
+		}
+		row = updated
+	}
+
+	rel := recipeFromDocument(releaseDocument(row))
+	rel.ArchPkgrel = int(row.ArchPkgrel)
+	if s.Repo != nil {
+		prep, err := s.Repo.PrepareBuild(ctx, row.ProjectID, row.ID)
+		if err != nil {
+			return row, vars, pkgbuild, err
+		}
+		if prep.PackageName != "" {
+			rel.ArchPackageName = prep.PackageName
+		}
+		existingProvides := repo.SplitDebField(rel.Debian.Provides)
+		existingConflicts := repo.SplitDebField(rel.Debian.Conflicts)
+		if prep.Publish && prep.OriginalName != "" && prep.OriginalName != prep.PackageName {
+			if !containsToken(existingProvides, prep.OriginalName) {
+				rel.CompatPackageName = prep.OriginalName
+			}
+		}
+		rel.Provides = existingProvides
+		rel.Conflicts = existingConflicts
+	}
+	vars = recipe.IdentityVariables(rel)
+	if !boolValue(releaseDocument(row).Document, "pkgbuildManuallyModified") {
+		pkgbuild = recipe.Generate(rel)
+	}
+	return row, vars, pkgbuild, nil
+}
+
+func containsToken(values []string, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, value := range values {
+		token := strings.TrimSpace(value)
+		for _, sep := range []string{"=", "<", ">", ":"} {
+			if i := strings.IndexAny(token, sep); i > 0 {
+				token = token[:i]
+			}
+		}
+		if token == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) Cleanup(ctx context.Context) error {
+	if s.Repo != nil {
+		return s.Repo.CleanupExclusive(ctx, func(protected map[string]struct{}) error {
+			return s.cleanupWith(ctx, protected)
+		})
+	}
+	return s.cleanupWith(ctx, map[string]struct{}{})
+}
+
+func (s *Service) cleanupWith(ctx context.Context, protected map[string]struct{}) error {
+	settings, err := s.DB.Queries.GetLibrarySettings(ctx)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && settings.RetainedPackageVersions >= 0 {
+		if err := s.pruneReleases(ctx, int(settings.RetainedPackageVersions), protected); err != nil {
+			return err
+		}
+	}
+
+	roots := map[string]struct{}{}
+	for id := range protected {
+		roots[id] = struct{}{}
+	}
+	sources, err := s.DB.Queries.ListSourceArtifactIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range sources {
+		if id.Valid {
+			roots[id.String] = struct{}{}
+		}
+	}
+	icons, err := s.DB.Queries.ListProjectIconArtifactIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range icons {
+		if id.Valid {
+			roots[id.String] = struct{}{}
+		}
+	}
+	linked, err := s.DB.Queries.ListAllReleaseArtifactIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range linked {
+		roots[id] = struct{}{}
+	}
+	artifacts, err := s.DB.Queries.ListArtifacts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, art := range artifacts {
+		if _, ok := roots[art.ID]; ok {
+			continue
+		}
+		_ = s.Artifacts.Delete(ctx, art.ID)
+	}
+	return nil
+}
+
+func (s *Service) pruneReleases(ctx context.Context, keep int, protected map[string]struct{}) error {
+	projects, err := s.DB.Queries.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	for _, project := range projects {
+		releases, err := s.DB.Queries.ListReleasesForProject(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		var built []sqlcdb.Release
+		for _, rel := range releases {
+			arts, err := s.DB.Queries.ListReleaseArtifacts(ctx, rel.ID)
+			if err != nil {
+				return err
+			}
+			hasBuilt := false
+			for _, art := range arts {
+				if art.Role == "built_package" {
+					hasBuilt = true
+					break
+				}
+			}
+			if hasBuilt {
+				built = append(built, rel)
+			}
+		}
+		if keep < 0 || len(built) <= keep {
+			continue
+		}
+		// Keep the newest keep releases (created_at order is oldest-first).
+		drop := built[:len(built)-keep]
+		for _, rel := range drop {
+			arts, err := s.DB.Queries.ListReleaseArtifacts(ctx, rel.ID)
+			if err != nil {
+				return err
+			}
+			blocked := false
+			for _, art := range arts {
+				if _, ok := protected[art.ArtifactID]; ok {
+					blocked = true
+					break
+				}
+			}
+			if rel.SourceArtifactID.Valid {
+				if _, ok := protected[rel.SourceArtifactID.String]; ok {
+					blocked = true
+				}
+			}
+			if blocked {
+				continue
+			}
+			if err := s.DB.Queries.DeleteRelease(ctx, rel.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func sha256Hex(data []byte) string {

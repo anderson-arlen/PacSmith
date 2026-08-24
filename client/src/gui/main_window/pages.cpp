@@ -1045,6 +1045,102 @@ QWidget *MainWindow::createBuildPage() {
     return page;
 }
 
+QWidget *MainWindow::createRepositoryPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("Publish this project's successful builds to the PacSmith pacman repository."),
+        page,
+        QStringLiteral("The PacSmith client manages packages. Consuming machines install them with ordinary pacman operations. Repository setup is not embedded in generated packages. Changing a package name after it has already been published is a migration: installed machines keep the old name until they are updated.")));
+
+    repoPublishCheck_ = new QCheckBox(QStringLiteral("Publish successful builds to the PacSmith repository"), page);
+    layout->addWidget(repoPublishCheck_);
+
+    auto *names = new QFormLayout;
+    repoOriginalName_ = new QLabel(page);
+    repoOriginalName_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    repoPrefixDefault_ = new QLabel(page);
+    repoPrefixDefault_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    repoOverrideEdit_ = new QLineEdit(page);
+    repoOverrideEdit_->setPlaceholderText(QStringLiteral("Leave blank to use the repository default"));
+    repoEffectiveName_ = new QLabel(page);
+    repoEffectiveName_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    repoPublishedName_ = new QLabel(page);
+    repoPublishedName_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    names->addRow(QStringLiteral("Original package name"), repoOriginalName_);
+    names->addRow(QStringLiteral("Repository default"), repoPrefixDefault_);
+    names->addRow(QStringLiteral("Package-name override"), repoOverrideEdit_);
+    names->addRow(QStringLiteral("Effective published name"), repoEffectiveName_);
+    names->addRow(QStringLiteral("Already published as"), repoPublishedName_);
+    layout->addLayout(names);
+
+    repoNameWarning_ = new QLabel(page);
+    repoNameWarning_->setWordWrap(true);
+    repoNameWarning_->setObjectName(QStringLiteral("repoNameWarning"));
+    repoNameWarning_->setVisible(false);
+    layout->addWidget(repoNameWarning_);
+
+    auto *channels = new QFormLayout;
+    repoUnstableLabel_ = new QLabel(page);
+    repoUnstableLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    repoUnstableLabel_->setWordWrap(true);
+    repoStableLabel_ = new QLabel(page);
+    repoStableLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    repoStableLabel_->setWordWrap(true);
+    channels->addRow(QStringLiteral("Current unstable"), repoUnstableLabel_);
+    channels->addRow(QStringLiteral("Current stable"), repoStableLabel_);
+    layout->addLayout(channels);
+
+    layout->addWidget(new QLabel(QStringLiteral("Active soak candidates"), page));
+    repoSoakTable_ = new QTableWidget(page);
+    repoSoakTable_->setColumnCount(5);
+    repoSoakTable_->setHorizontalHeaderLabels({QStringLiteral("Version"), QStringLiteral("Arch"),
+                                               QStringLiteral("Status"), QStringLiteral("Soak started"),
+                                               QStringLiteral("Eligible for stable")});
+    repoSoakTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    repoSoakTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    repoSoakTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    repoSoakTable_->horizontalHeader()->setStretchLastSection(true);
+    repoSoakTable_->verticalHeader()->setVisible(false);
+    repoSoakTable_->setMinimumHeight(140);
+    layout->addWidget(repoSoakTable_, 1);
+
+    repoStatusLabel_ = new QLabel(page);
+    repoStatusLabel_->setWordWrap(true);
+    layout->addWidget(repoStatusLabel_);
+
+    auto *buttons = new QHBoxLayout;
+    repoSaveButton_ = new QPushButton(QStringLiteral("Save Repository Settings"), page);
+    repoPromoteButton_ = new QPushButton(QStringLiteral("Promote to Stable"), page);
+    repoPromoteButton_->setToolTip(
+        QStringLiteral("Promote the newest package that would advance stable, bypassing remaining soak time. Stable is never automatically downgraded."));
+    buttons->addWidget(repoSaveButton_);
+    buttons->addWidget(repoPromoteButton_);
+    buttons->addStretch();
+    layout->addLayout(buttons);
+
+    connect(repoSaveButton_, &QPushButton::clicked, this, &MainWindow::saveProjectRepository);
+    connect(repoPromoteButton_, &QPushButton::clicked, this, &MainWindow::promoteProjectRepository);
+    connect(repoOverrideEdit_, &QLineEdit::textChanged, this, [this](const QString &text) {
+        if (populating_ || !project_ || repoEffectiveName_ == nullptr) return;
+        const auto override = text.trimmed();
+        auto effective = override.isEmpty() ? project_->repository.prefixDefault : override;
+        if (effective.isEmpty()) effective = project_->archPackageName;
+        repoEffectiveName_->setText(effective);
+        const auto published = project_->repository.publishedPackageName;
+        const bool warn = !published.isEmpty() && published != effective;
+        if (repoNameWarning_ != nullptr) {
+            repoNameWarning_->setVisible(warn);
+            if (warn) {
+                repoNameWarning_->setText(
+                    QStringLiteral("Changing the published package name is a migration. Machines that already installed %1 will keep that name until they are updated.")
+                        .arg(published));
+            }
+        }
+    });
+    return page;
+}
+
 QWidget *MainWindow::createHistoryPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);

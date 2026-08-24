@@ -243,7 +243,8 @@ void CoreTests::appliesAiResolutionWithinTrustBoundaries() {
          {QString(40, QLatin1Char('B'))}, QStringLiteral("control/postinst:SIGNING_KEY_BASE64"),
          QStringLiteral("key-evidence"), true,
          {pacsmith::ValueOrigin::Deterministic, {}, {}, QStringLiteral("key-evidence"),
-          QStringLiteral("embedded vendor key"), QDateTime::currentDateTimeUtc(), false}});
+          QStringLiteral("embedded vendor key"), QDateTime::currentDateTimeUtc(), false},
+         {}, {}});
     project.scriptFindings.append(
         {QStringLiteral("postinst"), QStringLiteral("apparmor"), QStringLiteral("needs decision"),
          QStringLiteral("apparmor_parser"), QStringLiteral("finding-fingerprint"),

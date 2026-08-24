@@ -60,6 +60,17 @@ func (s *Store) Exists(sha256HexDigest string) (bool, error) {
 	return info.Mode().IsRegular(), nil
 }
 
+func (s *Store) Remove(sha256HexDigest string) error {
+	path, err := s.Path(sha256HexDigest)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) Open(sha256HexDigest string) (*os.File, int64, error) {
 	path, err := s.Path(sha256HexDigest)
 	if err != nil {

@@ -25,9 +25,25 @@ QString secretBackendLabel(const QString &backend) {
     return backend;
 }
 
-bool hostSelected(const QStringList &hosts, const QString &value) {
-    return hosts.contains(value, Qt::CaseInsensitive);
+void setLinkedLabel(QLabel *label, const QString &html) {
+    label->setTextFormat(Qt::RichText);
+    label->setOpenExternalLinks(true);
+    label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    label->setText(html);
 }
+
+void setPlainLabel(QLabel *label, const QString &text) {
+    label->setTextFormat(Qt::PlainText);
+    label->setOpenExternalLinks(false);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    label->setText(text);
+}
+
+QString htmlLink(const QString &url, const QString &text) {
+    return QStringLiteral("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), text.toHtmlEscaped());
+}
+
+bool hostSelected(const QStringList &hosts, const QString &value) { return hosts.contains(value, Qt::CaseInsensitive); }
 
 void populateListenInterfaces(QListWidget *list, const QStringList &selected) {
     list->clear();
@@ -49,8 +65,7 @@ void populateListenInterfaces(QListWidget *list, const QStringList &selected) {
     const auto interfaces = QNetworkInterface::allInterfaces();
     for (const auto &iface : interfaces) {
         if (!iface.isValid() || iface.flags().testFlag(QNetworkInterface::IsLoopBack)) continue;
-        if (!iface.flags().testFlag(QNetworkInterface::IsUp) ||
-            !iface.flags().testFlag(QNetworkInterface::IsRunning)) {
+        if (!iface.flags().testFlag(QNetworkInterface::IsUp) || !iface.flags().testFlag(QNetworkInterface::IsRunning)) {
             continue;
         }
         QStringList addresses;
@@ -63,8 +78,8 @@ void populateListenInterfaces(QListWidget *list, const QStringList &selected) {
         }
         if (addresses.isEmpty()) continue;
         listed.insert(iface.name());
-        addItem(QStringLiteral("%1 (%2)").arg(iface.name(), addresses.join(QStringLiteral(", "))),
-                iface.name(), !allSelected && addressSelected);
+        addItem(QStringLiteral("%1 (%2)").arg(iface.name(), addresses.join(QStringLiteral(", "))), iface.name(),
+                !allSelected && addressSelected);
     }
     for (const auto &host : selected) {
         const auto value = host.trimmed();
@@ -101,6 +116,50 @@ QStringList selectedListenHosts(const QListWidget *list) {
     return hosts;
 }
 
+void wireExclusiveListenHosts(QListWidget *list) {
+    QObject::connect(list, &QListWidget::itemChanged, list, [list](QListWidgetItem *changed) {
+        if (changed == nullptr) return;
+        QSignalBlocker blocker(list);
+        if (changed->data(Qt::UserRole).toString() == QStringLiteral("0.0.0.0")) {
+            if (changed->checkState() == Qt::Checked) {
+                for (int row = 0; row < list->count(); ++row) {
+                    auto *item = list->item(row);
+                    if (item != nullptr && item != changed) item->setCheckState(Qt::Unchecked);
+                }
+            }
+            return;
+        }
+        if (changed->checkState() == Qt::Checked && list->count() > 0) {
+            list->item(0)->setCheckState(Qt::Unchecked);
+        }
+    });
+}
+
+void configureRepositoryForm(QFormLayout *layout) {
+    layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    layout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    layout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    layout->setHorizontalSpacing(18);
+    layout->setVerticalSpacing(10);
+}
+
+void setListeningStatus(QLabel *label, const bool enabled, const QStringList &bound) {
+    const auto darkPalette = label->palette().color(QPalette::Window).lightness() < 128;
+    if (enabled && !bound.isEmpty()) {
+        label->setText(QStringLiteral("●  Listening on %1").arg(bound.join(QStringLiteral(", "))));
+        label->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;")
+                                 .arg(darkPalette ? QStringLiteral("#72d392") : QStringLiteral("#247a3d")));
+    } else if (enabled) {
+        label->setText(QStringLiteral("●  Waiting for the server to bind"));
+        label->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;")
+                                 .arg(darkPalette ? QStringLiteral("#e0ba68") : QStringLiteral("#8a5a00")));
+    } else {
+        label->setText(QStringLiteral("○  Not listening"));
+        label->setStyleSheet(
+            QStringLiteral("color: %1;").arg(label->palette().color(QPalette::PlaceholderText).name()));
+    }
+}
+
 } // namespace
 
 void MainWindow::showSettings() {
@@ -110,10 +169,13 @@ void MainWindow::showSettings() {
     else if (!loadError.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Could not load library settings"), loadError);
     }
+    QString repoLoadError;
+    auto repo = library_.repoSettings(&repoLoadError);
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("PacSmith Settings"));
-    dialog.setMinimumSize(720, 640);
+    dialog.setMinimumSize(760, 640);
+    dialog.resize(900, 760);
     auto *rootLayout = new QVBoxLayout(&dialog);
     auto *settingsTabs = new QTabWidget(&dialog);
 
@@ -121,11 +183,12 @@ void MainWindow::showSettings() {
     auto *generalLayout = new QVBoxLayout(generalPage);
     auto *sessionGroup = new QGroupBox(QStringLiteral("This machine"), generalPage);
     auto *sessionLayout = new QVBoxLayout(sessionGroup);
-    sessionLayout->addWidget(settingsSectionHelp(
-        sessionGroup,
-        QStringLiteral("Tray and login behavior stay on this computer."),
-        QStringLiteral("Closing the main window quits PacSmith unless it is kept running in the tray. "
-                       "These options are not library settings; they only affect this GUI.")));
+    sessionLayout->addWidget(
+        settingsSectionHelp(sessionGroup, QStringLiteral("Tray and login behavior stay on this computer."),
+                            QStringLiteral("Closing the main window quits PacSmith unless it is kept "
+                                           "running in the tray. "
+                                           "These options are not library settings; they only affect "
+                                           "this GUI.")));
     auto *keepInTray = new QCheckBox(QStringLiteral("Keep PacSmith running in the tray"), sessionGroup);
     keepInTray->setChecked(aiSettings_.updates.keepInTray || aiSettings_.updates.startMinimized);
     auto *startAtLogin = new QCheckBox(QStringLiteral("Start PacSmith at login"), sessionGroup);
@@ -137,9 +200,9 @@ void MainWindow::showSettings() {
     sessionLayout->addWidget(startMinimized);
     generalLayout->addWidget(sessionGroup);
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
-        auto *trayNotice = new QLabel(
-            QStringLiteral("No system tray is available, so PacSmith cannot stay running after the window closes."),
-            generalPage);
+        auto *trayNotice = new QLabel(QStringLiteral("No system tray is available, so PacSmith cannot stay "
+                                                     "running after the window closes."),
+                                      generalPage);
         trayNotice->setWordWrap(true);
         keepInTray->setEnabled(false);
         keepInTray->setChecked(false);
@@ -154,14 +217,13 @@ void MainWindow::showSettings() {
     const auto info = localAdmin ? library_.serverInfo(&infoError) : std::optional<ServerInfo>{};
     auto *secretsGroup = new QGroupBox(QStringLiteral("Library secrets"), generalPage);
     auto *secretsForm = new QFormLayout(secretsGroup);
-    secretsForm->addRow(settingsSectionHelp(
-        secretsGroup,
-        QStringLiteral("GitHub tokens and AI credentials are stored by pacsmithd."),
-        QStringLiteral("The daemon chose its secret backend on first start. This client never reads stored secret values back.")));
-    auto *backendLabel = new QLabel(
-        localAdmin ? secretBackendLabel(info ? info->secretBackend : QString{})
-                   : QStringLiteral("Stored on the remote library host"),
-        secretsGroup);
+    secretsForm->addRow(settingsSectionHelp(secretsGroup,
+                                            QStringLiteral("GitHub tokens and AI credentials are stored by pacsmithd."),
+                                            QStringLiteral("The daemon chose its secret backend on first start. This "
+                                                           "client never reads stored secret values back.")));
+    auto *backendLabel = new QLabel(localAdmin ? secretBackendLabel(info ? info->secretBackend : QString{})
+                                               : QStringLiteral("Stored on the remote library host"),
+                                    secretsGroup);
     backendLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     secretsForm->addRow(QStringLiteral("Backend"), backendLabel);
     generalLayout->addWidget(secretsGroup);
@@ -173,11 +235,12 @@ void MainWindow::showSettings() {
     githubToken->setPlaceholderText(aiSettings_.githubTokenConfigured
                                         ? QStringLiteral("Configured on the library daemon; leave blank to keep it")
                                         : QStringLiteral("Optional personal access token"));
-    githubForm->addRow(settingsSectionHelp(
-        githubGroup,
-        QStringLiteral("Optional. Used when adding GitHub packages and checking for updates."),
-        QStringLiteral("A token is optional for public repositories but raises GitHub API rate limits. "
-                       "The value is stored on the library daemon.")));
+    githubForm->addRow(settingsSectionHelp(githubGroup,
+                                           QStringLiteral("Optional. Used when adding GitHub packages and checking "
+                                                          "for updates."),
+                                           QStringLiteral("A token is optional for public repositories but raises "
+                                                          "GitHub API rate limits. "
+                                                          "The value is stored on the library daemon.")));
     githubForm->addRow(QStringLiteral("Personal access token"), githubToken);
     generalLayout->addWidget(githubGroup);
     generalLayout->addStretch(1);
@@ -187,15 +250,14 @@ void MainWindow::showSettings() {
     auto *aiLayout = new QVBoxLayout(aiPage);
     auto *aiGroup = new QGroupBox(QStringLiteral("AI Advisor"), aiPage);
     auto *aiGroupLayout = new QVBoxLayout(aiGroup);
-    auto *aiSectionHelp = settingsSectionHelp(
-        aiGroup,
-        QStringLiteral("AI is optional. Local inspection always runs first."),
-        QStringLiteral("Provider, model, and credentials belong to the library daemon so every client uses the same advisor."));
+    auto *aiSectionHelp =
+        settingsSectionHelp(aiGroup, QStringLiteral("AI is optional. Local inspection always runs first."),
+                            QStringLiteral("Provider, model, and credentials belong to the library "
+                                           "daemon so every client uses the same advisor."));
     aiGroupLayout->addWidget(aiSectionHelp);
     auto *form = new QFormLayout;
     auto *provider = new QComboBox(aiPage);
-    provider->addItems({QStringLiteral("None"), QStringLiteral("ChatGPT subscription"),
-                        QStringLiteral("OpenAI API"),
+    provider->addItems({QStringLiteral("None"), QStringLiteral("ChatGPT subscription"), QStringLiteral("OpenAI API"),
                         QStringLiteral("xAI / Grok API")});
     provider->setCurrentIndex(static_cast<int>(aiSettings_.provider));
     auto *model = new QComboBox(aiPage);
@@ -241,19 +303,18 @@ void MainWindow::showSettings() {
     auto *updatesLayout = new QVBoxLayout(updatesPage);
     auto *scheduleGroup = new QGroupBox(QStringLiteral("Library update checks"), updatesPage);
     auto *updatesForm = new QFormLayout(scheduleGroup);
-    updatesForm->addRow(settingsSectionHelp(
-        scheduleGroup,
-        QStringLiteral("The schedule is stored on the library daemon."),
-        QStringLiteral("Each project release still owns its own update source. This schedule is shared by every client of this library.")));
+    updatesForm->addRow(
+        settingsSectionHelp(scheduleGroup, QStringLiteral("The schedule is stored on the library daemon."),
+                            QStringLiteral("Each project release still owns its own update source. This "
+                                           "schedule is shared by every client of this library.")));
     auto *backgroundEnabled = new QCheckBox(QStringLiteral("Check for updates periodically"), scheduleGroup);
     backgroundEnabled->setChecked(aiSettings_.updates.enabled);
     auto *schedule = new QComboBox(scheduleGroup);
     schedule->addItems({QStringLiteral("Every day"), QStringLiteral("Selected weekday")});
     schedule->setCurrentIndex(aiSettings_.updates.daily ? 0 : 1);
     auto *weekday = new QComboBox(scheduleGroup);
-    weekday->addItems({QStringLiteral("Monday"), QStringLiteral("Tuesday"),
-                       QStringLiteral("Wednesday"), QStringLiteral("Thursday"),
-                       QStringLiteral("Friday"), QStringLiteral("Saturday"),
+    weekday->addItems({QStringLiteral("Monday"), QStringLiteral("Tuesday"), QStringLiteral("Wednesday"),
+                       QStringLiteral("Thursday"), QStringLiteral("Friday"), QStringLiteral("Saturday"),
                        QStringLiteral("Sunday")});
     weekday->setCurrentIndex(std::clamp(aiSettings_.updates.weekDay, 1, 7) - 1);
     auto *checkTime = new QTimeEdit(aiSettings_.updates.localTime, scheduleGroup);
@@ -265,9 +326,9 @@ void MainWindow::showSettings() {
     updatesLayout->addWidget(scheduleGroup);
     auto *behaviorGroup = new QGroupBox(QStringLiteral("When updates are found"), updatesPage);
     auto *behaviorForm = new QFormLayout(behaviorGroup);
-    auto *automaticPrepare = new QCheckBox(
-        QStringLiteral("Download and prepare newly discovered vendor artifacts automatically"),
-        behaviorGroup);
+    auto *automaticPrepare = new QCheckBox(QStringLiteral("Download and prepare newly discovered "
+                                                          "vendor artifacts automatically"),
+                                           behaviorGroup);
     automaticPrepare->setChecked(aiSettings_.updates.automaticallyPrepare);
     behaviorForm->addRow(QString{}, automaticPrepare);
     updatesLayout->addWidget(behaviorGroup);
@@ -283,11 +344,12 @@ void MainWindow::showSettings() {
     auto *cleanupLayout = new QVBoxLayout(cleanupPage);
     auto *cleanupGroup = new QGroupBox(QStringLiteral("Cleanup"), cleanupPage);
     auto *cleanupForm = new QFormLayout(cleanupGroup);
-    cleanupForm->addRow(settingsSectionHelp(
-        cleanupGroup,
-        QStringLiteral("Retention is a library policy on the daemon."),
-        QStringLiteral("These counts apply to versions older than the currently installed PacSmith release. "
-                       "Complete-release retention cannot be lower than artifact retention.")));
+    cleanupForm->addRow(settingsSectionHelp(cleanupGroup,
+                                            QStringLiteral("Retention is a library policy on the daemon."),
+                                            QStringLiteral("These counts apply to versions older than the currently "
+                                                           "installed PacSmith release. "
+                                                           "Complete-release retention cannot be lower than artifact "
+                                                           "retention.")));
     auto *retainedPackages = new QSpinBox(cleanupPage);
     retainedPackages->setRange(-1, 50);
     retainedPackages->setSpecialValueText(QStringLiteral("Unlimited"));
@@ -301,6 +363,448 @@ void MainWindow::showSettings() {
     cleanupLayout->addWidget(cleanupGroup);
     cleanupLayout->addStretch();
     settingsTabs->addTab(cleanupPage, QStringLiteral("Cleanup"));
+
+    auto *repoScroll = new QScrollArea(settingsTabs);
+    repoScroll->setWidgetResizable(true);
+    repoScroll->setFrameShape(QFrame::NoFrame);
+    repoScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *repoPage = new QWidget(repoScroll);
+    repoPage->setObjectName(QStringLiteral("repositorySettingsPage"));
+    repoPage->setStyleSheet(QStringLiteral("QWidget#repositorySettingsPage { background-color: palette(window); }"
+                                           "QWidget#repositorySettingsPage QGroupBox {"
+                                           "  background-color: rgba(127, 127, 127, 10);"
+                                           "  border: 1px solid rgba(127, 127, 127, 75);"
+                                           "  border-radius: 8px; margin-top: 14px; padding: 14px 10px 10px 10px;"
+                                           "}"
+                                           "QWidget#repositorySettingsPage QGroupBox::title {"
+                                           "  subcontrol-origin: margin; subcontrol-position: top left; left: 12px;"
+                                           "  padding: 0 6px; background-color: palette(window); font-weight: 600;"
+                                           "}"
+                                           "QWidget#repositorySettingsPage QLineEdit,"
+                                           "QWidget#repositorySettingsPage QComboBox,"
+                                           "QWidget#repositorySettingsPage QSpinBox { min-height: 30px; }"
+                                           "QWidget#repositorySettingsPage QPushButton { min-height: 30px; padding: "
+                                           "0 12px; }"
+                                           "QWidget#repositorySettingsPage QListWidget { border-radius: 5px; }"
+                                           "QLabel#repositoryPageTitle { font-size: 18px; font-weight: 600; }"
+                                           "QWidget#repositoryFingerprintField {"
+                                           "  background-color: rgba(127, 127, 127, 18); border-radius: 5px; "
+                                           "padding: 4px;"
+                                           "}"
+                                           "QFrame#repositoryCertificationPane {"
+                                           "  border-top: 1px solid rgba(127, 127, 127, 65); margin-top: 6px;"
+                                           "}"
+                                           "QFrame#repositoryCertificationPane QLabel { border: none; }"));
+    auto *repoLayout = new QVBoxLayout(repoPage);
+    repoLayout->setContentsMargins(20, 18, 20, 20);
+    repoLayout->setSpacing(14);
+    auto *repoTitle = new QLabel(QStringLiteral("Package repository"), repoPage);
+    repoTitle->setObjectName(QStringLiteral("repositoryPageTitle"));
+    repoLayout->addWidget(repoTitle);
+    repoLayout->addWidget(
+        settingsSectionHelp(repoPage,
+                            QStringLiteral("Publish signed packages for ordinary pacman clients. No "
+                                           "PacSmith enrollment is required."),
+                            QStringLiteral("The pacman repository protocol does not use client enrollment or "
+                                           "authentication. Package and repository authenticity comes from "
+                                           "OpenPGP signatures. To restrict who can reach the repository, expose "
+                                           "its listener only on a trusted private network such as a LAN, Tailscale, "
+                                           "or WireGuard network; do not publish it directly to the public Internet. "
+                                           "Deliver bootstrap scripts through a channel you already trust.")));
+    if (!repo && !repoLoadError.isEmpty()) {
+        auto *repoLoadNotice = new QLabel(repoLoadError, repoPage);
+        repoLoadNotice->setWordWrap(true);
+        repoLayout->addWidget(repoLoadNotice);
+    }
+
+    auto *repoListenGroup = new QGroupBox(QStringLiteral("Network"), repoPage);
+    auto *repoListenForm = new QFormLayout(repoListenGroup);
+    configureRepositoryForm(repoListenForm);
+    auto *repoEnabled = new QCheckBox(QStringLiteral("Serve the pacman repository over HTTP"), repoListenGroup);
+    auto *repoListenPort = new QSpinBox(repoListenGroup);
+    repoListenPort->setRange(1, 65535);
+    auto *repoListenInterfaces = new QListWidget(repoListenGroup);
+    repoListenInterfaces->setMinimumHeight(120);
+    auto *repoBound = new QLabel(repoListenGroup);
+    repoBound->setObjectName(QStringLiteral("repositoryBoundStatus"));
+    repoBound->setWordWrap(true);
+    repoBound->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *applyRepoListen = new QPushButton(QStringLiteral("Apply network changes"), repoListenGroup);
+    repoListenForm->addRow(QString{}, repoEnabled);
+    repoListenForm->addRow(QStringLiteral("Port"), repoListenPort);
+    repoListenForm->addRow(QStringLiteral("Interfaces"), repoListenInterfaces);
+    repoListenForm->addRow(QStringLiteral("Status"), repoBound);
+    repoListenForm->addRow(QString{}, applyRepoListen);
+    repoLayout->addWidget(repoListenGroup);
+
+    auto *repoPolicyGroup = new QGroupBox(QStringLiteral("Publication"), repoPage);
+    auto *repoPolicyForm = new QFormLayout(repoPolicyGroup);
+    configureRepositoryForm(repoPolicyForm);
+    auto *repoSoakDays = new QSpinBox(repoPolicyGroup);
+    repoSoakDays->setRange(0, 3650);
+    repoSoakDays->setSuffix(QStringLiteral(" days"));
+    repoSoakDays->setSpecialValueText(QStringLiteral("Immediate"));
+    auto *repoPrefixEnabled = new QCheckBox(QStringLiteral("Prefix published package names"), repoPolicyGroup);
+    auto *repoPrefixEdit = new QLineEdit(repoPolicyGroup);
+    repoPrefixEdit->setPlaceholderText(QStringLiteral("pacsmith-"));
+    repoPolicyForm->addRow(
+        settingsSectionHelp(repoPolicyGroup,
+                            QStringLiteral("Each upstream version has its own soak timer. Rebuilding the same "
+                                           "upstream version resets only that version's timer."),
+                            QStringLiteral("A newer upstream release does not reset an older version's soak. "
+                                           "When a candidate finishes soaking it is promoted only if it would "
+                                           "advance stable; stable is never automatically downgraded. Prefixing "
+                                           "is optional. PacSmith never publishes two projects under the same "
+                                           "effective package name.")));
+    repoPolicyForm->addRow(QStringLiteral("Default stable soak"), repoSoakDays);
+    repoPolicyForm->addRow(QString{}, repoPrefixEnabled);
+    repoPolicyForm->addRow(QStringLiteral("Package-name prefix"), repoPrefixEdit);
+    repoLayout->addWidget(repoPolicyGroup);
+    QObject::connect(repoPrefixEnabled, &QCheckBox::toggled, repoPrefixEdit, &QLineEdit::setEnabled);
+
+    auto *repoSignGroup = new QGroupBox(QStringLiteral("Signing and trust"), repoPage);
+    auto *repoSignLayout = new QVBoxLayout(repoSignGroup);
+    repoSignLayout->addWidget(
+        settingsSectionHelp(repoSignGroup,
+                            QStringLiteral("PacSmith generates a dedicated repository signing key on "
+                                           "the server. The private key never leaves pacsmithd."),
+                            QStringLiteral("This key is independent of PacSmith's X.509 Server CA "
+                                           "and Client CA. Direct trust is the default: consuming "
+                                           "machines trust the PacSmith signing key itself. "
+                                           "Root-certified trust adds an administrator-owned "
+                                           "certification without replacing the operational key.")));
+    auto *repoFingerprint = new QLabel(repoSignGroup);
+    repoFingerprint->setWordWrap(true);
+    repoFingerprint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto fingerprintFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    if (fingerprintFont.pointSize() > 0 && fingerprintFont.pointSize() < 10) {
+        fingerprintFont.setPointSize(10);
+    }
+    repoFingerprint->setFont(fingerprintFont);
+    auto *repoFingerprintRow = new QWidget(repoSignGroup);
+    repoFingerprintRow->setObjectName(QStringLiteral("repositoryFingerprintField"));
+    auto *repoFingerprintLayout = new QHBoxLayout(repoFingerprintRow);
+    repoFingerprintLayout->setContentsMargins(0, 0, 0, 0);
+    auto *copyRepoFingerprint = new QPushButton(QStringLiteral("Copy"), repoFingerprintRow);
+    copyRepoFingerprint->setEnabled(false);
+    repoFingerprintLayout->addWidget(repoFingerprint, 1);
+    repoFingerprintLayout->addWidget(copyRepoFingerprint);
+    auto *repoKeyringStatus = new QLabel(repoSignGroup);
+    repoKeyringStatus->setWordWrap(true);
+    repoKeyringStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *repoTrustMode = new QComboBox(repoSignGroup);
+    repoTrustMode->addItem(QStringLiteral("Direct trust"), QStringLiteral("direct"));
+    repoTrustMode->addItem(QStringLiteral("Root-certified trust"), QStringLiteral("root-certified"));
+    auto *repoSignButtons = new QHBoxLayout;
+    auto *repoInitSigning = new QPushButton(QStringLiteral("Initialize signing"), repoSignGroup);
+    auto *repoDownloadPubkey = new QPushButton(QStringLiteral("Download PacSmith public key…"), repoSignGroup);
+    repoSignButtons->addWidget(repoInitSigning);
+    repoSignButtons->addWidget(repoDownloadPubkey);
+    repoSignButtons->addStretch();
+    auto *repoSignForm = new QFormLayout;
+    configureRepositoryForm(repoSignForm);
+    repoSignForm->addRow(QStringLiteral("Signing key fingerprint"), repoFingerprintRow);
+    repoSignForm->addRow(QStringLiteral("Keyring package"), repoKeyringStatus);
+    repoSignForm->addRow(QStringLiteral("Trust model"), repoTrustMode);
+    repoSignLayout->addLayout(repoSignForm);
+    repoSignLayout->addLayout(repoSignButtons);
+
+    auto *repoCertPane = new QFrame(repoSignGroup);
+    repoCertPane->setObjectName(QStringLiteral("repositoryCertificationPane"));
+    auto *repoCertLayout = new QVBoxLayout(repoCertPane);
+    repoCertLayout->setContentsMargins(0, 16, 0, 0);
+    repoCertLayout->setSpacing(10);
+    auto *repoCertHelp =
+        settingsSectionHelp(repoCertPane,
+                            QStringLiteral("Upload the root public key, download PacSmith's public key, certify "
+                                           "it offline, then upload the certified certificate."),
+                            repo && !repo->certificationHelp.isEmpty()
+                                ? repo->certificationHelp
+                                : QStringLiteral("OpenPGP certification is how one key vouches for another. "
+                                                 "PacSmith never asks for the root private key and cannot "
+                                                 "expose its own private signing key."),
+                            repo ? repo->certificationCommands : QString{});
+    repoCertLayout->addWidget(repoCertHelp);
+    auto *repoCertStatusPanel = settingsStatusFrame(repoCertPane);
+    repoCertStatusPanel->setObjectName(QStringLiteral("repositoryCertificationStatus"));
+    auto *repoCertStatusLayout = new QVBoxLayout(repoCertStatusPanel);
+    repoCertStatusLayout->setContentsMargins(14, 11, 14, 12);
+    repoCertStatusLayout->setSpacing(6);
+    auto *repoCertStatusHeading = new QLabel(repoCertStatusPanel);
+    auto certHeadingFont = repoCertStatusHeading->font();
+    certHeadingFont.setBold(true);
+    repoCertStatusHeading->setFont(certHeadingFont);
+    auto *repoCertStatus = new QLabel(repoCertStatusPanel);
+    repoCertStatus->setWordWrap(true);
+    repoCertStatusLayout->addWidget(repoCertStatusHeading);
+    repoCertStatusLayout->addWidget(repoCertStatus);
+    repoCertLayout->addWidget(repoCertStatusPanel);
+    auto *repoCertButtons = new QHBoxLayout;
+    auto *repoUploadRoot = new QPushButton(QStringLiteral("Upload root key…"), repoCertPane);
+    auto *repoUploadCertified = new QPushButton(QStringLiteral("Upload certified key…"), repoCertPane);
+    repoCertButtons->addWidget(repoUploadRoot);
+    repoCertButtons->addWidget(repoUploadCertified);
+    repoCertButtons->addStretch();
+    repoCertLayout->addLayout(repoCertButtons);
+    repoSignLayout->addWidget(repoCertPane);
+    repoLayout->addWidget(repoSignGroup);
+
+    auto *repoBootstrapGroup = new QGroupBox(QStringLiteral("Client setup"), repoPage);
+    auto *repoBootstrapLayout = new QVBoxLayout(repoBootstrapGroup);
+    repoBootstrapLayout->addWidget(
+        settingsSectionHelp(repoBootstrapGroup,
+                            QStringLiteral("Copy a bootstrap script for the selected channel. "
+                                           "Deliver it through a channel you already trust."),
+                            QStringLiteral("The advertised URL is written into the script as pacman's Server. "
+                                           "Use the address consuming machines will actually fetch from, which "
+                                           "may be a reverse-proxied HTTPS URL rather than the listen address. "
+                                           "If it is left empty, the script falls back to a listen address. Use "
+                                           "configuration management, a provisioned OS image, or this "
+                                           "authenticated management interface. The script verifies expected "
+                                           "fingerprints and fails closed on mismatch.")));
+    auto *repoAdvertisedUrl = new QLineEdit(repoBootstrapGroup);
+    repoAdvertisedUrl->setPlaceholderText(QStringLiteral("https://packages.example.com"));
+    auto *repoBootstrapForm = new QFormLayout;
+    configureRepositoryForm(repoBootstrapForm);
+    repoBootstrapForm->addRow(QStringLiteral("Advertised URL"), repoAdvertisedUrl);
+    auto *repoBootstrapChannel = new QComboBox(repoBootstrapGroup);
+    repoBootstrapChannel->addItem(QStringLiteral("Stable"), QStringLiteral("stable"));
+    repoBootstrapChannel->addItem(QStringLiteral("Unstable"), QStringLiteral("unstable"));
+    auto *copyBootstrap = new QPushButton(QStringLiteral("Copy bootstrap script"), repoBootstrapGroup);
+    auto *repoBootstrapRow = new QWidget(repoBootstrapGroup);
+    auto *repoBootstrapRowLayout = new QHBoxLayout(repoBootstrapRow);
+    repoBootstrapRowLayout->setContentsMargins(0, 0, 0, 0);
+    repoBootstrapRowLayout->setSpacing(8);
+    repoBootstrapRowLayout->addWidget(repoBootstrapChannel, 1);
+    repoBootstrapRowLayout->addWidget(copyBootstrap);
+    repoBootstrapForm->addRow(QStringLiteral("Channel"), repoBootstrapRow);
+    repoBootstrapLayout->addLayout(repoBootstrapForm);
+    repoLayout->addWidget(repoBootstrapGroup);
+    repoLayout->addStretch(1);
+    repoScroll->setWidget(repoPage);
+
+    auto updateRepoCertVisibility = [repoTrustMode, repoCertPane] {
+        repoCertPane->setVisible(repoTrustMode->currentData().toString() == QStringLiteral("root-certified"));
+    };
+    QObject::connect(repoTrustMode, &QComboBox::currentIndexChanged, &dialog,
+                     [updateRepoCertVisibility](int) { updateRepoCertVisibility(); });
+
+    auto applyRepoUi = [=](const RepoSettings &settings) {
+        const auto keepRootCertified = repoTrustMode->currentData().toString() == QStringLiteral("root-certified") &&
+                                       settings.trustMode != QStringLiteral("root-certified");
+        repoEnabled->setChecked(settings.enabled);
+        repoListenPort->setValue(settings.listenPort);
+        {
+            QSignalBlocker blocker(repoListenInterfaces);
+            populateListenInterfaces(repoListenInterfaces, settings.listenHosts);
+        }
+        setListeningStatus(repoBound, settings.enabled, settings.bound);
+        repoAdvertisedUrl->setText(settings.advertisedUrl);
+        repoSoakDays->setValue(static_cast<int>(settings.soakSeconds / 86400));
+        repoPrefixEnabled->setChecked(!settings.packageNamePrefix.isEmpty());
+        repoPrefixEdit->setText(settings.packageNamePrefix.isEmpty() ? QStringLiteral("pacsmith-")
+                                                                     : settings.packageNamePrefix);
+        repoPrefixEdit->setEnabled(repoPrefixEnabled->isChecked());
+        if (!keepRootCertified) {
+            const auto trustIndex = repoTrustMode->findData(settings.trustMode);
+            repoTrustMode->setCurrentIndex(trustIndex >= 0 ? trustIndex : 0);
+        }
+        if (settings.signingInitialized && !settings.fingerprintSpaced.isEmpty()) {
+            repoFingerprint->setText(settings.fingerprintSpaced);
+        } else if (settings.signingInitialized && !settings.fingerprint.isEmpty()) {
+            repoFingerprint->setText(settings.fingerprint);
+        } else {
+            repoFingerprint->setText(QStringLiteral("Not initialized"));
+        }
+        if (settings.keyringVersion > 0 && !settings.keyringUrl.isEmpty()) {
+            const auto package = settings.keyringPackage.isEmpty()
+                                     ? QStringLiteral("pacsmith-keyring version %1").arg(settings.keyringVersion)
+                                     : settings.keyringPackage;
+            setLinkedLabel(repoKeyringStatus, QStringLiteral("Published on stable and unstable as "
+                                                             "pacsmith-keyring version %1<br>")
+                                                      .arg(settings.keyringVersion) +
+                                                  htmlLink(settings.keyringUrl, package));
+        } else if (settings.keyringVersion > 0) {
+            setPlainLabel(repoKeyringStatus,
+                          QStringLiteral("pacsmith-keyring version %1").arg(settings.keyringVersion));
+        } else {
+            setPlainLabel(repoKeyringStatus, QStringLiteral("Not generated until signing is initialized"));
+        }
+        repoInitSigning->setEnabled(!settings.signingInitialized);
+        repoDownloadPubkey->setEnabled(settings.signingInitialized);
+        copyRepoFingerprint->setEnabled(settings.signingInitialized && !settings.fingerprint.isEmpty());
+        copyRepoFingerprint->setProperty("fingerprint", settings.fingerprint);
+        repoUploadRoot->setEnabled(settings.signingInitialized);
+        const auto rootFingerprint =
+            !settings.rootFingerprintSpaced.isEmpty() ? settings.rootFingerprintSpaced : settings.rootFingerprint;
+        repoUploadCertified->setEnabled(settings.signingInitialized && !rootFingerprint.isEmpty());
+        repoUploadCertified->setToolTip(rootFingerprint.isEmpty()
+                                            ? QStringLiteral("Upload the root public key first")
+                                            : QStringLiteral("Upload PacSmith's public key after certifying it "
+                                                             "with the root key"));
+        if (settings.certified) {
+            repoCertStatusHeading->setText(QStringLiteral("✓  Root certification verified"));
+            repoCertStatusPanel->setStyleSheet(
+                QStringLiteral("QFrame#repositoryCertificationStatus {"
+                               "  background-color: rgba(46, 160, 86, 28);"
+                               "  border: 1px solid rgba(72, 190, 112, 150); border-radius: 7px;"
+                               "}"
+                               "QFrame#repositoryCertificationStatus QLabel { background: "
+                               "transparent; border: none; }"));
+            QString body = QStringLiteral("PacSmith accepted this host's signing key "
+                                          "as certified by the uploaded root.");
+            if (!rootFingerprint.isEmpty()) {
+                body += QStringLiteral("<br><br><b>Root key</b><br>%1").arg(rootFingerprint.toHtmlEscaped());
+            }
+            if (settings.keyringVersion > 0 && !settings.keyringUrl.isEmpty()) {
+                const auto package = settings.keyringPackage.isEmpty()
+                                         ? QStringLiteral("pacsmith-keyring version %1").arg(settings.keyringVersion)
+                                         : settings.keyringPackage;
+                body += QStringLiteral("<br><br><b>Keyring package</b><br>");
+                body += htmlLink(settings.keyringUrl, package);
+            } else if (settings.keyringVersion > 0) {
+                body += QStringLiteral("<br><br><b>Keyring package</b><br>Version %1 is published.")
+                            .arg(settings.keyringVersion);
+            } else {
+                body += QStringLiteral("<br><br><b>Keyring package</b><br>Not published yet");
+            }
+            setLinkedLabel(repoCertStatus, body);
+        } else {
+            repoCertStatusHeading->setText(QStringLiteral("●  Root certification incomplete"));
+            repoCertStatusPanel->setStyleSheet(
+                QStringLiteral("QFrame#repositoryCertificationStatus {"
+                               "  background-color: rgba(205, 145, 35, 24);"
+                               "  border: 1px solid rgba(205, 145, 35, 135); border-radius: 7px;"
+                               "}"
+                               "QFrame#repositoryCertificationStatus QLabel { background: "
+                               "transparent; border: none; }"));
+            if (rootFingerprint.isEmpty()) {
+                setPlainLabel(repoCertStatus, QStringLiteral("Upload the root public key to begin certification."));
+            } else {
+                setPlainLabel(repoCertStatus, QStringLiteral("Root key uploaded: %1\n\nCertify PacSmith's public "
+                                                             "key offline, then upload the certified key.")
+                                                  .arg(rootFingerprint));
+            }
+        }
+        if (!settings.certificationHelp.isEmpty()) {
+            setSettingsSectionHelp(repoCertHelp,
+                                   QStringLiteral("Upload the root public key, download PacSmith's public key, "
+                                                  "certify it offline, then upload the certified certificate."),
+                                   settings.certificationHelp, settings.certificationCommands);
+        }
+        updateRepoCertVisibility();
+    };
+    if (repo) applyRepoUi(*repo);
+    else applyRepoUi(RepoSettings{});
+    wireExclusiveListenHosts(repoListenInterfaces);
+
+    auto collectRepoSettings = [&, repoEnabled, repoListenPort, repoListenInterfaces, repoAdvertisedUrl, repoSoakDays,
+                                repoPrefixEnabled, repoPrefixEdit, repoTrustMode]() {
+        RepoSettings next;
+        next.revision = repo ? repo->revision : 1;
+        next.enabled = repoEnabled->isChecked();
+        next.listenHosts = selectedListenHosts(repoListenInterfaces);
+        next.listenPort = repoListenPort->value();
+        next.advertisedUrl = repoAdvertisedUrl->text().trimmed();
+        next.soakSeconds = static_cast<qint64>(repoSoakDays->value()) * 86400;
+        next.packageNamePrefix = repoPrefixEnabled->isChecked() ? repoPrefixEdit->text().trimmed() : QString{};
+        next.trustMode = repoTrustMode->currentData().toString();
+        next.certified = repo && repo->certified;
+        return next;
+    };
+    auto saveCollectedRepo = [&, applyRepoUi](RepoSettings next) -> bool {
+        if (next.enabled && next.listenHosts.isEmpty()) {
+            QMessageBox::warning(&dialog, QStringLiteral("Listen interfaces"),
+                                 QStringLiteral("Select at least one interface, or All IPv4 addresses."));
+            return false;
+        }
+        if (next.listenHosts.isEmpty()) next.listenHosts.append(QStringLiteral("127.0.0.1"));
+        QString error;
+        auto saved = library_.saveRepoSettings(next, &error);
+        if (!saved) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not save repository settings"), error);
+            return false;
+        }
+        repo = saved;
+        applyRepoUi(*saved);
+        return true;
+    };
+    auto readPublicKeyFile = [&dialog](const QString &title) -> std::optional<QString> {
+        const auto path = QFileDialog::getOpenFileName(
+            &dialog, title, QString{}, QStringLiteral("OpenPGP public keys (*.asc *.gpg *.pgp *.pub);;All files (*)"));
+        if (path.isEmpty()) return std::nullopt;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not read key file"), file.errorString());
+            return std::nullopt;
+        }
+        return QString::fromUtf8(file.readAll());
+    };
+
+    QObject::connect(applyRepoListen, &QPushButton::clicked, &dialog,
+                     [&, saveCollectedRepo] { static_cast<void>(saveCollectedRepo(collectRepoSettings())); });
+    QObject::connect(repoInitSigning, &QPushButton::clicked, &dialog, [&, applyRepoUi] {
+        QString error;
+        auto saved = library_.initRepoSigning(&error);
+        if (!saved) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not initialize repository signing"), error);
+            return;
+        }
+        repo = saved;
+        applyRepoUi(*saved);
+    });
+    QObject::connect(repoDownloadPubkey, &QPushButton::clicked, &dialog, [&, this] {
+        const auto path = QFileDialog::getSaveFileName(
+            &dialog, QStringLiteral("Download PacSmith public key"), QStringLiteral("pacsmith.asc"),
+            QStringLiteral("OpenPGP public keys (*.asc *.gpg);;All files (*)"));
+        if (path.isEmpty()) return;
+        QString error;
+        if (!library_.downloadRepoPublicKey(path, &error)) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not download PacSmith public key"), error);
+            return;
+        }
+        QMessageBox::information(&dialog, QStringLiteral("PacSmith public key saved"),
+                                 QStringLiteral("Certify this public key offline if you use root-certified "
+                                                "trust. Never upload a private key."));
+    });
+    QObject::connect(repoUploadRoot, &QPushButton::clicked, &dialog, [&, applyRepoUi, readPublicKeyFile] {
+        const auto key = readPublicKeyFile(QStringLiteral("Upload root public key"));
+        if (!key) return;
+        QString error;
+        auto saved = library_.uploadRepoRootKey(*key, &error);
+        if (!saved) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not store root public key"), error);
+            return;
+        }
+        repo = saved;
+        applyRepoUi(*saved);
+    });
+    QObject::connect(repoUploadCertified, &QPushButton::clicked, &dialog, [&, applyRepoUi, readPublicKeyFile] {
+        const auto key = readPublicKeyFile(QStringLiteral("Upload certified PacSmith public key"));
+        if (!key) return;
+        QString error;
+        auto saved = library_.uploadRepoCertifiedKey(*key, &error);
+        if (!saved) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not store certified PacSmith key"), error);
+            return;
+        }
+        repo = saved;
+        applyRepoUi(*saved);
+    });
+    QObject::connect(copyRepoFingerprint, &QPushButton::clicked, &dialog, [copyRepoFingerprint] {
+        const auto fingerprint = copyRepoFingerprint->property("fingerprint").toString();
+        if (!fingerprint.isEmpty()) QApplication::clipboard()->setText(fingerprint);
+    });
+    QObject::connect(copyBootstrap, &QPushButton::clicked, &dialog, [&] {
+        if (!saveCollectedRepo(collectRepoSettings())) return;
+        QString error;
+        const auto script = library_.repoBootstrapScript(repoBootstrapChannel->currentData().toString(), &error);
+        if (!script) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not load bootstrap script"), error);
+            return;
+        }
+        QApplication::clipboard()->setText(*script);
+    });
 
     std::function<bool()> applyListenSettings = [] { return true; };
     std::function<void()> refreshClientsTables;
@@ -320,11 +824,12 @@ void MainWindow::showSettings() {
     if (localAdmin) {
         auto *clientsPage = new QWidget(settingsTabs);
         auto *clientsLayout = new QVBoxLayout(clientsPage);
-        clientsLayout->addWidget(settingsSectionHelp(
-            clientsPage,
-            QStringLiteral("Remote HTTPS listening is off until you enable it here."),
-            QStringLiteral("Choose whether this library host accepts remote clients, which interfaces, and which port. "
-                           "Registration approval appears only while listening is enabled. PKI administration stays on this computer.")));
+        clientsLayout->addWidget(
+            settingsSectionHelp(clientsPage, QStringLiteral("Remote HTTPS listening is off until you enable it here."),
+                                QStringLiteral("Choose whether this library host accepts remote "
+                                               "clients, which interfaces, and which port. "
+                                               "Registration approval appears only while listening is "
+                                               "enabled. PKI administration stays on this computer.")));
         auto *listenGroup = new QGroupBox(QStringLiteral("Remote listening"), clientsPage);
         auto *listenForm = new QFormLayout(listenGroup);
         listenEnabled = new QCheckBox(QStringLiteral("Accept remote clients over HTTPS / mTLS"), listenGroup);
@@ -334,26 +839,26 @@ void MainWindow::showSettings() {
         listenPort->setValue(info ? info->listen.port : 8443);
         listenInterfaces = new QListWidget(listenGroup);
         listenInterfaces->setMinimumHeight(120);
-        populateListenInterfaces(listenInterfaces, info ? info->listen.hosts
-                                                        : QStringList{QStringLiteral("0.0.0.0")});
+        populateListenInterfaces(listenInterfaces, info ? info->listen.hosts : QStringList{QStringLiteral("0.0.0.0")});
         listenBound = new QLabel(listenGroup);
+        listenBound->setObjectName(QStringLiteral("libraryListeningStatus"));
         listenBound->setWordWrap(true);
         listenBound->setTextInteractionFlags(Qt::TextSelectableByMouse);
         auto *applyListen = new QPushButton(QStringLiteral("Apply listen settings"), listenGroup);
         listenForm->addRow(QString{}, listenEnabled);
         listenForm->addRow(QStringLiteral("Port"), listenPort);
         listenForm->addRow(QStringLiteral("Interfaces"), listenInterfaces);
-        listenForm->addRow(QStringLiteral("Bound"), listenBound);
+        listenForm->addRow(QStringLiteral("Status"), listenBound);
         listenForm->addRow(QString{}, applyListen);
         clientsLayout->addWidget(listenGroup);
 
         fingerprint = new QLabel(clientsPage);
         fingerprint->setWordWrap(true);
         fingerprint->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        listenOffNotice = new QLabel(
-            QStringLiteral("Turn on remote listening to enroll other computers. "
-                           "Pending registration approval is hidden until this host is listening."),
-            clientsPage);
+        listenOffNotice = new QLabel(QStringLiteral("Turn on remote listening to enroll other computers. "
+                                                    "Pending registration approval is hidden until this "
+                                                    "host is listening."),
+                                     clientsPage);
         listenOffNotice->setWordWrap(true);
         pendingLabel = new QLabel(QStringLiteral("<b>Pending registrations</b>"), clientsPage);
         pendingTable = new QTableWidget(0, 3, clientsPage);
@@ -391,18 +896,15 @@ void MainWindow::showSettings() {
                 return;
             }
             fingerprint->setVisible(listening);
-            fingerprint->setText(info
-                                     ? QStringLiteral("Library fingerprint: %1\n%2")
-                                           .arg(info->fingerprint, info->fingerprintSha256)
-                                     : QStringLiteral("Could not read server identity over the local Unix socket.\n%1")
-                                           .arg(infoError));
+            fingerprint->setText(
+                info ? QStringLiteral("Library fingerprint: %1\n%2").arg(info->fingerprint, info->fingerprintSha256)
+                     : QStringLiteral("Could not read server identity over the local "
+                                      "Unix socket.\n%1")
+                           .arg(infoError));
             listenOffNotice->setVisible(!listening);
             pendingLabel->setVisible(listening);
             pendingTable->setVisible(listening);
-            listenBound->setText(listen.bound.isEmpty()
-                                     ? (listening ? QStringLiteral("Not bound yet")
-                                                  : QStringLiteral("Not listening"))
-                                     : listen.bound.join(QStringLiteral(", ")));
+            setListeningStatus(listenBound, listen.enabled, listen.bound);
         };
 
         applyListenSettings = [&]() -> bool {
@@ -431,25 +933,9 @@ void MainWindow::showSettings() {
             if (refreshClientsTables) refreshClientsTables();
             return true;
         };
-        QObject::connect(listenInterfaces, &QListWidget::itemChanged, &dialog, [&](QListWidgetItem *changed) {
-            if (changed == nullptr || listenInterfaces == nullptr) return;
-            QSignalBlocker blocker(listenInterfaces);
-            if (changed->data(Qt::UserRole).toString() == QStringLiteral("0.0.0.0")) {
-                if (changed->checkState() == Qt::Checked) {
-                    for (int row = 0; row < listenInterfaces->count(); ++row) {
-                        auto *item = listenInterfaces->item(row);
-                        if (item != nullptr && item != changed) item->setCheckState(Qt::Unchecked);
-                    }
-                }
-                return;
-            }
-            if (changed->checkState() == Qt::Checked && listenInterfaces->count() > 0) {
-                listenInterfaces->item(0)->setCheckState(Qt::Unchecked);
-            }
-        });
-        QObject::connect(applyListen, &QPushButton::clicked, &dialog, [&] {
-            static_cast<void>(applyListenSettings());
-        });
+        wireExclusiveListenHosts(listenInterfaces);
+        QObject::connect(applyListen, &QPushButton::clicked, &dialog,
+                         [&] { static_cast<void>(applyListenSettings()); });
         refreshClientsTables = [&] {
             QString error;
             const auto pending = library_.pendingRegistrations(&error);
@@ -492,15 +978,17 @@ void MainWindow::showSettings() {
                 const auto row = clientsTable->rowCount();
                 clientsTable->insertRow(row);
                 clientsTable->setItem(row, 0, new QTableWidgetItem(client.name));
-                clientsTable->setItem(row, 1, new QTableWidgetItem(
-                    client.revoked ? QStringLiteral("Revoked") : QStringLiteral("Active")));
+                clientsTable->setItem(
+                    row, 1,
+                    new QTableWidgetItem(client.revoked ? QStringLiteral("Revoked") : QStringLiteral("Active")));
                 clientsTable->setItem(row, 2, new QTableWidgetItem(client.certSha256));
                 if (!client.revoked) {
                     auto *revoke = new QPushButton(QStringLiteral("Revoke"), clientsTable);
                     clientsTable->setCellWidget(row, 3, revoke);
                     QObject::connect(revoke, &QPushButton::clicked, &dialog, [&, id = client.id, name = client.name] {
                         if (QMessageBox::question(&dialog, QStringLiteral("Revoke client"),
-                                                  QStringLiteral("Revoke %1? It will lose library access immediately.")
+                                                  QStringLiteral("Revoke %1? It will lose library access "
+                                                                 "immediately.")
                                                       .arg(name)) != QMessageBox::Yes) {
                             return;
                         }
@@ -523,6 +1011,8 @@ void MainWindow::showSettings() {
         refreshClientsTables();
     }
 
+    settingsTabs->addTab(repoScroll, QStringLiteral("Repository"));
+
     auto *aboutPage = new QWidget(settingsTabs);
     auto *aboutLayout = new QVBoxLayout(aboutPage);
     auto *hero = new QLabel(aboutPage);
@@ -539,17 +1029,18 @@ void MainWindow::showSettings() {
     nameFont.setBold(true);
     aboutName->setFont(nameFont);
     aboutName->setAlignment(Qt::AlignCenter);
-    auto *aboutVersion = new QLabel(
-        QStringLiteral("Version %1").arg(QCoreApplication::applicationVersion()), aboutPage);
+    auto *aboutVersion =
+        new QLabel(QStringLiteral("Version %1").arg(QCoreApplication::applicationVersion()), aboutPage);
     aboutVersion->setAlignment(Qt::AlignCenter);
-    auto *aboutSummary = new QLabel(
-        QStringLiteral("Convert vendor Linux packages into pacman packages you maintain yourself."),
-        aboutPage);
+    auto *aboutSummary = new QLabel(QStringLiteral("Convert vendor Linux packages into pacman "
+                                                   "packages you maintain yourself."),
+                                    aboutPage);
     aboutSummary->setWordWrap(true);
     aboutSummary->setAlignment(Qt::AlignCenter);
-    auto *aboutLink = new QLabel(
-        QStringLiteral("<a href=\"https://github.com/anderson-arlen/pacsmith\">github.com/anderson-arlen/pacsmith</a>"),
-        aboutPage);
+    auto *aboutLink = new QLabel(QStringLiteral("<a "
+                                                "href=\"https://github.com/anderson-arlen/"
+                                                "pacsmith\">github.com/anderson-arlen/pacsmith</a>"),
+                                 aboutPage);
     aboutLink->setTextFormat(Qt::RichText);
     aboutLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
     aboutLink->setOpenExternalLinks(true);
@@ -600,10 +1091,8 @@ void MainWindow::showSettings() {
         weekday->setEnabled(periodic && schedule->currentIndex() == 1);
         checkTime->setEnabled(periodic);
     };
-    QObject::connect(schedule, &QComboBox::currentIndexChanged, &dialog,
-                     [&](int) { refreshScheduleControls(); });
-    QObject::connect(backgroundEnabled, &QCheckBox::toggled, &dialog,
-                     [&](bool) { refreshScheduleControls(); });
+    QObject::connect(schedule, &QComboBox::currentIndexChanged, &dialog, [&](int) { refreshScheduleControls(); });
+    QObject::connect(backgroundEnabled, &QCheckBox::toggled, &dialog, [&](bool) { refreshScheduleControls(); });
     QObject::connect(retainedPackages, &QSpinBox::valueChanged, &dialog, [retainedReleases](const int value) {
         if (value < 0) retainedReleases->setValue(-1);
         else if (retainedReleases->value() >= 0 && retainedReleases->value() < value) {
@@ -654,8 +1143,7 @@ void MainWindow::showSettings() {
         const bool operationRunning = modelsLoading || chatGptLoginService_.isRunning();
         form->setRowVisible(apiKey, api);
         form->setRowVisible(chatGptSignIn, subscription);
-        const bool chatgptReady = chatGptSession.has_value() ||
-                                  (library && library->chatgptConfigured);
+        const bool chatgptReady = chatGptSession.has_value() || (library && library->chatgptConfigured);
         const bool apiReady = api && (!apiKey->text().isEmpty() ||
                                       (kind == AiProviderKind::OpenAi && library && library->openaiConfigured) ||
                                       (kind == AiProviderKind::Xai && library && library->xaiConfigured));
@@ -671,15 +1159,18 @@ void MainWindow::showSettings() {
         automatic->setEnabled(!operationRunning);
         provider->setEnabled(!operationRunning);
         if (kind == AiProviderKind::None) {
-            setCredentialStatus(QStringLiteral("AI is optional. Credentials are stored on the library daemon, which makes the provider calls."));
+            setCredentialStatus(QStringLiteral("AI is optional. Credentials are stored on the "
+                                               "library daemon, which makes the provider calls."));
         } else if (subscription && chatgptReady) {
             setCredentialStatus(QStringLiteral("✓ ChatGPT session is stored on the library daemon."));
         } else if (subscription) {
-            setCredentialStatus(QStringLiteral("Sign in with ChatGPT. The session is stored on the library daemon."));
+            setCredentialStatus(QStringLiteral("Sign in with ChatGPT. The session is "
+                                               "stored on the library daemon."));
         } else if (api && credentialReady) {
             setCredentialStatus(QStringLiteral("✓ Provider credential is stored on the library daemon."));
         } else {
-            setCredentialStatus(QStringLiteral("Enter an API key. It is stored on the library daemon and cannot be read back later."));
+            setCredentialStatus(QStringLiteral("Enter an API key. It is stored on the library daemon "
+                                               "and cannot be read back later."));
         }
     };
 
@@ -706,8 +1197,8 @@ void MainWindow::showSettings() {
         const bool signedIn = chatGptSession.has_value() || (library && library->chatgptConfigured);
         if (signedIn) {
             if (QMessageBox::question(&dialog, QStringLiteral("Sign out of ChatGPT"),
-                                      QStringLiteral("Remove PacSmith's saved ChatGPT session from the library daemon?")) !=
-                QMessageBox::Yes) {
+                                      QStringLiteral("Remove PacSmith's saved ChatGPT session from the "
+                                                     "library daemon?")) != QMessageBox::Yes) {
                 return;
             }
             QString error;
@@ -725,37 +1216,35 @@ void MainWindow::showSettings() {
         setCredentialStatus(QStringLiteral("Starting secure ChatGPT browser sign-in…"));
         chatGptLoginService_.start();
     });
-    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::authorizationUrlReady, &dialog,
-                     [&](const QUrl &url) {
+    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::authorizationUrlReady, &dialog, [&](const QUrl &url) {
         if (!QDesktopServices::openUrl(url)) {
-            setCredentialStatus(QStringLiteral("Open this OpenAI sign-in URL in your browser: %1")
-                                    .arg(url.toString()));
+            setCredentialStatus(QStringLiteral("Open this OpenAI sign-in URL in your browser: %1").arg(url.toString()));
         }
     });
     QObject::connect(&chatGptLoginService_, &ChatGptLoginService::progressChanged, &dialog,
                      [&](const QString &message) {
-        updateControls();
-        setCredentialStatus(message);
-    });
-    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::failed, &dialog,
-                     [&](const QString &message) {
+                         updateControls();
+                         setCredentialStatus(message);
+                     });
+    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::failed, &dialog, [&](const QString &message) {
         updateControls();
         setCredentialStatus(QStringLiteral("⚠ %1").arg(message));
     });
-    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::succeeded, &dialog,
-                     [&, this](const QString &serialized) {
-        QString error;
-        if (!library_.setCredential(QStringLiteral("chatgpt.session"), serialized, &error)) {
-            setCredentialStatus(QStringLiteral("⚠ Signed in, but the daemon could not store the session: %1").arg(error));
-            return;
-        }
-        rememberSessionCredential(QStringLiteral("chatgpt.session"), serialized);
-        chatGptSerialized = serialized;
-        chatGptSession = ChatGptCredentials::fromSerialized(serialized, &error);
-        if (library) library->chatgptConfigured = true;
-        updateControls();
-        loadModels->click();
-    });
+    QObject::connect(
+        &chatGptLoginService_, &ChatGptLoginService::succeeded, &dialog, [&, this](const QString &serialized) {
+            QString error;
+            if (!library_.setCredential(QStringLiteral("chatgpt.session"), serialized, &error)) {
+                setCredentialStatus(
+                    QStringLiteral("⚠ Signed in, but the daemon could not store the session: %1").arg(error));
+                return;
+            }
+            rememberSessionCredential(QStringLiteral("chatgpt.session"), serialized);
+            chatGptSerialized = serialized;
+            chatGptSession = ChatGptCredentials::fromSerialized(serialized, &error);
+            if (library) library->chatgptConfigured = true;
+            updateControls();
+            loadModels->click();
+        });
     auto applyModels = [&](const QStringList &models) {
         const auto desired = model->currentText().trimmed();
         model->clear();
@@ -809,7 +1298,8 @@ void MainWindow::showSettings() {
         const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
         if (kind == AiProviderKind::ChatGpt && !(chatGptSession || (library && library->chatgptConfigured))) {
             QMessageBox::warning(&dialog, QStringLiteral("ChatGPT sign-in required"),
-                                 QStringLiteral("Sign in to ChatGPT before selecting the subscription provider."));
+                                 QStringLiteral("Sign in to ChatGPT before selecting "
+                                                "the subscription provider."));
             return;
         }
         if ((kind == AiProviderKind::OpenAi || kind == AiProviderKind::Xai) && !apiKey->text().isEmpty()) {
@@ -859,14 +1349,14 @@ void MainWindow::showSettings() {
         }
         applyLibrarySettings(*saved);
 
+        if (!saveCollectedRepo(collectRepoSettings())) return;
+
         aiSettings_.updates.startAtLogin = startAtLogin->isChecked();
         aiSettings_.updates.startMinimized = startMinimized->isChecked();
         aiSettings_.updates.keepInTray = keepInTray->isChecked();
         if (!settingsStore_.save(aiSettings_, &error) ||
-            !BackgroundUpdateManager::apply(aiSettings_.updates, QCoreApplication::applicationFilePath(),
-                                            &error)) {
-            QMessageBox::critical(&dialog, QStringLiteral("Could not save this machine's session settings"),
-                                  error);
+            !BackgroundUpdateManager::apply(aiSettings_.updates, QCoreApplication::applicationFilePath(), &error)) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not save this machine's session settings"), error);
             return;
         }
         const bool runInTray = aiSettings_.updates.keepInTray && QSystemTrayIcon::isSystemTrayAvailable();

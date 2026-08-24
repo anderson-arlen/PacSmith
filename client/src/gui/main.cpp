@@ -1,5 +1,6 @@
 #include "gui/application_session.hpp"
 #include "gui/gui_instance.hpp"
+#include "gui/wheel_scroll_guard.hpp"
 #include "core/app_settings.hpp"
 #include "core/credential_store.hpp"
 
@@ -63,6 +64,8 @@ int main(int argc, char *argv[]) {
     QCoreApplication::setOrganizationName(QStringLiteral("PacSmith"));
     QGuiApplication::setDesktopFileName(QStringLiteral("pacsmith"));
     application.setWindowIcon(applicationIcon());
+    pacsmith::gui::WheelScrollGuard wheelScrollGuard(&application);
+    application.installEventFilter(&wheelScrollGuard);
 
     if (geteuid() == 0) {
         QMessageBox::critical(nullptr, QStringLiteral("PacSmith"),

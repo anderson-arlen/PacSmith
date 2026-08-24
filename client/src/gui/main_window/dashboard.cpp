@@ -254,6 +254,7 @@ void MainWindow::showProjectDashboard() {
     if (projectSidebar_ != nullptr) projectSidebar_->show();
     rightStack_->setCurrentIndex(0);
     placeUpdatesEditor();
+    placeRepositoryEditor();
     if (projectTabs_ != nullptr) projectTabs_->setCurrentIndex(0);
     if (project_) refreshCurrentProject();
 }
@@ -266,6 +267,7 @@ void MainWindow::showReleaseWorkbench(const QString &releaseId) {
     if (projectSidebar_ != nullptr) projectSidebar_->hide();
     rightStack_->setCurrentIndex(1);
     placeUpdatesEditor();
+    placeRepositoryEditor();
     configureEditorProfile();
     selectSection(EditorSection::SourceOverview);
     refreshCurrentProject();
@@ -294,6 +296,7 @@ void MainWindow::selectDashboardRelease(const QString &releaseId) {
     if (projectSidebar_ != nullptr) projectSidebar_->show();
     rightStack_->setCurrentIndex(0);
     placeUpdatesEditor();
+    placeRepositoryEditor();
     if (projectTabs_ != nullptr) {
         QWidget *historyPage = releaseTable_;
         while (historyPage != nullptr && projectTabs_->indexOf(historyPage) < 0) {
@@ -958,6 +961,7 @@ void MainWindow::refreshCurrentProject() {
     // Keep the hidden editor synchronized with the active tracking release so a
     // dashboard update check can never save a historical release's values into it.
     populateUpdates();
+    populateRepository();
 }
 
 void MainWindow::populateCurrentWorkbenchPage() {
@@ -998,6 +1002,10 @@ void MainWindow::populateCurrentWorkbenchPage() {
     case EditorSection::ConfigUpdates:
         placeUpdatesEditor();
         populateUpdates();
+        break;
+    case EditorSection::ConfigRepository:
+        placeRepositoryEditor();
+        populateRepository();
         break;
     case EditorSection::ConfigPkgbuild:
     case EditorSection::ResultPkgbuild:
@@ -1280,6 +1288,160 @@ QString MainWindow::selectedDashboardReleaseId() const {
     if (releaseTable_ == nullptr || releaseTable_->currentRow() < 0) return {};
     const auto *item = releaseTable_->item(releaseTable_->currentRow(), 0);
     return item == nullptr ? QString{} : item->data(Qt::UserRole).toString();
+}
+
+namespace {
+
+QString repoPackageText(bool present, const RepoPackageRef &ref) {
+    if (!present || ref.pkgname.isEmpty()) return QStringLiteral("None");
+    const auto version = ref.version.isEmpty()
+                             ? QStringLiteral("%1-%2").arg(ref.pkgver, ref.pkgrel)
+                             : ref.version;
+    return QStringLiteral("%1 %2 (%3)").arg(ref.pkgname, version, ref.arch);
+}
+
+QString repoTimestampText(const QString &value) {
+    if (value.isEmpty()) return QStringLiteral("—");
+    const auto parsed = QDateTime::fromString(value, Qt::ISODate);
+    if (!parsed.isValid()) return value;
+    return formatLocalDateTime(parsed);
+}
+
+QString soakStatusLabel(const QString &status) {
+    if (status == QStringLiteral("soaking")) return QStringLiteral("Soaking");
+    if (status == QStringLiteral("eligible")) return QStringLiteral("Eligible");
+    if (status == QStringLiteral("promoted")) return QStringLiteral("Promoted");
+    if (status == QStringLiteral("skipped")) return QStringLiteral("Skipped");
+    return status;
+}
+
+} // namespace
+
+void MainWindow::applyProjectRepository(const ProjectRepository &status) {
+    if (project_) project_->repository = status;
+    if (repoPublishCheck_ == nullptr) return;
+    const QSignalBlocker publishBlocker(repoPublishCheck_);
+    const QSignalBlocker overrideBlocker(repoOverrideEdit_);
+    populating_ = true;
+    repoPublishCheck_->setChecked(status.publish);
+    repoOriginalName_->setText(status.originalPackageName.isEmpty()
+                                   ? QStringLiteral("—")
+                                   : status.originalPackageName);
+    repoPrefixDefault_->setText(status.prefixDefault.isEmpty()
+                                    ? QStringLiteral("—")
+                                    : status.prefixDefault);
+    repoOverrideEdit_->setText(status.packageNameOverride);
+    repoEffectiveName_->setText(status.effectivePackageName.isEmpty()
+                                    ? QStringLiteral("—")
+                                    : status.effectivePackageName);
+    repoPublishedName_->setText(status.publishedPackageName.isEmpty()
+                                    ? QStringLiteral("Not published yet")
+                                    : status.publishedPackageName);
+    repoNameWarning_->setVisible(status.pkgnameChangeWarning || status.reserved);
+    if (status.reserved) {
+        repoNameWarning_->setText(
+            QStringLiteral("%1 is reserved by PacSmith and cannot be used for a user project.")
+                .arg(status.effectivePackageName));
+    } else if (status.pkgnameChangeWarning) {
+        repoNameWarning_->setText(
+            QStringLiteral("Changing the published package name is a migration. Machines that already installed %1 will keep that name until they are updated.")
+                .arg(status.publishedPackageName));
+    }
+    repoUnstableLabel_->setText(repoPackageText(status.hasUnstable, status.unstable));
+    repoStableLabel_->setText(repoPackageText(status.hasStable, status.stable));
+    repoSoakTable_->setRowCount(0);
+    for (const auto &soak : status.soaks) {
+        if (soak.status == QStringLiteral("promoted") || soak.status == QStringLiteral("skipped")) {
+            continue;
+        }
+        const auto row = repoSoakTable_->rowCount();
+        repoSoakTable_->insertRow(row);
+        const auto version = soak.version.isEmpty()
+                                 ? QStringLiteral("%1-%2").arg(soak.pkgver, soak.pkgrel)
+                                 : soak.version;
+        repoSoakTable_->setItem(row, 0, new QTableWidgetItem(version));
+        repoSoakTable_->setItem(row, 1, new QTableWidgetItem(soak.arch));
+        repoSoakTable_->setItem(row, 2, new QTableWidgetItem(soakStatusLabel(soak.status)));
+        repoSoakTable_->setItem(row, 3, new QTableWidgetItem(repoTimestampText(soak.startedAt)));
+        repoSoakTable_->setItem(row, 4, new QTableWidgetItem(repoTimestampText(soak.eligibleAt)));
+    }
+    repoSoakTable_->resizeColumnsToContents();
+    repoPromoteButton_->setEnabled(status.hasUnstable || !status.soaks.isEmpty());
+    repoStatusLabel_->clear();
+    populating_ = false;
+}
+
+void MainWindow::populateRepository() {
+    if (repoPublishCheck_ == nullptr) return;
+    if (!project_) {
+        applyProjectRepository({});
+        if (repoStatusLabel_ != nullptr) {
+            repoStatusLabel_->setText(QStringLiteral("Open a project to configure repository publication."));
+        }
+        if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
+        if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
+        return;
+    }
+    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(true);
+    QString error;
+    const auto status = library_.projectRepo(project_->id, &error);
+    if (!status) {
+        applyProjectRepository(project_->repository);
+        if (repoStatusLabel_ != nullptr) {
+            repoStatusLabel_->setText(error.isEmpty()
+                                          ? QStringLiteral("Could not load repository status.")
+                                          : error);
+        }
+        return;
+    }
+    applyProjectRepository(*status);
+}
+
+bool MainWindow::saveProjectRepository() {
+    if (!project_) return false;
+    const auto published = project_->repository.publishedPackageName;
+    const auto effective = repoEffectiveName_ != nullptr ? repoEffectiveName_->text().trimmed()
+                                                        : project_->repository.effectivePackageName;
+    if (!published.isEmpty() && effective != published) {
+        if (QMessageBox::warning(this, QStringLiteral("Change published package name?"),
+                                 QStringLiteral("This project is already published as %1. Changing the effective package name is a migration, not a cosmetic rename. Installed machines will keep the old name until they are updated.\n\nContinue?")
+                                     .arg(published),
+                                 QMessageBox::Yes | QMessageBox::No,
+                                 QMessageBox::No) != QMessageBox::Yes) {
+            return false;
+        }
+    }
+    QString error;
+    const auto saved = library_.saveProjectRepo(
+        project_->id, repoPublishCheck_ != nullptr && repoPublishCheck_->isChecked(),
+        repoOverrideEdit_ != nullptr ? repoOverrideEdit_->text().trimmed() : QString{},
+        project_->revision, &error);
+    if (!saved) {
+        QMessageBox::critical(this, QStringLiteral("Could not save repository settings"), error);
+        return false;
+    }
+    applyProjectRepository(*saved);
+    project_->revision++;
+    projectCache_.insert(project_->id, *project_);
+    refreshCurrentProject();
+    return true;
+}
+
+void MainWindow::promoteProjectRepository() {
+    if (!project_) return;
+    if (QMessageBox::question(this, QStringLiteral("Promote to Stable"),
+                              QStringLiteral("Promote the newest package that advances stable, bypassing remaining soak time? Stable is never downgraded.")) !=
+        QMessageBox::Yes) {
+        return;
+    }
+    QString error;
+    const auto status = library_.promoteProjectRepo(project_->id, &error);
+    if (!status) {
+        QMessageBox::critical(this, QStringLiteral("Could not promote to stable"), error);
+        return;
+    }
+    applyProjectRepository(*status);
+    refreshCurrentProject();
 }
 
 } // namespace pacsmith::gui

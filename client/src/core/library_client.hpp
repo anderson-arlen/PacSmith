@@ -86,6 +86,29 @@ struct LibrarySettings {
     void applyTo(AiSettings &settings) const;
 };
 
+struct RepoSettings {
+    qint64 revision{1};
+    bool enabled{false};
+    QStringList listenHosts{QStringLiteral("127.0.0.1")};
+    int listenPort{8080};
+    QString advertisedUrl;
+    qint64 soakSeconds{2592000};
+    QString packageNamePrefix;
+    QString trustMode{QStringLiteral("direct")};
+    bool signingInitialized{false};
+    bool certified{false};
+    QString fingerprint;
+    QString fingerprintSpaced;
+    QString rootFingerprint;
+    QString rootFingerprintSpaced;
+    qint64 keyringVersion{0};
+    QString keyringPackage;
+    QString keyringUrl;
+    QStringList bound;
+    QString certificationHelp;
+    QString certificationCommands;
+};
+
 class LibraryClient final {
 public:
     explicit LibraryClient(ConnectionConfig config = ConnectionConfig::load());
@@ -174,6 +197,26 @@ public:
                                                            QString *error = nullptr) const;
     [[nodiscard]] std::optional<LibrarySettings> librarySettings(QString *error = nullptr) const;
     [[nodiscard]] std::optional<LibrarySettings> saveLibrarySettings(const LibrarySettings &settings,
+                                                                     QString *error = nullptr) const;
+    [[nodiscard]] std::optional<RepoSettings> repoSettings(QString *error = nullptr) const;
+    [[nodiscard]] std::optional<RepoSettings> saveRepoSettings(const RepoSettings &settings,
+                                                               QString *error = nullptr) const;
+    [[nodiscard]] std::optional<QString> repoBootstrapScript(const QString &channel,
+                                                             QString *error = nullptr) const;
+    [[nodiscard]] std::optional<RepoSettings> initRepoSigning(QString *error = nullptr) const;
+    [[nodiscard]] bool downloadRepoPublicKey(const QString &destination, QString *error = nullptr) const;
+    [[nodiscard]] std::optional<RepoSettings> uploadRepoRootKey(const QString &publicKey,
+                                                                QString *error = nullptr) const;
+    [[nodiscard]] std::optional<RepoSettings> uploadRepoCertifiedKey(const QString &publicKey,
+                                                                    QString *error = nullptr) const;
+    [[nodiscard]] std::optional<ProjectRepository> projectRepo(const QString &projectId,
+                                                              QString *error = nullptr) const;
+    [[nodiscard]] std::optional<ProjectRepository> saveProjectRepo(const QString &projectId,
+                                                                  bool publish,
+                                                                  const QString &packageNameOverride,
+                                                                  qint64 revision,
+                                                                  QString *error = nullptr) const;
+    [[nodiscard]] std::optional<ProjectRepository> promoteProjectRepo(const QString &projectId,
                                                                      QString *error = nullptr) const;
     [[nodiscard]] QList<RemoteClient> clients(QString *error = nullptr) const;
     [[nodiscard]] QList<Registration> pendingRegistrations(QString *error = nullptr) const;

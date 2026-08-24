@@ -64,6 +64,9 @@ type Release struct {
 	ProjectID              string
 	DisplayName            string
 	ArchPackageName        string
+	CompatPackageName      string
+	Provides               []string
+	Conflicts              []string
 	SourceType             SourceType
 	Acquisition            Acquisition
 	InstallMapping         InstallMapping
@@ -88,6 +91,8 @@ type DebianMetadata struct {
 	Architecture string
 	Description  string
 	Homepage     string
+	Provides     string
+	Conflicts    string
 }
 
 type Dependency struct {

@@ -449,6 +449,55 @@ struct PackageRelease {
     [[nodiscard]] static PackageRelease fromJson(const QJsonObject &object);
 };
 
+struct RepoPackageRef {
+    QString pkgname;
+    QString arch;
+    qint64 epoch{0};
+    QString pkgver;
+    QString pkgrel;
+    QString version;
+    QString filename;
+    QString artifactId;
+    QString signatureArtifactId;
+    QString releaseId;
+
+    [[nodiscard]] static RepoPackageRef fromJson(const QJsonObject &object);
+};
+
+struct RepoSoakStatus {
+    QString pkgname;
+    QString arch;
+    QString pkgver;
+    QString pkgrel;
+    QString version;
+    QString status;
+    QString startedAt;
+    QString eligibleAt;
+    QString artifactId;
+    QString releaseId;
+
+    [[nodiscard]] static RepoSoakStatus fromJson(const QJsonObject &object);
+};
+
+struct ProjectRepository {
+    bool publish{false};
+    QString originalPackageName;
+    QString archPackageName;
+    QString prefixDefault;
+    QString packageNameOverride;
+    QString effectivePackageName;
+    QString publishedPackageName;
+    bool pkgnameChangeWarning{false};
+    bool reserved{false};
+    bool hasUnstable{false};
+    RepoPackageRef unstable;
+    bool hasStable{false};
+    RepoPackageRef stable;
+    QList<RepoSoakStatus> soaks;
+
+    [[nodiscard]] static ProjectRepository fromJson(const QJsonObject &object);
+};
+
 // An application-level project. Installed state is reconciled from pacman and is
 // never inferred from the newest release.
 struct Project {
@@ -469,6 +518,7 @@ struct Project {
     QList<HistoryEntry> history;
     QDateTime createdAt;
     QDateTime modifiedAt;
+    ProjectRepository repository;
 
     [[nodiscard]] PackageRelease *release(const QString &releaseId);
     [[nodiscard]] const PackageRelease *release(const QString &releaseId) const;

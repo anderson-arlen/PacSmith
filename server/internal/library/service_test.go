@@ -11,6 +11,8 @@ import (
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
+	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 )
@@ -200,5 +202,128 @@ func TestUnconfiguredIconArtifactIsNotExposed(t *testing.T) {
 		if item.Role == "icon" {
 			t.Fatal("reanalyze left a stale icon artifact attached")
 		}
+	}
+}
+
+func TestPrepareBuildIdentityIncrementsPkgrel(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{
+		DB:        db,
+		Artifacts: &artifact.Registry{DB: db, Store: store},
+		WorkDir:   filepath.Join(root, "work"),
+	}
+	now := nowUTC()
+	project, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID:              "proj-rel",
+		DisplayName:     "Rel",
+		ArchPackageName: "rel-bin",
+		SourceIdentity:  "local:rel",
+		HistoryJson:     "[]",
+		CreatedAt:       now,
+		ModifiedAt:      now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := svc.Artifacts.Put(ctx, "rel-bin-1.5.0-1-x86_64.pkg.tar.zst", "arch_package", bytes.NewReader([]byte("pkg")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID:               "rel-1",
+		ProjectID:        project.ID,
+		State:            "ready",
+		SourceType:       "deb",
+		VendorVersion:    "1.5.0",
+		OriginalFilename: "rel.deb",
+		SourceSha256:     strings.Repeat("b", 64),
+		ArchPackageName:  "rel-bin",
+		ArchPkgrel:       1,
+		BodyJson:         `{"debian":{"package":"rel","version":"1.5.0"},"pkgbuildManuallyModified":true}`,
+		CreatedAt:        now,
+		ModifiedAt:       now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Queries.InsertReleaseArtifact(ctx, sqlcdb.InsertReleaseArtifactParams{
+		ReleaseID:  release.ID,
+		ArtifactID: pkg.ID,
+		Role:       "built_package",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, vars, _, err := svc.prepareBuildIdentity(ctx, release, "pkgbuild", "vars")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ArchPkgrel != 2 {
+		t.Fatalf("pkgrel %d, want 2", updated.ArchPkgrel)
+	}
+	if !strings.Contains(vars, "_PACSMITH_PKGREL='2'") {
+		t.Fatalf("vars did not record pkgrel 2:\n%s", vars)
+	}
+}
+
+func TestCleanupRespectsRepoRoots(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStore, err := secret.NewFileStore(filepath.Join(root, "secrets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &artifact.Registry{DB: db, Store: store}
+	repoSvc := repo.New(db, registry, secret.NewLockedStore(secret.BackendFile, fileStore),
+		filepath.Join(root, "work"), filepath.Join(root, "gnupg"))
+	svc := &Service{DB: db, Artifacts: registry, WorkDir: filepath.Join(root, "releases"), Repo: repoSvc}
+	kept, err := registry.Put(ctx, "kept.bin", "unknown", bytes.NewReader([]byte("kept-root")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan, err := registry.Put(ctx, "orphan.bin", "unknown", bytes.NewReader([]byte("orphan")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := nowUTC()
+	if err := db.Queries.UpsertChannelEntry(ctx, sqlcdb.UpsertChannelEntryParams{
+		Channel:     "unstable",
+		Arch:        "x86_64",
+		Pkgname:     "demo-bin",
+		Epoch:       0,
+		Pkgver:      "1.0.0",
+		Pkgrel:      "1",
+		ArtifactID:  kept.ID,
+		Filename:    "demo-bin-1.0.0-1-x86_64.pkg.tar.zst",
+		PublishedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Get(ctx, kept.ID); err != nil {
+		t.Fatal("repo-referenced artifact was deleted")
+	}
+	if _, err := registry.Get(ctx, orphan.ID); err == nil {
+		t.Fatal("unreferenced artifact survived cleanup")
 	}
 }

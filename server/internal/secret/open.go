@@ -75,5 +75,5 @@ func openBackend(secretsDir, backend string) (Store, error) {
 }
 
 func IsInternalName(name string) bool {
-	return strings.HasPrefix(name, "pki.")
+	return strings.HasPrefix(name, "pki.") || strings.HasPrefix(name, "repo.")
 }

@@ -69,6 +69,26 @@ void appendAssignment(QString &result, const QString &name, const QString &value
     result += QLatin1Char('\n');
 }
 
+void appendArray(QString &result, const QString &name, const QStringList &values) {
+    result += name;
+    result += QStringLiteral("=(");
+    for (int i = 0; i < values.size(); ++i) {
+        if (i > 0) result += QLatin1Char(' ');
+        result += PkgbuildGenerator::shellQuote(values.at(i));
+    }
+    result += QStringLiteral(")\n");
+}
+
+QStringList splitDebField(const QString &value) {
+    QStringList out;
+    const auto parts = value.split(QRegularExpression(QStringLiteral("[,\\n]")), Qt::SkipEmptyParts);
+    for (const auto &part : parts) {
+        const auto trimmed = part.trimmed();
+        if (!trimmed.isEmpty() && !out.contains(trimmed)) out.append(trimmed);
+    }
+    return out;
+}
+
 QString xdataValue(const QString &value) {
     return QString::fromLatin1(QUrl::toPercentEncoding(value));
 }
@@ -280,6 +300,9 @@ QString PkgbuildGenerator::identityVariables(const PackageRelease &project) {
     result += QStringLiteral(
         "# PacSmith-owned release identity. Do not edit; rewritten for each vendor artifact.\n");
     appendAssignment(result, QStringLiteral("_PACSMITH_PKGNAME"), project.archPackageName);
+    appendAssignment(result, QStringLiteral("_PACSMITH_COMPAT_PKGNAME"), QString{});
+    appendArray(result, QStringLiteral("_PACSMITH_PROVIDES"), splitDebField(project.debian.provides));
+    appendArray(result, QStringLiteral("_PACSMITH_CONFLICTS"), splitDebField(project.debian.conflicts));
     appendAssignment(result, QStringLiteral("_PACSMITH_PKGVER"), version);
     appendAssignment(result, QStringLiteral("_PACSMITH_PKGREL"), pkgrelValue(project));
     appendAssignment(result, QStringLiteral("_PACSMITH_EPOCH"), epoch);
@@ -335,6 +358,12 @@ QString PkgbuildGenerator::generate(const PackageRelease &project) {
     result += QStringLiteral("url=\"${_PACSMITH_URL}\"\n");
     result += QStringLiteral("license=('custom:vendor') # Verify the vendor's license terms.\n");
     result += QStringLiteral("depends=(%1)\n").arg(dependencies.join(QLatin1Char(' ')));
+    result += QStringLiteral("provides=(\"${_PACSMITH_PROVIDES[@]}\")\n");
+    result += QStringLiteral("conflicts=(\"${_PACSMITH_CONFLICTS[@]}\")\n");
+    result += QStringLiteral("if [[ -n ${_PACSMITH_COMPAT_PKGNAME} ]]; then\n");
+    result += QStringLiteral("  provides+=(\"${_PACSMITH_COMPAT_PKGNAME}=${pkgver}\")\n");
+    result += QStringLiteral("  conflicts+=(\"${_PACSMITH_COMPAT_PKGNAME}\")\n");
+    result += QStringLiteral("fi\n");
     if (project.sourceType == SourcePackageType::AppImage) {
         result += QStringLiteral("makedepends=('squashfs-tools')\n");
     }

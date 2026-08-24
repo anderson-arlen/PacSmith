@@ -1121,6 +1121,62 @@ Project Project::fromJson(const QJsonObject &object) {
     result.createdAt = dateFromString(object.value(QStringLiteral("createdAt")));
     result.modifiedAt = dateFromString(object.value(QStringLiteral("modifiedAt")));
     result.releases = valueListFromJson<PackageRelease>(object.value(QStringLiteral("releases")));
+    result.repository = ProjectRepository::fromJson(object.value(QStringLiteral("repository")).toObject());
+    return result;
+}
+
+RepoPackageRef RepoPackageRef::fromJson(const QJsonObject &object) {
+    RepoPackageRef result;
+    result.pkgname = object.value(QStringLiteral("pkgname")).toString();
+    result.arch = object.value(QStringLiteral("arch")).toString();
+    result.epoch = object.value(QStringLiteral("epoch")).toInteger();
+    result.pkgver = object.value(QStringLiteral("pkgver")).toString();
+    result.pkgrel = object.value(QStringLiteral("pkgrel")).toString();
+    result.version = object.value(QStringLiteral("version")).toString();
+    result.filename = object.value(QStringLiteral("filename")).toString();
+    result.artifactId = object.value(QStringLiteral("artifact_id")).toString();
+    result.signatureArtifactId = object.value(QStringLiteral("signature_artifact_id")).toString();
+    result.releaseId = object.value(QStringLiteral("release_id")).toString();
+    return result;
+}
+
+RepoSoakStatus RepoSoakStatus::fromJson(const QJsonObject &object) {
+    RepoSoakStatus result;
+    result.pkgname = object.value(QStringLiteral("pkgname")).toString();
+    result.arch = object.value(QStringLiteral("arch")).toString();
+    result.pkgver = object.value(QStringLiteral("pkgver")).toString();
+    result.pkgrel = object.value(QStringLiteral("pkgrel")).toString();
+    result.version = object.value(QStringLiteral("version")).toString();
+    result.status = object.value(QStringLiteral("status")).toString();
+    result.startedAt = object.value(QStringLiteral("soak_started_at")).toString();
+    result.eligibleAt = object.value(QStringLiteral("eligible_at")).toString();
+    result.artifactId = object.value(QStringLiteral("artifact_id")).toString();
+    result.releaseId = object.value(QStringLiteral("release_id")).toString();
+    return result;
+}
+
+ProjectRepository ProjectRepository::fromJson(const QJsonObject &object) {
+    ProjectRepository result;
+    result.publish = object.value(QStringLiteral("publish")).toBool();
+    result.originalPackageName = object.value(QStringLiteral("original_package_name")).toString();
+    result.archPackageName = object.value(QStringLiteral("arch_package_name")).toString();
+    result.prefixDefault = object.value(QStringLiteral("prefix_default")).toString();
+    result.packageNameOverride = object.value(QStringLiteral("package_name_override")).toString();
+    result.effectivePackageName = object.value(QStringLiteral("effective_package_name")).toString();
+    result.publishedPackageName = object.value(QStringLiteral("published_package_name")).toString();
+    result.pkgnameChangeWarning = object.value(QStringLiteral("pkgname_change_warning")).toBool();
+    result.reserved = object.value(QStringLiteral("reserved")).toBool();
+    const auto unstable = object.value(QStringLiteral("unstable"));
+    if (unstable.isObject()) {
+        result.hasUnstable = true;
+        result.unstable = RepoPackageRef::fromJson(unstable.toObject());
+    }
+    const auto stable = object.value(QStringLiteral("stable"));
+    if (stable.isObject()) {
+        result.hasStable = true;
+        result.stable = RepoPackageRef::fromJson(stable.toObject());
+    }
+    result.soaks = valueListFromJson<RepoSoakStatus>(object.value(QStringLiteral("soaks")));
     return result;
 }
 

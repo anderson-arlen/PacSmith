@@ -38,7 +38,6 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <termios.h>
 #include <unistd.h>
 
 namespace {
@@ -142,25 +141,6 @@ QString scriptFriendly(const QString &value) {
     result.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
     result.replace(QLatin1Char('\t'), QStringLiteral("\\t"));
     return result;
-}
-
-QString readPassword(QTextStream &errorStream, const QString &prompt) {
-    errorStream << prompt << Qt::flush;
-    termios previous{};
-    const bool terminal = ::isatty(STDIN_FILENO) != 0 && ::tcgetattr(STDIN_FILENO, &previous) == 0;
-    if (terminal) {
-        auto hidden = previous;
-        hidden.c_lflag &= static_cast<tcflag_t>(~ECHO);
-        static_cast<void>(::tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden));
-    }
-    QTextStream input(stdin);
-    input.setEncoding(QStringConverter::Utf8);
-    auto value = input.readLine();
-    if (terminal) {
-        static_cast<void>(::tcsetattr(STDIN_FILENO, TCSAFLUSH, &previous));
-        errorStream << '\n';
-    }
-    return value;
 }
 
 bool askYesNo(QTextStream &errorStream, const QString &prompt) {

@@ -382,6 +382,8 @@ func recipeFromDocument(rel Release) recipe.Release {
 			Architecture: stringValue(debian, "architecture"),
 			Description:  stringValue(debian, "description"),
 			Homepage:     stringValue(debian, "homepage"),
+			Provides:     stringValue(debian, "provides"),
+			Conflicts:    stringValue(debian, "conflicts"),
 		},
 		Acquisition: recipe.Acquisition{
 			Kind:              recipe.AcquisitionKind(stringValue(acquisition, "kind")),

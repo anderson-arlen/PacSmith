@@ -122,14 +122,21 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     dashboardUpdatesHost_ = emptyPageHost(dashboard);
     updatesEditor_ = createUpdatesPage();
     dashboardUpdatesHost_->layout()->addWidget(updatesEditor_);
+    dashboardRepositoryHost_ = emptyPageHost(dashboard);
+    repositoryEditor_ = createRepositoryPage();
+    dashboardRepositoryHost_->layout()->addWidget(repositoryEditor_);
     projectTabs_->addTab(createProjectInfoPage(), QStringLiteral("Project Info"));
     projectTabs_->addTab(createOverviewPage(), QStringLiteral("Versions"));
     projectTabs_->addTab(dashboardUpdatesHost_, QStringLiteral("Update Monitoring"));
+    projectTabs_->addTab(dashboardRepositoryHost_, QStringLiteral("Repository"));
     connect(projectTabs_, &QTabWidget::currentChanged, this, [this] {
         if (rightStack_ == nullptr || rightStack_->currentIndex() != 0) return;
         if (projectTabs_->currentWidget() == dashboardUpdatesHost_) {
             placeUpdatesEditor();
             if (project_) populateUpdates();
+        } else if (projectTabs_->currentWidget() == dashboardRepositoryHost_) {
+            placeRepositoryEditor();
+            if (project_) populateRepository();
         }
     });
     dashboardLayout->addLayout(dashboardHeader);
@@ -257,6 +264,9 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         configUpdatesHost_ = emptyPageHost(workbench);
         addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigUpdates,
                          QStringLiteral("Updates"), configUpdatesHost_);
+        configRepositoryHost_ = emptyPageHost(workbench);
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigRepository,
+                         QStringLiteral("Repository"), configRepositoryHost_);
         addWorkbenchPage(2, resultNav_, resultStack_, EditorSection::ResultInstallPlan,
                          QStringLiteral("Install plan"), createInstallPlanPage());
         addWorkbenchPage(2, resultNav_, resultStack_, EditorSection::ResultPkgbuild,
@@ -956,6 +966,15 @@ void MainWindow::placeUpdatesEditor() {
     if (auto *layout = host->layout()) layout->addWidget(updatesEditor_);
 }
 
+void MainWindow::placeRepositoryEditor() {
+    if (repositoryEditor_ == nullptr) return;
+    QWidget *host = (rightStack_ != nullptr && rightStack_->currentIndex() == 1)
+                        ? configRepositoryHost_
+                        : dashboardRepositoryHost_;
+    if (host == nullptr || repositoryEditor_->parentWidget() == host) return;
+    if (auto *layout = host->layout()) layout->addWidget(repositoryEditor_);
+}
+
 void MainWindow::syncUpdateCheckButtons() {
     const bool busy = aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
                       githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
@@ -1029,6 +1048,7 @@ void MainWindow::configureEditorProfile() {
     setSectionVisible(EditorSection::ConfigDesktopEntries, !custom);
     setSectionVisible(EditorSection::ConfigIcon, !custom);
     setSectionVisible(EditorSection::ConfigUpdates, true);
+    setSectionVisible(EditorSection::ConfigRepository, true);
     setSectionVisible(EditorSection::ResultInstallPlan, true);
     setSectionVisible(EditorSection::ResultPkgbuild, true);
     setSectionVisible(EditorSection::ResultBuild, true);

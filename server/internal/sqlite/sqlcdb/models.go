@@ -73,17 +73,20 @@ type LibrarySetting struct {
 }
 
 type Project struct {
-	ID              string         `json:"id"`
-	Revision        int64          `json:"revision"`
-	DisplayName     string         `json:"display_name"`
-	ArchPackageName string         `json:"arch_package_name"`
-	VendorName      string         `json:"vendor_name"`
-	SourceIdentity  string         `json:"source_identity"`
-	IconArtifactID  sql.NullString `json:"icon_artifact_id"`
-	IconSha256      string         `json:"icon_sha256"`
-	HistoryJson     string         `json:"history_json"`
-	CreatedAt       string         `json:"created_at"`
-	ModifiedAt      string         `json:"modified_at"`
+	ID                   string         `json:"id"`
+	Revision             int64          `json:"revision"`
+	DisplayName          string         `json:"display_name"`
+	ArchPackageName      string         `json:"arch_package_name"`
+	VendorName           string         `json:"vendor_name"`
+	SourceIdentity       string         `json:"source_identity"`
+	IconArtifactID       sql.NullString `json:"icon_artifact_id"`
+	IconSha256           string         `json:"icon_sha256"`
+	HistoryJson          string         `json:"history_json"`
+	CreatedAt            string         `json:"created_at"`
+	ModifiedAt           string         `json:"modified_at"`
+	RepoPublish          int64          `json:"repo_publish"`
+	RepoPkgnameOverride  string         `json:"repo_pkgname_override"`
+	RepoPublishedPkgname string         `json:"repo_published_pkgname"`
 }
 
 type Registration struct {
@@ -119,6 +122,79 @@ type ReleaseArtifact struct {
 	ReleaseID  string `json:"release_id"`
 	ArtifactID string `json:"artifact_id"`
 	Role       string `json:"role"`
+}
+
+type RepoChannelEntry struct {
+	Channel       string         `json:"channel"`
+	Arch          string         `json:"arch"`
+	Pkgname       string         `json:"pkgname"`
+	ProjectID     sql.NullString `json:"project_id"`
+	ReleaseID     sql.NullString `json:"release_id"`
+	Epoch         int64          `json:"epoch"`
+	Pkgver        string         `json:"pkgver"`
+	Pkgrel        string         `json:"pkgrel"`
+	ArtifactID    string         `json:"artifact_id"`
+	SigArtifactID sql.NullString `json:"sig_artifact_id"`
+	Filename      string         `json:"filename"`
+	PublishedAt   string         `json:"published_at"`
+}
+
+type RepoDatabase struct {
+	Channel            string         `json:"channel"`
+	Arch               string         `json:"arch"`
+	DbArtifactID       string         `json:"db_artifact_id"`
+	DbSigArtifactID    sql.NullString `json:"db_sig_artifact_id"`
+	FilesArtifactID    sql.NullString `json:"files_artifact_id"`
+	FilesSigArtifactID sql.NullString `json:"files_sig_artifact_id"`
+	GeneratedAt        string         `json:"generated_at"`
+}
+
+type RepoPackage struct {
+	Pkgname         string         `json:"pkgname"`
+	ProjectID       sql.NullString `json:"project_id"`
+	OriginalPkgname string         `json:"original_pkgname"`
+	Internal        int64          `json:"internal"`
+	CreatedAt       string         `json:"created_at"`
+}
+
+type RepoSetting struct {
+	ID                          int64          `json:"id"`
+	Revision                    int64          `json:"revision"`
+	Enabled                     int64          `json:"enabled"`
+	ListenHosts                 string         `json:"listen_hosts"`
+	ListenPort                  int64          `json:"listen_port"`
+	AdvertisedUrl               string         `json:"advertised_url"`
+	SoakSeconds                 int64          `json:"soak_seconds"`
+	PackageNamePrefix           string         `json:"package_name_prefix"`
+	TrustMode                   string         `json:"trust_mode"`
+	SigningFingerprint          string         `json:"signing_fingerprint"`
+	SigningInitialized          int64          `json:"signing_initialized"`
+	SigningPubkeyArtifactID     sql.NullString `json:"signing_pubkey_artifact_id"`
+	RootPubkeyArtifactID        sql.NullString `json:"root_pubkey_artifact_id"`
+	RootFingerprint             string         `json:"root_fingerprint"`
+	CertifiedPubkeyArtifactID   sql.NullString `json:"certified_pubkey_artifact_id"`
+	KeyringGpgArtifactID        sql.NullString `json:"keyring_gpg_artifact_id"`
+	KeyringTrustedArtifactID    sql.NullString `json:"keyring_trusted_artifact_id"`
+	KeyringRevokedArtifactID    sql.NullString `json:"keyring_revoked_artifact_id"`
+	KeyringPackageArtifactID    sql.NullString `json:"keyring_package_artifact_id"`
+	KeyringPackageSigArtifactID sql.NullString `json:"keyring_package_sig_artifact_id"`
+	KeyringVersion              int64          `json:"keyring_version"`
+	ModifiedAt                  string         `json:"modified_at"`
+}
+
+type RepoSoak struct {
+	Pkgname       string         `json:"pkgname"`
+	Arch          string         `json:"arch"`
+	Pkgver        string         `json:"pkgver"`
+	ProjectID     sql.NullString `json:"project_id"`
+	ReleaseID     sql.NullString `json:"release_id"`
+	Epoch         int64          `json:"epoch"`
+	Pkgrel        string         `json:"pkgrel"`
+	ArtifactID    string         `json:"artifact_id"`
+	SigArtifactID sql.NullString `json:"sig_artifact_id"`
+	SoakStartedAt string         `json:"soak_started_at"`
+	EligibleAt    string         `json:"eligible_at"`
+	Status        string         `json:"status"`
 }
 
 type ServerState struct {

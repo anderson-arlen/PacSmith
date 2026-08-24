@@ -15,6 +15,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
 	"github.com/anderson-arlen/pacsmith/server/internal/listen"
 	"github.com/anderson-arlen/pacsmith/server/internal/pki"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 	"github.com/anderson-arlen/pacsmith/server/internal/version"
@@ -37,6 +38,9 @@ type Config struct {
 	Principal   auth.Principal
 	Listen      *listen.State
 	ApplyListen func(listen.Config) error
+	Repo        *repo.Service
+	ApplyRepo   func(listen.Config) error
+	RepoBound   func() []string
 }
 
 type Server struct {
@@ -86,6 +90,17 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("PATCH /api/v1/server", server.patchServer)
 	mux.HandleFunc("GET /api/v1/settings", server.getSettings)
 	mux.HandleFunc("PATCH /api/v1/settings", server.patchSettings)
+	mux.HandleFunc("GET /api/v1/repo", server.getRepo)
+	mux.HandleFunc("PATCH /api/v1/repo", server.patchRepo)
+	mux.HandleFunc("POST /api/v1/repo/signing/init", server.initRepoSigning)
+	mux.HandleFunc("GET /api/v1/repo/signing/public-key", server.getRepoPublicKey)
+	mux.HandleFunc("POST /api/v1/repo/signing/root", server.uploadRepoRoot)
+	mux.HandleFunc("POST /api/v1/repo/signing/certified", server.uploadRepoCertified)
+	mux.HandleFunc("GET /api/v1/repo/bootstrap", server.getRepoBootstrap)
+	mux.HandleFunc("GET /api/v1/projects/{id}/repo", server.getProjectRepo)
+	mux.HandleFunc("PATCH /api/v1/projects/{id}/repo", server.patchProjectRepo)
+	mux.HandleFunc("POST /api/v1/projects/{id}/repo/promote", server.promoteProjectRepo)
+	mux.HandleFunc("POST /api/v1/cleanup", server.runCleanup)
 	return server.middleware(mux)
 }
 
@@ -218,11 +233,11 @@ func writeRequestError(w http.ResponseWriter, err error) {
 	}
 	message := err.Error()
 	switch {
-	case errors.Is(err, artifact.ErrNotFound), errors.Is(err, library.ErrNotFound), errors.Is(err, jobs.ErrNotFound), errors.Is(err, secret.ErrNotFound):
+	case errors.Is(err, artifact.ErrNotFound), errors.Is(err, library.ErrNotFound), errors.Is(err, jobs.ErrNotFound), errors.Is(err, secret.ErrNotFound), errors.Is(err, repo.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", message)
-	case errors.Is(err, library.ErrConflict):
+	case errors.Is(err, library.ErrConflict), errors.Is(err, repo.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", message)
-	case errors.Is(err, library.ErrInvalid), errors.Is(err, secret.ErrInvalidName), errors.Is(err, secret.ErrReadOnly):
+	case errors.Is(err, library.ErrInvalid), errors.Is(err, secret.ErrInvalidName), errors.Is(err, secret.ErrReadOnly), errors.Is(err, repo.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", message)
 	case errors.Is(err, secret.ErrUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "unavailable", message)

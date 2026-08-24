@@ -7,7 +7,17 @@ package sqlcdb
 
 import (
 	"context"
+	"database/sql"
 )
+
+const deleteArtifact = `-- name: DeleteArtifact :exec
+DELETE FROM artifacts WHERE id = ?
+`
+
+func (q *Queries) DeleteArtifact(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deleteArtifact, id)
+	return err
+}
 
 const getArtifact = `-- name: GetArtifact :one
 SELECT id, sha256, size_bytes, original_filename, kind, created_at
@@ -84,4 +94,120 @@ func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) 
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listAllReleaseArtifactIDs = `-- name: ListAllReleaseArtifactIDs :many
+SELECT artifact_id FROM release_artifacts
+`
+
+func (q *Queries) ListAllReleaseArtifactIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listAllReleaseArtifactIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var artifact_id string
+		if err := rows.Scan(&artifact_id); err != nil {
+			return nil, err
+		}
+		items = append(items, artifact_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listArtifacts = `-- name: ListArtifacts :many
+SELECT id, sha256, size_bytes, original_filename, kind, created_at
+FROM artifacts
+`
+
+func (q *Queries) ListArtifacts(ctx context.Context) ([]Artifact, error) {
+	rows, err := q.db.QueryContext(ctx, listArtifacts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artifact
+	for rows.Next() {
+		var i Artifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sha256,
+			&i.SizeBytes,
+			&i.OriginalFilename,
+			&i.Kind,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectIconArtifactIDs = `-- name: ListProjectIconArtifactIDs :many
+SELECT icon_artifact_id FROM projects WHERE icon_artifact_id IS NOT NULL
+`
+
+func (q *Queries) ListProjectIconArtifactIDs(ctx context.Context) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectIconArtifactIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var icon_artifact_id sql.NullString
+		if err := rows.Scan(&icon_artifact_id); err != nil {
+			return nil, err
+		}
+		items = append(items, icon_artifact_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSourceArtifactIDs = `-- name: ListSourceArtifactIDs :many
+SELECT source_artifact_id FROM releases WHERE source_artifact_id IS NOT NULL
+`
+
+func (q *Queries) ListSourceArtifactIDs(ctx context.Context) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, listSourceArtifactIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var source_artifact_id sql.NullString
+		if err := rows.Scan(&source_artifact_id); err != nil {
+			return nil, err
+		}
+		items = append(items, source_artifact_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

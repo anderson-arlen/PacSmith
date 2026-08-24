@@ -82,6 +82,7 @@ private:
         ConfigDesktopEntries,
         ConfigIcon,
         ConfigUpdates,
+        ConfigRepository,
         ResultInstallPlan,
         ResultPkgbuild,
         ResultBuild
@@ -112,6 +113,7 @@ private:
     QWidget *createPkgbuildPage();
     QWidget *createResultPkgbuildPage();
     QWidget *createUpdatesPage();
+    QWidget *createRepositoryPage();
     QWidget *createBuildPage();
     QWidget *createHistoryPage();
     QWidget *createStageHost(QListWidget **nav, QStackedWidget **stack,
@@ -155,6 +157,10 @@ private:
     void updateDashboardActions();
     void updateProjectInfoActions();
     void placeUpdatesEditor();
+    void placeRepositoryEditor();
+    bool saveProjectRepository();
+    void promoteProjectRepository();
+    void applyProjectRepository(const ProjectRepository &status);
     void handleProjectPrimaryAction();
     void handleProjectInfoAction();
     void editPackageConfiguration();
@@ -215,6 +221,7 @@ private:
     void loadSelectedPayloadPreview(const QString &path);
     void populatePkgbuild();
     void populateUpdates();
+    void populateRepository();
     void populateBuild();
     void populateHistory();
     void configureEditorProfile();
@@ -369,6 +376,9 @@ private:
     QWidget *dashboardUpdatesHost_{nullptr};
     QWidget *configUpdatesHost_{nullptr};
     QWidget *updatesEditor_{nullptr};
+    QWidget *dashboardRepositoryHost_{nullptr};
+    QWidget *configRepositoryHost_{nullptr};
+    QWidget *repositoryEditor_{nullptr};
     QLabel *workbenchTitle_{nullptr};
     QLabel *workbenchSubtitle_{nullptr};
     QLabel *sourceTypeBadge_{nullptr};
@@ -494,6 +504,19 @@ private:
     QLabel *updateCheckStatus_{nullptr};
     QPushButton *updateSaveButton_{nullptr};
     QPushButton *updateCheckButton_{nullptr};
+    QCheckBox *repoPublishCheck_{nullptr};
+    QLabel *repoOriginalName_{nullptr};
+    QLabel *repoPrefixDefault_{nullptr};
+    QLineEdit *repoOverrideEdit_{nullptr};
+    QLabel *repoEffectiveName_{nullptr};
+    QLabel *repoPublishedName_{nullptr};
+    QLabel *repoNameWarning_{nullptr};
+    QLabel *repoUnstableLabel_{nullptr};
+    QLabel *repoStableLabel_{nullptr};
+    QTableWidget *repoSoakTable_{nullptr};
+    QPushButton *repoSaveButton_{nullptr};
+    QPushButton *repoPromoteButton_{nullptr};
+    QLabel *repoStatusLabel_{nullptr};
     QLabel *buildChecklist_{nullptr};
     QLabel *builtPackage_{nullptr};
     QPushButton *buildButton_{nullptr};

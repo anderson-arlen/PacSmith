@@ -400,3 +400,33 @@ func TestValidateLifecycle(t *testing.T) {
 		t.Fatal("syntax-invalid lifecycle passed")
 	}
 }
+
+func TestGenerateCompatProvides(t *testing.T) {
+	rel := Release{
+		ArchPackageName:        "acme-slack",
+		CompatPackageName:      "slack-desktop",
+		Provides:               []string{"virtual-slack"},
+		Conflicts:              []string{"old-slack"},
+		OriginalSourceFilename: "slack.deb",
+		SourceSHA256:           strings.Repeat("b", 64),
+		Debian:                 DebianMetadata{Version: "1.0", Architecture: "amd64"},
+	}
+	pkgbuild := Generate(rel)
+	vars := IdentityVariables(rel)
+	for _, snippet := range []string{
+		`provides=("${_PACSMITH_PROVIDES[@]}")`,
+		`conflicts=("${_PACSMITH_CONFLICTS[@]}")`,
+		`provides+=("${_PACSMITH_COMPAT_PKGNAME}=${pkgver}")`,
+		`conflicts+=("${_PACSMITH_COMPAT_PKGNAME}")`,
+	} {
+		if !strings.Contains(pkgbuild, snippet) {
+			t.Fatalf("PKGBUILD missing %q\n%s", snippet, pkgbuild)
+		}
+	}
+	if !strings.Contains(vars, "_PACSMITH_COMPAT_PKGNAME='slack-desktop'") {
+		t.Fatalf("vars missing compat name\n%s", vars)
+	}
+	if !strings.Contains(vars, "_PACSMITH_PROVIDES=('virtual-slack')") {
+		t.Fatalf("vars missing explicit provides\n%s", vars)
+	}
+}

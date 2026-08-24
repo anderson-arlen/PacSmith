@@ -9,7 +9,7 @@
 
 PacSmith lets you install software on Arch Linux directly from the developer.
 
-It takes the packages the developer actually publishes — Debian `.deb` files, RPMs, AppImages, archives, and related artifacts — and converts them into ordinary pacman packages that you can install, update, and remove like anything else on the system.
+It takes the packages the developer actually publishes — Debian `.deb` files, RPMs, AppImages, archives, and related artifacts — and converts them into ordinary pacman packages that you can install, update, and remove like anything else on the system. A PacSmith library can also publish those builds through its own signed pacman repository for other Arch machines.
 
 It is not an AUR helper. It does not download community PKGBUILDs. You import the developer's own packages, review the generated recipe, and become the package maintainer. The point is a shorter trust chain: developer → you, with no extra packager in the middle.
 
@@ -69,7 +69,8 @@ From there the workbench walks you through ordinary Arch packaging:
 2. Map dependencies, commands, desktop files, and anything suspicious — or let the [AI helper](#the-ai-helper-is-what-makes-this-practical) propose those mappings.
 3. Build with `makepkg` as your normal user.
 4. Install with a narrowly scoped `pkexec pacman -U`.
-5. Uninstall or roll back later through pacman, because the result is a real package, not a pile of files in `/opt` that you will forget about.
+5. Optionally publish the signed build through your library's pacman channels.
+6. Uninstall or roll back later through pacman, because the result is a real package, not a pile of files in `/opt` that you will forget about.
 
 The last step is the point of using pacman at all. Third-party Linux software is often distributed as an AppImage, a tarball, or a Debian package "you can just extract." Those leave you with ad-hoc files, leftover systemd units, and no clean inverse operation. PacSmith's output is a pacman package, so the application shows up in the package database and comes off the system the same way official packages do.
 
@@ -112,16 +113,62 @@ The conversion workbench is a client. The library is a server.
 
 `pacsmithd` owns projects, reviewed recipes, vendor artifacts, and built packages. The GUI and CLI talk to that daemon; they do not keep their own copy of the library. On the machine that holds the library, that is a Unix socket. Turn remote listening on, and other computers enroll over HTTPS with mTLS and use the same library.
 
-That is a major part of the product, not a networking extra. Inspect a vendor artifact once. Keep the PKGBUILD, desktop entries, icon, and dependency mappings in one place. Build on the library host. Any enrolled machine can open those projects and install the packages that already exist. You are not copying `~/pacsmith` folders around, and you are not repeating the workbench on every box.
+That is a major part of the product, not a networking extra. Inspect a vendor artifact once. Keep the PKGBUILD, desktop entries, icon, and dependency mappings in one place. Build on the library host. Any enrolled machine can open those projects and install the packages that already exist. Machines that only need packages do not need to enroll at all; they can use the library's [signed pacman repository](#publish-your-own-pacman-repository). You are not copying `~/pacsmith` folders around, and you are not repeating the workbench on every box.
 
 Remote access is off until you enable it on the library host. Local management stays the default. See [Using PacSmith](#using-pacsmith) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Publish your own pacman repository
+
+The library host can serve completed builds as an ordinary pacman repository. Repository consumers do not run PacSmith, connect to the management API, or enroll as library clients. They use pacman normally after installing the PacSmith keyring and repository configuration.
+
+Repository publication is opt-in for each project. Once publication is enabled, a successful build is signed and added to the `unstable` channel. PacSmith maintains signed `pacsmith.db` and `pacsmith.files` databases for each architecture and includes architecture-independent packages where pacman expects them.
+
+| Channel | Intended use | How it changes |
+| --- | --- | --- |
+| `unstable` | Immediate testing of the newest successful build | Updated as soon as an opted-in project produces a publishable package |
+| `stable` | The channel used by machines that should receive soaked releases | Updated after the version's soak period expires, or immediately when you choose **Promote to Stable** |
+
+Each upstream version has its own soak timer. Rebuilding the same upstream version resets only that version's timer; a newer release does not restart an older release's soak. When candidates become eligible, PacSmith promotes the newest version that advances the stable channel. Automatic promotion never downgrades stable. The project Repository page shows the current package in each channel, active soak timers, and the manual promotion action.
+
+Package names can retain the generated Arch name, receive a library-wide prefix such as `pacsmith-`, or use a per-project override. The prefix is useful when repository packages might otherwise collide with names from the official repositories. Changing a name after publication is a package migration, so PacSmith keeps the originally published name visible and warns before the change.
+
+#### Signing and trust
+
+PacSmith generates a dedicated OpenPGP repository signing key on the library server. Its private key never leaves `pacsmithd`. Packages, repository databases, and the generated `pacsmith-keyring` package are signed; the keyring package is published in both channels.
+
+Two trust models are available:
+
+- **Direct trust** trusts the PacSmith repository signing key itself. This is the default and the simplest choice for a personal library.
+- **Root-certified trust** lets an administrator-owned OpenPGP root key certify PacSmith's operational signing key. The root private key stays offline: upload the root public key, download PacSmith's public key, certify it on the trusted machine, and upload the certified public key. PacSmith verifies both the key identity and certification before accepting it.
+
+Changing repository trust material produces a new keyring package. Bootstrap scripts pin the expected signing and, when configured, root fingerprints; they stop instead of installing key material that does not match.
+
+#### Configure and use the repository
+
+The repository listener is disabled by default. Its initial configuration binds only to `127.0.0.1` on port `8080`, and the default stable soak period is 30 days.
+
+On the library host:
+
+1. Open **Settings → Repository → Network**, choose the listen interfaces and port, enable the HTTP listener, and apply the network changes.
+2. Under **Publication**, choose the default stable soak period and optional package-name prefix.
+3. Under **Signing and trust**, initialize signing and choose direct or root-certified trust.
+4. Under **Client setup**, set the advertised URL that client machines can actually reach, choose `stable` or `unstable`, and copy the bootstrap script.
+5. Open a project, go to its **Repository** page, enable publication, save, and build the package.
+
+The advertised URL is written into the client configuration as pacman's `Server`. It should be the address consuming machines actually use, which may be a reverse-proxied HTTPS URL rather than the listener's bind address.
+
+Review the bootstrap script and deliver it through a channel you already trust, such as configuration management or a provisioned system image. It installs the PacSmith keyring files, configures pacman with `SigLevel = Required TrustedOnly`, verifies the expected fingerprints, and adds `/etc/pacman.d/pacsmith`. It must run as root because it writes pacman's system configuration and keyring.
+
+The repository listener is separate from the mTLS management listener used by enrolled PacSmith clients. The pacman repository protocol does not use client enrollment or authentication; OpenPGP signatures establish package and repository authenticity. If repository downloads should be restricted, expose the listener only on a trusted private network such as a LAN, Tailscale, WireGuard, or similar network. Do not publish it directly to the public Internet.
 
 ## How the trust chain works
 
 ```text
 developer → developer's own package → persistent local project
                 → editable PKGBUILD → unprivileged makepkg
-                → explicit privileged pacman -U
+                    ├→ explicit privileged pacman -U
+                    └→ signed unstable → soak/manual promotion
+                                         → signed stable → pacman clients
 ```
 
 Imported packages are untrusted data, even when they come from a known developer. PacSmith never executes an imported binary, shared object, or Debian/RPM maintainer script during analysis. `makepkg` runs as your user. Only an explicit Install action elevates, and it runs one command: `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
@@ -215,6 +262,7 @@ Direct CMake builds also default to the current user's `~/.local` prefix. An exp
 - `makepkg` is run in the project directory as the current user. PacSmith refuses to start it as root.
 - Only an explicit Install action runs `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
 - APT source files and repository keyrings are flagged and excluded from generated packages unless explicitly retained. Repository checks require a trusted project-local key and a pinned signer fingerprint.
+- Published packages and repository databases are OpenPGP-signed. Bootstrap scripts pin the expected key fingerprints and configure pacman to require trusted signatures.
 - AI cannot invent a signing key, elevate privileges, run a package manager, or silently overwrite a user-owned field.
 - PKGBUILD validation is intentionally static and does not source or execute the file.
 

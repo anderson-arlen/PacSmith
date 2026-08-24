@@ -42,6 +42,12 @@ func Generate(rel Release) string {
 	b.WriteString("depends=(")
 	b.WriteString(strings.Join(dependencies, " "))
 	b.WriteString(")\n")
+	b.WriteString("provides=(\"${_PACSMITH_PROVIDES[@]}\")\n")
+	b.WriteString("conflicts=(\"${_PACSMITH_CONFLICTS[@]}\")\n")
+	b.WriteString("if [[ -n ${_PACSMITH_COMPAT_PKGNAME} ]]; then\n")
+	b.WriteString("  provides+=(\"${_PACSMITH_COMPAT_PKGNAME}=${pkgver}\")\n")
+	b.WriteString("  conflicts+=(\"${_PACSMITH_COMPAT_PKGNAME}\")\n")
+	b.WriteString("fi\n")
 	if rel.resolvedSourceType() == SourceAppImage {
 		b.WriteString("makedepends=('squashfs-tools')\n")
 	}
@@ -101,6 +107,9 @@ func IdentityVariables(rel Release) string {
 	var b strings.Builder
 	b.WriteString("# PacSmith-owned release identity. Do not edit; rewritten for each vendor artifact.\n")
 	appendAssignment(&b, "_PACSMITH_PKGNAME", rel.ArchPackageName)
+	appendAssignment(&b, "_PACSMITH_COMPAT_PKGNAME", rel.CompatPackageName)
+	appendArray(&b, "_PACSMITH_PROVIDES", rel.Provides)
+	appendArray(&b, "_PACSMITH_CONFLICTS", rel.Conflicts)
 	appendAssignment(&b, "_PACSMITH_PKGVER", version)
 	appendAssignment(&b, "_PACSMITH_PKGREL", pkgrelValue(rel))
 	appendAssignment(&b, "_PACSMITH_EPOCH", epoch)
@@ -191,6 +200,18 @@ func appendAssignment(b *strings.Builder, name, value string) {
 	b.WriteByte('=')
 	b.WriteString(ShellQuote(value))
 	b.WriteByte('\n')
+}
+
+func appendArray(b *strings.Builder, name string, values []string) {
+	b.WriteString(name)
+	b.WriteString("=(")
+	for i, value := range values {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(ShellQuote(value))
+	}
+	b.WriteString(")\n")
 }
 
 func appendExtraction(b *strings.Builder, rel Release) {

@@ -17,7 +17,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	encoded := make([]map[string]any, 0, len(projects))
 	for _, project := range projects {
-		encoded = append(encoded, encodeProject(project))
+		encoded = append(encoded, s.projectJSON(r, project))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": encoded})
 }
@@ -28,7 +28,7 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, encodeProject(project))
+	writeJSON(w, http.StatusOK, s.projectJSON(r, project))
 }
 
 func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +41,7 @@ func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, encodeProject(project))
+	writeJSON(w, http.StatusOK, s.projectJSON(r, project))
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +185,16 @@ func (s *Server) createBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	acceptedJob(w, job)
+}
+
+func (s *Server) projectJSON(r *http.Request, project library.Project) map[string]any {
+	out := encodeProject(project)
+	if s.Repo != nil && r != nil {
+		if status, err := s.Repo.ProjectView(r.Context(), project.ID); err == nil {
+			out["repository"] = status
+		}
+	}
+	return out
 }
 
 func encodeProject(project library.Project) map[string]any {
