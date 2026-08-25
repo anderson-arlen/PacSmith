@@ -182,17 +182,19 @@ void MainWindow::populateUpdates() {
     auto *tracker = updateEditorRelease();
     populating_ = true;
     const auto controls = QList<QWidget *>{
-        updateStrategy_, updateUrl_, aptSuite_, aptComponent_, aptArchitecture_, aptPackageName_,
+        updateStrategy_, updateUrl_, directUrlFullCheckInterval_,
+        aptSuite_, aptComponent_, aptArchitecture_, aptPackageName_,
         rpmArchitecture_, rpmPackageName_,
         aptSigningKeyUrl_, aptSigningKeyDownloadButton_, aptSigningKeyring_, aptSigningKey_,
         githubOwner_, githubRepository_, githubAssetRegex_,
         githubPrereleases_, updateCandidates_, updateSaveButton_};
     if (tracker == nullptr) {
         updateOwnerLabel_->setText(
-            QStringLiteral("No release currently owns the project update view. Prepare an artifact first, or reconcile the installed package with a retained PacSmith release."));
+            QStringLiteral("No analyzed release currently owns the project update view. Prepare an artifact first."));
         updateStrategy_->setCurrentIndex(0);
         for (auto *control : controls) control->setEnabled(false);
         updateUrl_->clear();
+        directUrlFullCheckInterval_->setCurrentIndex(0);
         aptSuite_->clear();
         aptComponent_->clear();
         aptArchitecture_->clear();
@@ -229,6 +231,10 @@ void MainWindow::populateUpdates() {
                                       : tracker->update.strategy == UpdateStrategy::AptRepository ? 2
                                       : tracker->update.strategy == UpdateStrategy::RpmRepository ? 3 : 4);
     updateUrl_->setText(tracker->update.url);
+    const auto directIntervalIndex = directUrlFullCheckInterval_->findData(
+        tracker->update.directUrlFullCheckIntervalHours);
+    directUrlFullCheckInterval_->setCurrentIndex(directIntervalIndex >= 0
+                                                     ? directIntervalIndex : 0);
     aptSuite_->setText(tracker->update.aptSuite);
     aptComponent_->setText(tracker->update.aptComponent);
     aptArchitecture_->setText(tracker->update.aptArchitecture);
@@ -322,6 +328,7 @@ void MainWindow::populateUpdates() {
         }
     }
     updateUrl_->setEnabled(updateStrategy_->currentIndex() != 0);
+    directUrlFullCheckInterval_->setEnabled(updateStrategy_->currentIndex() == 1);
     const bool apt = updateStrategy_->currentIndex() == 2;
     const bool rpm = updateStrategy_->currentIndex() == 3;
     const bool repository = apt || rpm;
@@ -340,10 +347,19 @@ void MainWindow::populateUpdates() {
     const auto githubPolicy = tracker->update.githubIncludePrereleases
         ? QStringLiteral(" Preview tracking is enabled, so newer prereleases may be selected even when a stable release exists.")
         : QStringLiteral(" Stable releases are preferred. If none match, PacSmith follows prereleases until a matching stable release is published, then remains on stable.");
+    const auto directValidators = DirectUrlUpdateService::storedValidators(tracker->update);
+    const auto directInterval = tracker->update.directUrlFullCheckIntervalHours <= 0
+        ? QStringLiteral("manual only")
+        : directUrlFullCheckInterval_->currentText().toLower();
     updateNotice_->setText(updateStrategy_->currentIndex() == 0
                                ? QStringLiteral("Manual updates: PacSmith will not query the network.")
                            : updateStrategy_->currentIndex() == 1
-                               ? QStringLiteral("Direct URL saved; automatic version discovery is not implemented yet.")
+                               ? directValidators.available()
+                                   ? QStringLiteral("✓ Direct URL checks use the stored remote validator before downloading. SHA256 remains authoritative when the validator changes.")
+                                   : tracker->update.lastChecked.isValid()
+                                       ? QStringLiteral("⚠ This server exposes no usable cheap change validator. PacSmith must download and hash the complete artifact; automatic full-content checks are %1.")
+                                             .arg(directInterval)
+                                       : QStringLiteral("PacSmith will probe for ETag, Last-Modified, and supported object-version headers before deciding whether a download is needed.")
                            : github
                                ? QStringLiteral("GitHub releases are not signature-verified by GitHub. PacSmith records any publisher digest exposed by the API, downloads over HTTPS, and always computes its own SHA256 before import.%1")
                                      .arg(githubPolicy)
@@ -351,9 +367,13 @@ void MainWindow::populateUpdates() {
                                    ? QStringLiteral("⚠ Repository checking is blocked until a trusted signing key is selected.")
                                    : QStringLiteral("✓ Repository metadata must verify against the pinned signing-key fingerprint before update results are trusted."));
     if (tracker->update.lastChecked.isValid()) {
-        const auto signature = tracker->update.signatureVerified
-                                   ? QStringLiteral("Repository signature verified.")
-                                   : QStringLiteral("Repository signature not verified.");
+        const auto signature = tracker->update.strategy == UpdateStrategy::DirectUrl
+            ? directValidators.available()
+                ? QStringLiteral("Remote validator available; downloaded bytes are verified by SHA256.")
+                : QStringLiteral("No remote validator available; checks require full-content SHA256 comparison.")
+            : tracker->update.signatureVerified
+                ? QStringLiteral("Repository signature verified.")
+                : QStringLiteral("Repository signature not verified.");
         updateCheckStatus_->setText(QStringLiteral("Last checked %1\n%2\n%3")
                                         .arg(tracker->update.lastChecked.toLocalTime().toString(Qt::ISODate),
                                              tracker->update.lastCheckMessage, signature));
@@ -412,7 +432,7 @@ void MainWindow::populateBuild() {
                                                 .arg(payloadReviews),
                                       lifecycleState, iconState));
     const bool building = buildInProgress();
-    const bool installing = installService_.isRunning();
+    const bool installing = packageOperationInProgress();
     const bool hasExistingBuild = releaseHasExistingBuild(*currentRelease());
     buildButton_->setText(building ? QStringLiteral("Cancel Build")
                                    : hasExistingBuild ? QStringLiteral("Rebuild")
@@ -579,8 +599,22 @@ bool MainWindow::saveUpdateConfiguration() {
                         : updateStrategy_->currentIndex() == 2 ? UpdateStrategy::AptRepository
                         : updateStrategy_->currentIndex() == 3 ? UpdateStrategy::RpmRepository
                                                                : UpdateStrategy::GitHubRelease;
+    const auto previousStrategy = tracker->update.strategy;
+    const auto previousUrl = tracker->update.url;
     tracker->update.strategy = strategy;
     tracker->update.url = updateUrl_->text().trimmed();
+    tracker->update.directUrlFullCheckIntervalHours =
+        directUrlFullCheckInterval_->currentData().toInt();
+    if (strategy == UpdateStrategy::DirectUrl &&
+        (previousStrategy != UpdateStrategy::DirectUrl || previousUrl != tracker->update.url)) {
+        tracker->update.directUrlEtag.clear();
+        tracker->update.directUrlLastModified.clear();
+        tracker->update.directUrlContentLength = -1;
+        tracker->update.directUrlVendorValidatorName.clear();
+        tracker->update.directUrlVendorValidator.clear();
+        tracker->update.directUrlLastSha256.clear();
+        tracker->update.directUrlLastFullCheck = {};
+    }
     tracker->update.aptSuite = aptSuite_->text().trimmed();
     tracker->update.aptComponent = aptComponent_->text().trimmed();
     tracker->update.aptArchitecture = aptArchitecture_->text().trimmed();

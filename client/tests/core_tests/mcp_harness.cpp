@@ -52,6 +52,8 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
     QVERIFY(names.contains(QStringLiteral("promote_repository_package")));
     QVERIFY(names.contains(QStringLiteral("check_updates")));
     QVERIFY(names.contains(QStringLiteral("prepare_release")));
+    QVERIFY(names.contains(QStringLiteral("import_github_release")));
+    QVERIFY(names.contains(QStringLiteral("import_direct_url")));
     QVERIFY(names.contains(QStringLiteral("list_harness_profiles")));
     QVERIFY(names.contains(QStringLiteral("upsert_harness_profile")));
     QVERIFY(names.contains(QStringLiteral("remove_harness_profile")));
@@ -107,6 +109,24 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                 .contains(QStringLiteral("path")));
     QVERIFY(findTool(QStringLiteral("download_artifact")).value(QStringLiteral("description"))
                 .toString().contains(QStringLiteral("Do not use this to inspect")));
+    for (const auto &toolName : {QStringLiteral("import_github_release"),
+                                 QStringLiteral("import_direct_url")}) {
+        const auto remoteImport = findTool(toolName);
+        const auto schema = remoteImport.value(QStringLiteral("inputSchema")).toObject();
+        const auto properties = schema.value(QStringLiteral("properties")).toObject();
+        QVERIFY2(properties.contains(QStringLiteral("url")), qPrintable(toolName));
+        QVERIFY2(properties.contains(QStringLiteral("existing_project_name")), qPrintable(toolName));
+        QVERIFY2(schema.value(QStringLiteral("required")).toArray()
+                     .contains(QStringLiteral("url")), qPrintable(toolName));
+        QVERIFY2(remoteImport.value(QStringLiteral("description")).toString()
+                     .contains(QStringLiteral("never download")), qPrintable(toolName));
+        QCOMPARE(remoteImport.value(QStringLiteral("annotations")).toObject()
+                     .value(QStringLiteral("openWorldHint")).toBool(), true);
+    }
+    QVERIFY(findTool(QStringLiteral("import_github_release"))
+                .value(QStringLiteral("inputSchema")).toObject()
+                .value(QStringLiteral("properties")).toObject()
+                .contains(QStringLiteral("asset_regex")));
     const auto profileAnnotations =
         findTool(QStringLiteral("upsert_harness_profile")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(profileAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), false);
@@ -307,6 +327,14 @@ void CoreTests::validatesPortableAgentPluginBundle() {
     QVERIFY(instructions.contains(QStringLiteral("check_updates")));
     QVERIFY(instructions.contains(QStringLiteral("upsert_harness_profile")));
     QVERIFY(instructions.contains(QStringLiteral("Never substitute `pacsmith check`")));
+    QVERIFY(instructions.contains(QStringLiteral("import_github_release")));
+    QVERIFY(instructions.contains(QStringLiteral("import_direct_url")));
+    QVERIFY(instructions.contains(QStringLiteral("pacsmith install <project_name>")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "must always use `pacsmith install --polkit <project_name>` first")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "a tool-provided pseudo-TTY does not mean the user can enter a sudo password")));
+    QVERIFY(instructions.contains(QStringLiteral("never invoke sudo or pacman directly")));
 }
 
 void CoreTests::installsPortableAgentSkillSafely() {

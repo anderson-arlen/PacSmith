@@ -8,6 +8,7 @@
 #include <QStringList>
 
 #include <filesystem>
+#include <optional>
 
 namespace pacsmith {
 
@@ -23,6 +24,14 @@ struct ProcessResult {
 
     [[nodiscard]] bool succeeded() const noexcept;
 };
+
+enum class InstallPrivilegeMode {
+    TtySudo,
+    Polkit,
+};
+
+[[nodiscard]] std::optional<InstallPrivilegeMode> parseInstallPrivilegeOptions(
+    const QStringList &options, QString *error = nullptr);
 
 class BuildService final : public QObject {
     Q_OBJECT
@@ -53,8 +62,11 @@ public:
                                                        bool nonInteractive);
     [[nodiscard]] static QStringList uninstallArguments(const QString &packageName,
                                                          bool nonInteractive);
-    void start(const std::filesystem::path &packagePath, bool nonInteractive = false);
-    void startUninstall(const QString &packageName, bool nonInteractive = false);
+    [[nodiscard]] static QString privilegeProgram(InstallPrivilegeMode mode);
+    void start(const std::filesystem::path &packagePath,
+               InstallPrivilegeMode mode = InstallPrivilegeMode::TtySudo);
+    void startUninstall(const QString &packageName,
+                        InstallPrivilegeMode mode = InstallPrivilegeMode::TtySudo);
 
 signals:
     void progressChanged(const QString &message);

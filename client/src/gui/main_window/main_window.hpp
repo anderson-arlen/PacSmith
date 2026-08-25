@@ -4,6 +4,7 @@
 #include "core/app_settings.hpp"
 #include "core/credential_store.hpp"
 #include "core/deb_download_service.hpp"
+#include "core/direct_url_update_service.hpp"
 #include "core/github_update_service.hpp"
 #include "core/process_services.hpp"
 #include "core/library_client.hpp"
@@ -263,8 +264,12 @@ private:
     void finishBuildJob();
     void cancelRemoteBuild();
     [[nodiscard]] bool buildInProgress() const;
+    [[nodiscard]] bool packageOperationInProgress() const;
     void startInstall();
     void startUninstall();
+    void preparePackageInstallation(const QString &releaseId,
+                                    const QString &operation,
+                                    bool synchronizeLifecycle);
     void showCommandProgress(const QString &title, const QString &status, bool cancelable);
     void finishCommandProgress(bool success, const QString &summary);
     void installSelectedRelease();
@@ -342,6 +347,8 @@ private:
     bool updateCheckFromWorkbench_{false};
     BuildService buildService_;
     InstallService installService_;
+    bool installPreparationInFlight_{false};
+    bool packageOperationFinishInFlight_{false};
     QString buildJobId_;
     qint64 buildLogAfter_{0};
     QTimer *buildPollTimer_{nullptr};
@@ -349,6 +356,7 @@ private:
     bool buildFinishInFlight_{false};
     QThread networkIoThread_;
     DebDownloadService *debDownloadService_{nullptr};
+    DirectUrlUpdateService *directUrlUpdateService_{nullptr};
     RepositoryKeyDownloadService signingKeyDownloadService_;
     AptUpdateService *aptUpdateService_{nullptr};
     RpmUpdateService *rpmUpdateService_{nullptr};
@@ -517,6 +525,7 @@ private:
     QLabel *pkgbuildPreviewNotice_{nullptr};
     QComboBox *updateStrategy_{nullptr};
     QLineEdit *updateUrl_{nullptr};
+    QComboBox *directUrlFullCheckInterval_{nullptr};
     QLineEdit *aptSuite_{nullptr};
     QLineEdit *aptComponent_{nullptr};
     QLineEdit *aptArchitecture_{nullptr};

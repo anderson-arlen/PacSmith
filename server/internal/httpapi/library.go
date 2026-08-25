@@ -52,6 +52,26 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) createDiscoveredRelease(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Document map[string]any `json:"document"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Document == nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "document is required")
+		return
+	}
+	release, err := s.Library.CreateDiscoveredRelease(
+		r.Context(), r.PathValue("id"), body.Document)
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, encodeRelease(release))
+}
+
 func (s *Server) getRelease(w http.ResponseWriter, r *http.Request) {
 	release, err := s.Library.GetRelease(r.Context(), r.PathValue("id"))
 	if err != nil {

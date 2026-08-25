@@ -185,6 +185,55 @@ func TestPatchReleaseConfigurationPreservesLargeInspectionEvidence(t *testing.T)
 	}
 }
 
+func TestCreateDiscoveredReleasePersistsRemoteCandidate(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := &Service{DB: db}
+	now := nowUTC()
+	project, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "parsec", DisplayName: "Parsec", ArchPackageName: "parsec-bin",
+		SourceIdentity: "direct-url:parsec", HistoryJson: "[]",
+		CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{
+		"state":                  "discovered",
+		"originalSourceFilename": "parsec-linux.deb",
+		"sourceSha256":           strings.Repeat("c", 64),
+		"sourceUrl":              "https://builds.parsec.app/package/parsec-linux.deb",
+		"debian":                 map[string]any{"version": "150-105"},
+		"update": map[string]any{
+			"strategy": "Direct URL", "directUrlEtag": "\"opaque\"",
+		},
+	}
+	created, err := svc.CreateDiscoveredRelease(ctx, project.ID, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.State != "discovered" || created.VendorVersion != "150-105" ||
+		created.SourceSHA256 != strings.Repeat("c", 64) {
+		t.Fatalf("created release %+v", created)
+	}
+	update, ok := mapValue(created.Document, "update")
+	if !ok || stringValue(update, "directUrlEtag") != "\"opaque\"" {
+		t.Fatalf("update state %#v", created.Document["update"])
+	}
+	again, err := svc.CreateDiscoveredRelease(ctx, project.ID, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != created.ID {
+		t.Fatalf("duplicate candidate ID %q, want %q", again.ID, created.ID)
+	}
+}
+
 func TestUnconfiguredIconArtifactIsNotExposed(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

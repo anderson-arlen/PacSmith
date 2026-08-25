@@ -25,11 +25,19 @@ struct ReleaseDeletionResult {
     QString error;
 };
 
+struct InstallPreparationResult {
+    std::optional<Project> project;
+    QString releaseId;
+    QString packagePath;
+    QString error;
+    bool lifecycleChanged{false};
+};
+
 } // namespace
 
 void MainWindow::startReanalysis() {
     if (!project_ || currentRelease() == nullptr || importThread_ != nullptr ||
-        buildInProgress() || installService_.isRunning() ||
+        buildInProgress() || packageOperationInProgress() ||
         debDownloadService_->isRunning()) {
         return;
     }
@@ -207,21 +215,24 @@ void MainWindow::applyRetentionCleanup() {
 }
 
 void MainWindow::startUpdateCheck() {
-    if (!project_ || aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+    if (!project_ || directUrlUpdateService_->isRunning() ||
+        aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
         githubUpdateService_->isRunning() ||
         debDownloadService_->isRunning() || importThread_ != nullptr) return;
     if (!saveUpdateConfiguration()) return;
     auto *tracker = updateEditorRelease();
     if (tracker == nullptr) return;
     const auto strategy = tracker->update.strategy;
-    if (strategy != UpdateStrategy::AptRepository && strategy != UpdateStrategy::RpmRepository &&
+    if (strategy != UpdateStrategy::DirectUrl &&
+        strategy != UpdateStrategy::AptRepository && strategy != UpdateStrategy::RpmRepository &&
         strategy != UpdateStrategy::GitHubRelease) {
         QMessageBox::information(this, QStringLiteral("Update check"),
-                                 QStringLiteral("Select an APT repository, RPM repository, or GitHub releases to run an automatic metadata check."));
+                                 QStringLiteral("Select Direct URL, an APT or RPM repository, or GitHub releases to check automatically."));
         return;
     }
     const auto backgroundState = BackgroundUpdateStateStore::load();
-    if (backgroundState.checking && !aptUpdateService_->isRunning() &&
+    if (backgroundState.checking && !directUrlUpdateService_->isRunning() &&
+        !aptUpdateService_->isRunning() &&
         !rpmUpdateService_->isRunning() && !githubUpdateService_->isRunning()) {
         statusBar()->showMessage(QStringLiteral("An update check is already running"), 6000);
         return;
@@ -231,7 +242,13 @@ void MainWindow::startUpdateCheck() {
     projectList_->setEnabled(false);
     updateCheckReleaseId_ = tracker->id;
     updateCheckFromWorkbench_ = rightStack_ != nullptr && rightStack_->currentIndex() == 1;
-    if (strategy == UpdateStrategy::AptRepository) {
+    if (strategy == UpdateStrategy::DirectUrl) {
+        updateCheckStatus_->setText(QStringLiteral("Starting Direct URL check…"));
+        const auto release = *tracker;
+        onServiceThread(*directUrlUpdateService_, [this, release] {
+            directUrlUpdateService_->start(release, true);
+        });
+    } else if (strategy == UpdateStrategy::AptRepository) {
         updateCheckStatus_->setText(QStringLiteral("Starting APT repository check…"));
         const auto release = *tracker;
         const auto path = library_.releasePath(*tracker);
@@ -282,6 +299,19 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
     update.lastChecked = QDateTime::currentDateTimeUtc();
     update.lastCheckMessage = result.message;
     update.signatureVerified = result.signatureVerified;
+    if (update.strategy == UpdateStrategy::DirectUrl && result.success) {
+        update.directUrlEtag = result.directUrlEtag;
+        update.directUrlLastModified = result.directUrlLastModified;
+        update.directUrlContentLength = result.directUrlContentLength;
+        update.directUrlVendorValidatorName = result.directUrlVendorValidatorName;
+        update.directUrlVendorValidator = result.directUrlVendorValidator;
+        if (!result.directUrlLastSha256.isEmpty()) {
+            update.directUrlLastSha256 = result.directUrlLastSha256;
+        }
+        if (result.directUrlLastFullCheck.isValid()) {
+            update.directUrlLastFullCheck = result.directUrlLastFullCheck;
+        }
+    }
     if (!result.etag.isEmpty()) update.githubEtag = result.etag;
     if (result.success && !result.detectedVersion.isEmpty()) {
         update.detectedVersion = result.detectedVersion;
@@ -307,6 +337,12 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
             discovered != nullptr) {
             discoveredReleaseId = discovered->id;
             discoveredState = discovered->state;
+            if (!result.localArtifactPath.isEmpty()) {
+                QString retainError;
+                static_cast<void>(retainDirectUrlArtifact(
+                    result, project_->id, discoveredReleaseId, &retainError));
+                if (!retainError.isEmpty()) discoveryError = retainError;
+            }
         }
     } else {
         persistCurrent();
@@ -357,9 +393,13 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
     }
 
     statusBar()->showMessage(
-        result.success ? QStringLiteral("%1 update check completed; package is current").arg(sourceName)
-                       : QStringLiteral("%1 update check failed").arg(sourceName),
-        8000);
+        result.fullContentCheckDeferred
+            ? QStringLiteral("%1 check deferred: the server has no cheap validator")
+                  .arg(sourceName)
+        : result.success
+            ? QStringLiteral("%1 update check completed; package is current").arg(sourceName)
+            : QStringLiteral("%1 update check failed").arg(sourceName),
+        result.fullContentCheckDeferred ? 12000 : 8000);
 }
 
 void MainWindow::showCommandProgress(const QString &title, const QString &status,
@@ -650,21 +690,7 @@ void MainWindow::finishBuildJob() {
 }
 
 void MainWindow::startInstall() {
-    if (!project_ || installService_.isRunning()) return;
-    bool lifecycleChanged = false;
-    QString lifecycleError;
-    if (!library_.synchronizeLifecycle(*project_, *currentRelease(), &lifecycleChanged, &lifecycleError)) {
-        QMessageBox::critical(this, QStringLiteral("Could not inspect lifecycle script"), lifecycleError);
-        return;
-    }
-    if (lifecycleChanged) {
-        populateScripts();
-        populateOverview();
-        populateBuild();
-        QMessageBox::warning(this, QStringLiteral("Installation blocked"),
-                             QStringLiteral("The lifecycle file changed after the last build. Re-review it and rebuild the package."));
-        return;
-    }
+    if (!project_ || currentRelease() == nullptr || packageOperationInProgress()) return;
     if (!currentRelease()->lifecycleScript.contents.isEmpty() &&
         (!currentRelease()->lifecycleScript.validationPassed || currentRelease()->lifecycleScript.requiresAcknowledgement())) {
         QMessageBox::warning(this, QStringLiteral("Installation blocked"),
@@ -675,35 +701,137 @@ void MainWindow::startInstall() {
         selectSection(EditorSection::ConfigScripts);
         return;
     }
-    const auto package = retainedPackagePath(library_, *currentRelease());
-    if (package.isEmpty()) {
+    if (!releaseHasRetainedPackage(*currentRelease())) {
         QMessageBox::warning(this, QStringLiteral("Installation unavailable"),
                              QStringLiteral("No retained Arch package artifact exists for this release. Build it first."));
         return;
     }
+    const auto cachedPackage = retainedPackagePath(library_, *currentRelease());
+    const auto packageDescription = cachedPackage.isEmpty()
+        ? QStringLiteral("Retained package artifact for release %1 (downloaded from the PacSmith library if needed)")
+              .arg(currentRelease()->debian.version)
+        : cachedPackage;
     const auto lifecycleNotice = currentRelease()->lifecycleScript.contents.isEmpty()
                                      ? QString{}
                                      : QStringLiteral("\n\nPacman will also run the acknowledged lifecycle functions in %1 as root.")
                                            .arg(currentRelease()->lifecycleScript.fileName);
     if (QMessageBox::question(this, QStringLiteral("Install Arch package"),
                               QStringLiteral("Authorize pacman to install this package? PacSmith will run only pacman -U for the path below and pass --noconfirm after this explicit confirmation. Polkit may request your password.\n\n%1%2")
-                                  .arg(package, lifecycleNotice)) !=
+                                  .arg(packageDescription, lifecycleNotice)) !=
         QMessageBox::Yes) return;
-    installButton_->setEnabled(false);
-    if (projectPrimaryButton_ != nullptr) projectPrimaryButton_->setEnabled(false);
-    if (projectActionButton_ != nullptr) projectActionButton_->setEnabled(false);
+    preparePackageInstallation(currentRelease()->id, QStringLiteral("install"), true);
+}
+
+bool MainWindow::packageOperationInProgress() const {
+    return installPreparationInFlight_ || packageOperationFinishInFlight_ ||
+           installService_.isRunning();
+}
+
+void MainWindow::preparePackageInstallation(const QString &releaseId,
+                                            const QString &operation,
+                                            const bool synchronizeLifecycle) {
+    if (!project_ || packageOperationInProgress()) return;
+    const auto *release = project_->release(releaseId);
+    if (release == nullptr) return;
+    installPreparationInFlight_ = true;
     projectList_->setEnabled(false);
-    pendingPackageOperation_ = QStringLiteral("install");
-    showCommandProgress(QStringLiteral("Installing %1").arg(project_->displayName),
-                        QStringLiteral("Waiting for polkit authorization…"), false);
-    if (commandProgress_ != nullptr) {
-        commandProgress_->appendOutput(
-            QStringLiteral("Requesting narrowly scoped privilege elevation for non-interactive pacman -U…\n%1\n")
-                .arg(package));
-    }
-    installService_.start(std::filesystem::path(package.toUtf8().constData()), true);
+    showCommandProgress(
+        operation == QStringLiteral("rollback")
+            ? QStringLiteral("Rolling back %1").arg(project_->displayName)
+            : QStringLiteral("Installing %1").arg(project_->displayName),
+        QStringLiteral("Preparing the retained package…"), false);
+    statusBar()->showMessage(QStringLiteral("Preparing package installation…"));
+    updateDashboardActions();
     populateBuild();
     updateDeleteButton();
+
+    const auto config = library_.config();
+    const auto projectSnapshot = *project_;
+    auto *watcher = new QFutureWatcher<InstallPreparationResult>(this);
+    connect(watcher, &QFutureWatcher<InstallPreparationResult>::finished, this,
+            [this, watcher, operation] {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        installPreparationInFlight_ = false;
+        if (result.project && project_ && result.project->id == project_->id) {
+            project_ = std::move(*result.project);
+            projectCache_.insert(project_->id, *project_);
+        }
+        if (!result.error.isEmpty()) {
+            projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
+            finishCommandProgress(false,
+                                  QStringLiteral("Package preparation failed: %1").arg(result.error));
+            statusBar()->showMessage(QStringLiteral("Package preparation failed"), 10000);
+            populateOverview();
+            populateBuild();
+            updateDashboardActions();
+            updateDeleteButton();
+            return;
+        }
+        if (result.lifecycleChanged) {
+            projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
+            finishCommandProgress(false, QStringLiteral("Installation blocked because the lifecycle file changed."));
+            populateScripts();
+            populateOverview();
+            populateBuild();
+            updateDashboardActions();
+            updateDeleteButton();
+            QMessageBox::warning(this, QStringLiteral("Installation blocked"),
+                                 QStringLiteral("The lifecycle file changed after the last build. Re-review it and rebuild the package."));
+            return;
+        }
+        if (installService_.isRunning()) {
+            projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
+            finishCommandProgress(false, QStringLiteral("Another package operation started first."));
+            updateDashboardActions();
+            updateDeleteButton();
+            return;
+        }
+        pendingPackageOperation_ = operation;
+        const auto status = operation == QStringLiteral("rollback")
+            ? QStringLiteral("Waiting for polkit authorization to roll back…")
+            : QStringLiteral("Waiting for polkit authorization to install…");
+        statusBar()->showMessage(status);
+        if (commandProgress_ != nullptr) {
+            commandProgress_->setStatus(status);
+            commandProgress_->appendOutput(
+                QStringLiteral("Requesting narrowly scoped privilege elevation for non-interactive pacman -U…\n%1\n")
+                    .arg(result.packagePath));
+        }
+        installService_.start(
+            std::filesystem::path(result.packagePath.toUtf8().constData()),
+            InstallPrivilegeMode::Polkit);
+        populateBuild();
+        updateDashboardActions();
+        updateDeleteButton();
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [config, projectSnapshot, releaseId, synchronizeLifecycle] mutable {
+            LibraryClient client(config);
+            InstallPreparationResult result;
+            result.releaseId = releaseId;
+            auto project = projectSnapshot;
+            auto *candidate = project.release(releaseId);
+            if (candidate == nullptr) {
+                result.error = QStringLiteral("The selected release is no longer available");
+                return result;
+            }
+            if (synchronizeLifecycle &&
+                !client.synchronizeLifecycle(project, *candidate, &result.lifecycleChanged,
+                                             &result.error)) {
+                return result;
+            }
+            candidate = project.release(releaseId);
+            if (candidate == nullptr) {
+                result.error = QStringLiteral("The selected release is no longer available");
+                return result;
+            }
+            if (!result.lifecycleChanged) {
+                result.packagePath = acquireRetainedPackagePath(client, *candidate, &result.error);
+            }
+            result.project = std::move(project);
+            return result;
+        }));
 }
 
 void MainWindow::editSelectedRelease() {
@@ -832,43 +960,33 @@ void MainWindow::deleteSelectedRelease() {
 }
 
 void MainWindow::rollbackSelectedRelease() {
-    if (!project_ || installService_.isRunning()) return;
+    if (!project_ || packageOperationInProgress()) return;
     const auto id = selectedDashboardReleaseId();
     const auto *release = project_->release(id);
     if (release == nullptr || id == project_->installedReleaseId) return;
-    const auto package = retainedPackagePath(library_, *release);
-    if (package.isEmpty()) {
+    if (!releaseHasRetainedPackage(*release)) {
         QMessageBox::warning(this, QStringLiteral("Rollback unavailable"),
                              QStringLiteral("That release no longer has a retained Arch package artifact."));
         return;
     }
     if (QMessageBox::question(this, QStringLiteral("Roll back package"),
-                              QStringLiteral("Authorize pacman to install retained release %1 non-interactively? Polkit may request your password.\n\n%2")
-                                  .arg(release->debian.version, package)) != QMessageBox::Yes) return;
+                              QStringLiteral("Authorize pacman to install retained release %1 non-interactively? PacSmith will download it from the configured library first if it is not cached locally. Polkit may request your password.")
+                                  .arg(release->debian.version)) != QMessageBox::Yes) return;
     currentReleaseId_ = id;
-    pendingPackageOperation_ = QStringLiteral("rollback");
-    projectList_->setEnabled(false);
-    showCommandProgress(QStringLiteral("Rolling back %1").arg(project_->displayName),
-                        QStringLiteral("Waiting for polkit authorization…"), false);
-    if (commandProgress_ != nullptr) {
-        commandProgress_->appendOutput(
-            QStringLiteral("Installing retained package:\n%1\n").arg(package));
-    }
-    installService_.start(std::filesystem::path(package.toUtf8().constData()), true);
-    populateOverview();
+    preparePackageInstallation(id, QStringLiteral("rollback"), false);
 }
 
 void MainWindow::installSelectedRelease() {
-    if (!project_ || installService_.isRunning()) return;
+    if (!project_ || packageOperationInProgress()) return;
     const auto id = selectedDashboardReleaseId();
     const auto *release = project_->release(id);
-    if (release == nullptr || retainedPackagePath(library_, *release).isEmpty()) return;
+    if (release == nullptr || !releaseHasRetainedPackage(*release)) return;
     currentReleaseId_ = id;
     startInstall();
 }
 
 void MainWindow::startUninstall() {
-    if (!project_ || project_->installedVersion.isEmpty() || installService_.isRunning()) return;
+    if (!project_ || project_->installedVersion.isEmpty() || packageOperationInProgress()) return;
     if (QMessageBox::question(this, QStringLiteral("Uninstall package"),
                               QStringLiteral("Authorize pacman to remove %1 non-interactively? The PacSmith project and retained releases will remain. Polkit may request your password.")
                                   .arg(project_->archPackageName)) != QMessageBox::Yes) return;
@@ -881,7 +999,8 @@ void MainWindow::startUninstall() {
         commandProgress_->appendOutput(
             QStringLiteral("Removing pacman package %1\n").arg(project_->archPackageName));
     }
-    installService_.startUninstall(project_->archPackageName, true);
+    installService_.startUninstall(project_->archPackageName,
+                                   InstallPrivilegeMode::Polkit);
     populateOverview();
 }
 

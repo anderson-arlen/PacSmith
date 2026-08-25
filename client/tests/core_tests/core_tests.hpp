@@ -9,6 +9,11 @@ private slots:
     void parsesChunkedServerEvents();
     void ignoresMalformedServerEventsAndHeartbeats();
     void describesUnnamedServerJobsWithoutOpaqueIds();
+    void comparesDirectUrlValidators();
+    void schedulesDirectUrlFullContentChecks();
+    void persistsDirectUrlCheckState();
+    void parsesRemoteGitHubImportUrls();
+    void rejectsUnsafeRemoteGitHubImportUrls();
     void parsesControlFields();
     void parsesMultilineControlFields();
     void prefersApplicationNameOverPackageDescription();

@@ -128,11 +128,11 @@ QWidget *MainWindow::createOverviewPage() {
         const bool installed = selected != nullptr && selected->id == project_->installedReleaseId;
         installReleaseButton_->setEnabled(selected != nullptr && !installed &&
                                           releaseHasRetainedPackage(*selected) &&
-                                          !installService_.isRunning());
+                                          !packageOperationInProgress());
         rollbackButton_->setEnabled(selected != nullptr && !installed && !project_->installedVersion.isEmpty() &&
                                     (!selected->builds.isEmpty() || !selected->producedPackages.isEmpty()));
         deleteReleaseButton_->setEnabled(selected != nullptr && !installed && !preparing &&
-                                         !installService_.isRunning());
+                                         !packageOperationInProgress());
         if (preparing) {
             overviewChecklist_->setText(
                 QStringLiteral("<b>Preparing release %1</b><br>%2. Download and inspection continue in the background even when the progress window is hidden.")
@@ -825,7 +825,7 @@ QWidget *MainWindow::createUpdatesPage() {
     layout->addWidget(pageIntroduction(
         QStringLiteral("How PacSmith looks for the next vendor release."),
         page,
-        QStringLiteral("On the project dashboard this edits the current tracking release (installed, or newest analyzed if nothing is installed). In Configuration it edits the open release. This is not part of the Pacman package, and it is separate from the immutable acquisition recorded for the imported artifact.")));
+        QStringLiteral("On the project dashboard this edits the current tracking release (the installed PacSmith release when identified, otherwise the newest analyzed release). In Configuration it edits the open release. This is not part of the Pacman package, and it is separate from the immutable acquisition recorded for the imported artifact.")));
     updateOwnerLabel_ = new QLabel(page);
     updateOwnerLabel_->setWordWrap(true);
     updateOwnerLabel_->setFrameStyle(QFrame::StyledPanel);
@@ -838,6 +838,13 @@ QWidget *MainWindow::createUpdatesPage() {
                                QStringLiteral("GitHub releases")});
     updateUrl_ = new QLineEdit(page);
     updateUrl_->setPlaceholderText(QStringLiteral("https://vendor.example/download/package.deb"));
+    directUrlFullCheckInterval_ = new QComboBox(page);
+    directUrlFullCheckInterval_->addItem(QStringLiteral("Daily"), 24);
+    directUrlFullCheckInterval_->addItem(QStringLiteral("Weekly"), 24 * 7);
+    directUrlFullCheckInterval_->addItem(QStringLiteral("Monthly"), 24 * 30);
+    directUrlFullCheckInterval_->addItem(QStringLiteral("Manual only"), 0);
+    directUrlFullCheckInterval_->setToolTip(QStringLiteral(
+        "Used only when the server exposes no ETag, Last-Modified value, or supported object-version header. Manual checks always run immediately."));
     aptSuite_ = new QLineEdit(page);
     aptSuite_->setPlaceholderText(QStringLiteral("stable, or ./ for a flat repository"));
     aptSuite_->setToolTip(QStringLiteral(
@@ -889,6 +896,7 @@ QWidget *MainWindow::createUpdatesPage() {
         "The default policy prefers stable releases, falls back to prereleases when no matching stable release exists, and moves to stable when one is published."));
     form->addRow(QStringLiteral("Strategy"), updateStrategy_);
     form->addRow(QStringLiteral("URL / repository"), updateUrl_);
+    form->addRow(QStringLiteral("Full-content checks"), directUrlFullCheckInterval_);
     form->addRow(QStringLiteral("APT suite"), aptSuite_);
     form->addRow(QStringLiteral("APT component"), aptComponent_);
     form->addRow(QStringLiteral("APT architecture"), aptArchitecture_);
@@ -976,11 +984,14 @@ QWidget *MainWindow::createUpdatesPage() {
     });
     const auto updateStrategyUi = [this, form, keyringRow, keyUrlRow](const int index) {
         const bool hasRelease = updateEditorRelease() != nullptr;
+        const bool direct = index == 1;
         const bool apt = index == 2;
         const bool rpm = index == 3;
         const bool repository = apt || rpm;
         const bool github = index == 4;
         updateUrl_->setEnabled(hasRelease && index != 0);
+        form->setRowVisible(directUrlFullCheckInterval_, direct);
+        directUrlFullCheckInterval_->setEnabled(hasRelease && direct);
         form->setRowVisible(aptSuite_, apt);
         form->setRowVisible(aptComponent_, apt);
         form->setRowVisible(aptArchitecture_, apt);
@@ -1015,7 +1026,7 @@ QWidget *MainWindow::createUpdatesPage() {
         updateSaveButton_->setEnabled(hasRelease);
         syncUpdateCheckButtons();
         updateNotice_->setText(index == 0 ? QStringLiteral("Manual updates: PacSmith will not query the network.")
-                              : index == 1 ? QStringLiteral("Direct URL saved; automatic version discovery is not implemented yet.")
+                              : index == 1 ? QStringLiteral("Direct URL checks use HTTP validators first. Servers without usable validators require a scheduled full download and SHA256 comparison.")
                               : apt ? QStringLiteral("APT checks compare verified Packages metadata with the active release.")
                               : rpm ? QStringLiteral("RPM checks verify repomd.xml, its primary metadata checksum, and the selected package SHA256 before accepting an update.")
                                     : QStringLiteral("GitHub checks ignore drafts, use stable releases by default, and require exactly one matching asset."));

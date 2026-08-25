@@ -816,6 +816,14 @@ QJsonObject UpdateConfiguration::toJson() const {
             {QStringLiteral("lastChecked"), dateToString(lastChecked)},
             {QStringLiteral("lastCheckMessage"), lastCheckMessage},
             {QStringLiteral("signatureVerified"), signatureVerified},
+            {QStringLiteral("directUrlEtag"), directUrlEtag},
+            {QStringLiteral("directUrlLastModified"), directUrlLastModified},
+            {QStringLiteral("directUrlContentLength"), QString::number(directUrlContentLength)},
+            {QStringLiteral("directUrlVendorValidatorName"), directUrlVendorValidatorName},
+            {QStringLiteral("directUrlVendorValidator"), directUrlVendorValidator},
+            {QStringLiteral("directUrlLastSha256"), directUrlLastSha256},
+            {QStringLiteral("directUrlLastFullCheck"), dateToString(directUrlLastFullCheck)},
+            {QStringLiteral("directUrlFullCheckIntervalHours"), directUrlFullCheckIntervalHours},
             {QStringLiteral("detectedCandidates"), stringsToJson(detectedCandidates)},
             {QStringLiteral("aptCandidates"), valueListToJson(aptCandidates)},
             {QStringLiteral("rpmCandidates"), valueListToJson(rpmCandidates)},
@@ -850,6 +858,19 @@ UpdateConfiguration UpdateConfiguration::fromJson(const QJsonObject &object) {
     result.lastChecked = dateFromString(object.value(QStringLiteral("lastChecked")));
     result.lastCheckMessage = object.value(QStringLiteral("lastCheckMessage")).toString();
     result.signatureVerified = object.value(QStringLiteral("signatureVerified")).toBool();
+    result.directUrlEtag = object.value(QStringLiteral("directUrlEtag")).toString();
+    result.directUrlLastModified = object.value(QStringLiteral("directUrlLastModified")).toString();
+    result.directUrlContentLength = object.value(QStringLiteral("directUrlContentLength"))
+                                        .toString(QStringLiteral("-1")).toLongLong();
+    result.directUrlVendorValidatorName =
+        object.value(QStringLiteral("directUrlVendorValidatorName")).toString();
+    result.directUrlVendorValidator =
+        object.value(QStringLiteral("directUrlVendorValidator")).toString();
+    result.directUrlLastSha256 = object.value(QStringLiteral("directUrlLastSha256")).toString();
+    result.directUrlLastFullCheck =
+        dateFromString(object.value(QStringLiteral("directUrlLastFullCheck")));
+    result.directUrlFullCheckIntervalHours = std::max(
+        0, object.value(QStringLiteral("directUrlFullCheckIntervalHours")).toInt(24));
     result.detectedCandidates = stringsFromJson(object.value(QStringLiteral("detectedCandidates")));
     result.aptCandidates = valueListFromJson<AptRepositoryCandidate>(object.value(QStringLiteral("aptCandidates")));
     result.rpmCandidates = valueListFromJson<RpmRepositoryCandidate>(object.value(QStringLiteral("rpmCandidates")));
@@ -1078,7 +1099,6 @@ const PackageRelease *Project::installedRelease() const { return release(install
 
 PackageRelease *Project::activeTrackingRelease() {
     if (auto *installed = installedRelease(); installed != nullptr) return installed;
-    if (!installedVersion.isEmpty() || externallyInstalled) return nullptr;
     PackageRelease *newest = nullptr;
     for (auto &candidate : releases) {
         if (candidate.state == ReleaseState::Discovered ||
@@ -1097,7 +1117,6 @@ PackageRelease *Project::activeTrackingRelease() {
 
 const PackageRelease *Project::activeTrackingRelease() const {
     if (const auto *installed = installedRelease(); installed != nullptr) return installed;
-    if (!installedVersion.isEmpty() || externallyInstalled) return nullptr;
     const PackageRelease *newest = nullptr;
     for (const auto &candidate : releases) {
         if (candidate.state == ReleaseState::Discovered ||

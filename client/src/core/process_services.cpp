@@ -31,6 +31,18 @@ bool ProcessResult::succeeded() const noexcept {
     return exitStatus == QProcess::NormalExit && exitCode == 0;
 }
 
+std::optional<InstallPrivilegeMode> parseInstallPrivilegeOptions(
+    const QStringList &options, QString *error) {
+    if (options.isEmpty()) return InstallPrivilegeMode::TtySudo;
+    if (options.size() == 1 && options.first() == QStringLiteral("--polkit")) {
+        return InstallPrivilegeMode::Polkit;
+    }
+    if (error != nullptr) {
+        *error = QStringLiteral("the only supported package-authorization option is --polkit");
+    }
+    return std::nullopt;
+}
+
 BuildService::BuildService(QObject *parent) : QObject(parent) {
     connect(&process_, &QProcess::readyReadStandardOutput, this, [this]() {
         const auto text = QString::fromLocal8Bit(process_.readAllStandardOutput());
@@ -154,8 +166,13 @@ QStringList InstallService::uninstallArguments(const QString &packageName,
     return arguments;
 }
 
+QString InstallService::privilegeProgram(const InstallPrivilegeMode mode) {
+    return mode == InstallPrivilegeMode::Polkit
+        ? QStringLiteral("/usr/bin/pkexec") : QStringLiteral("/usr/bin/sudo");
+}
+
 void InstallService::start(const std::filesystem::path &packagePath,
-                           const bool nonInteractive) {
+                           const InstallPrivilegeMode mode) {
     if (isRunning()) {
         emit failedToStart(QStringLiteral("An installation is already running"));
         return;
@@ -167,21 +184,27 @@ void InstallService::start(const std::filesystem::path &packagePath,
         emit failedToStart(QStringLiteral("Not a valid absolute Arch package path: %1").arg(package.filePath()));
         return;
     }
+    if (mode == InstallPrivilegeMode::TtySudo && ::isatty(STDIN_FILENO) == 0) {
+        emit failedToStart(QStringLiteral(
+            "Terminal authorization requires an interactive TTY; rerun this PacSmith package operation with --polkit"));
+        return;
+    }
+    const bool nonInteractive = mode == InstallPrivilegeMode::Polkit;
     result_ = {};
     result_.startedAt = QDateTime::currentDateTimeUtc();
     process_.setInputChannelMode(nonInteractive ? QProcess::ManagedInputChannel
                                                 : QProcess::ForwardedInputChannel);
-    process_.setProgram(QStringLiteral("/usr/bin/pkexec"));
+    process_.setProgram(privilegeProgram(mode));
     process_.setArguments(installArguments(package.absoluteFilePath(), nonInteractive));
     process_.start();
     if (nonInteractive) process_.closeWriteChannel();
     emit progressChanged(nonInteractive
         ? QStringLiteral("Waiting for polkit authorization and non-interactive pacman installation…")
-        : QStringLiteral("Waiting for pacman installation…"));
+        : QStringLiteral("Waiting for terminal sudo authorization and pacman installation…"));
 }
 
 void InstallService::startUninstall(const QString &packageName,
-                                    const bool nonInteractive) {
+                                    const InstallPrivilegeMode mode) {
     if (isRunning()) {
         emit failedToStart(QStringLiteral("A package operation is already running"));
         return;
@@ -190,17 +213,23 @@ void InstallService::startUninstall(const QString &packageName,
         emit failedToStart(QStringLiteral("Invalid Arch package name: %1").arg(packageName));
         return;
     }
+    if (mode == InstallPrivilegeMode::TtySudo && ::isatty(STDIN_FILENO) == 0) {
+        emit failedToStart(QStringLiteral(
+            "Terminal authorization requires an interactive TTY; rerun this PacSmith package operation with --polkit"));
+        return;
+    }
+    const bool nonInteractive = mode == InstallPrivilegeMode::Polkit;
     result_ = {};
     result_.startedAt = QDateTime::currentDateTimeUtc();
     process_.setInputChannelMode(nonInteractive ? QProcess::ManagedInputChannel
                                                 : QProcess::ForwardedInputChannel);
-    process_.setProgram(QStringLiteral("/usr/bin/pkexec"));
+    process_.setProgram(privilegeProgram(mode));
     process_.setArguments(uninstallArguments(packageName, nonInteractive));
     process_.start();
     if (nonInteractive) process_.closeWriteChannel();
     emit progressChanged(nonInteractive
         ? QStringLiteral("Waiting for polkit authorization and non-interactive pacman removal…")
-        : QStringLiteral("Waiting for pacman removal…"));
+        : QStringLiteral("Waiting for terminal sudo authorization and pacman removal…"));
 }
 
 } // namespace pacsmith

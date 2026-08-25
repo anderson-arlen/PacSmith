@@ -126,6 +126,9 @@ void showDetailedMessageDialog(QWidget *parent, const QString &title, const QStr
 QString projectDirectory(const LibraryClient &library, const Project &project);
 QIcon projectIcon(const LibraryClient &library, const Project &project);
 QString retainedPackagePath(const LibraryClient &library, const PackageRelease &release);
+QString acquireRetainedPackagePath(const LibraryClient &library,
+                                   const PackageRelease &release,
+                                   QString *error = nullptr);
 const BuildRecord *latestSuccessfulBuild(const PackageRelease &release);
 bool releaseHasExistingBuild(const PackageRelease &release);
 bool releaseHasRetainedPackage(const PackageRelease &release);

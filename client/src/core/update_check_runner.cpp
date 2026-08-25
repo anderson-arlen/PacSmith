@@ -4,6 +4,7 @@
 #include "core/app_settings.hpp"
 #include "core/credential_store.hpp"
 #include "core/deb_download_service.hpp"
+#include "core/direct_url_update_service.hpp"
 #include "core/github_update_service.hpp"
 #include "core/rpm_update_service.hpp"
 #include "core/update_source.hpp"
@@ -74,9 +75,28 @@ void publishCheckProgress(BackgroundUpdateState &state, const LibraryClient &lib
 }
 
 UpdateCheckResult checkRelease(LibraryClient &library, const PackageRelease &release,
-                               QTextStream &diagnostics) {
+                               QTextStream &diagnostics, const bool forceFullContentCheck) {
     UpdateCheckResult result;
-    if (release.update.strategy == UpdateStrategy::AptRepository) {
+    if (release.update.strategy == UpdateStrategy::DirectUrl) {
+        QEventLoop loop;
+        DirectUrlUpdateService service;
+        QObject::connect(&service, &DirectUrlUpdateService::progressChanged,
+                         [&diagnostics](const QString &message) { diagnostics << message << '\n'; });
+        QObject::connect(&service, &DirectUrlUpdateService::downloadProgress,
+                         [&diagnostics](const qint64 received, const qint64 total) {
+                             diagnostics << "direct artifact " << received
+                                         << (total > 0 ? QStringLiteral("/%1").arg(total)
+                                                       : QString{})
+                                         << " bytes\r" << Qt::flush;
+                         });
+        QObject::connect(&service, &DirectUrlUpdateService::finished,
+                         [&result, &loop](const UpdateCheckResult &checked) {
+                             result = checked;
+                             loop.quit();
+                         });
+        service.start(release, forceFullContentCheck);
+        if (service.isRunning()) loop.exec();
+    } else if (release.update.strategy == UpdateStrategy::AptRepository) {
         QEventLoop loop;
         AptUpdateService service;
         bool completedSynchronously = false;
@@ -193,6 +213,7 @@ std::optional<ImportResult> UpdateCheckRunner::prepareDiscovered(
 
 UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project project,
                                             QTextStream &diagnostics,
+                                            const bool forceFullContentCheck,
                                             BackgroundUpdateState *backgroundState) {
     UpdateCheckRunResult runResult;
     runResult.projectId = project.id;
@@ -200,19 +221,30 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
     auto *release = project.activeTrackingRelease();
     if (release == nullptr) {
         runResult.status = QStringLiteral("paused");
-        runResult.message = project.externallyInstalled || !project.installedVersion.isEmpty()
-            ? QStringLiteral("installed package does not match a PacSmith release")
-            : QStringLiteral("project has no analyzed release to track");
+        runResult.message = QStringLiteral("project has no analyzed release to track");
         if (backgroundState != nullptr) {
             backgroundState->message = QStringLiteral("Some projects have no eligible update tracker");
         }
         return runResult;
     }
 
-    const auto result = checkRelease(library, *release, diagnostics);
+    const auto result = checkRelease(library, *release, diagnostics, forceFullContentCheck);
     release->update.lastChecked = QDateTime::currentDateTimeUtc();
     release->update.lastCheckMessage = result.message;
     release->update.signatureVerified = result.signatureVerified;
+    if (release->update.strategy == UpdateStrategy::DirectUrl && result.success) {
+        release->update.directUrlEtag = result.directUrlEtag;
+        release->update.directUrlLastModified = result.directUrlLastModified;
+        release->update.directUrlContentLength = result.directUrlContentLength;
+        release->update.directUrlVendorValidatorName = result.directUrlVendorValidatorName;
+        release->update.directUrlVendorValidator = result.directUrlVendorValidator;
+        if (!result.directUrlLastSha256.isEmpty()) {
+            release->update.directUrlLastSha256 = result.directUrlLastSha256;
+        }
+        if (result.directUrlLastFullCheck.isValid()) {
+            release->update.directUrlLastFullCheck = result.directUrlLastFullCheck;
+        }
+    }
     if (result.success && !result.detectedVersion.isEmpty()) {
         release->update.detectedVersion = result.detectedVersion;
         release->update.detectedFilename = result.filename;
@@ -236,8 +268,19 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
                 result.sha256, result.downloadUrl, &saveError, result.releaseId,
                 result.assetId, result.tag, result.publisherDigest, result.prerelease)) {
             discoveredId = discovered->id;
+            if (!result.localArtifactPath.isEmpty()) {
+                QString retainError;
+                static_cast<void>(retainDirectUrlArtifact(
+                    result, project.id, discoveredId, &retainError));
+                if (!retainError.isEmpty()) {
+                    diagnostics << "warning: " << retainError << '\n';
+                }
+            }
         } else if (!saveError.isEmpty()) {
             diagnostics << "warning: " << saveError << '\n';
+            if (!result.localArtifactPath.isEmpty()) {
+                static_cast<void>(QFile::remove(result.localArtifactPath));
+            }
         }
     }
 
@@ -326,6 +369,7 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
     if (!library.save(project, &saveError)) diagnostics << "warning: " << saveError << '\n';
     if (!result.success && backgroundState != nullptr) ++backgroundState->failedChecks;
     runResult.status = !result.success ? QStringLiteral("error")
+                           : result.fullContentCheckDeferred ? QStringLiteral("deferred")
                                       : result.updateAvailable ? QStringLiteral("update")
                                                                : QStringLiteral("no-update");
     runResult.message = result.message;
@@ -358,7 +402,7 @@ UpdateCheckBatchResult UpdateCheckRunner::runAll(LibraryClient &library,
         state.checkingProjectName = projectActivityName(project);
         state.message = QStringLiteral("Checking %1 for updates").arg(state.checkingProjectName);
         publishCheckProgress(state, library);
-        const auto result = run(library, project, diagnostics, &state);
+        const auto result = run(library, project, diagnostics, false, &state);
         batch.exitCode = std::max(batch.exitCode, result.exitCode);
         batch.checks.append(result);
         publishCheckProgress(state, library);

@@ -100,6 +100,8 @@ Do not invent a separate local RPC protocol.
 
 Artifacts are part of the API. Server filesystem paths are never given to clients. Uploads and downloads are streamed; large files are not loaded fully into RAM.
 
+Remote artifact creation is also part of the MCP domain surface. `import_github_release` accepts a GitHub repository, tagged release, or exact release-asset URL and uses PacSmith's GitHub selector, downloader, digest verification, and normal import pipeline. `import_direct_url` applies the same owned acquisition pipeline to another first-party HTTPS URL. Agents never need to create a local staging file with an external downloader. Ambiguous GitHub inputs return visible asset names and require an asset rule that selects exactly one non-sidecar artifact.
+
 Upload: client file → HTTP body → temporary file (hashed while streaming) → validate → fsync → atomic move into the object store → SQLite association.
 
 Download: object store → HTTP body → client.
@@ -223,7 +225,7 @@ These remain C++ client responsibilities and must not move into `pacsmithd`:
 - Query the local pacman/libalpm database
 - Determine whether a package is installed locally and which version
 - Reconcile server project/release identity with this machine
-- Privileged local install/remove: `pkexec /usr/bin/pacman -U|--remove` with a fixed argv
+- Privileged local install/remove through fixed argument vectors: terminal-native `sudo` by default, or explicit `pkexec` for graphical clients
 - GUI/CLI presentation of this machine’s install state
 
 `pacsmithd` must never run `pacman -U` on behalf of a client machine. Client-machine installed-package observations are not shared library state.
@@ -242,7 +244,9 @@ reviewable project + PKGBUILD
 makepkg output
        │  client streams the package; explicit local install choice
        ▼
-pkexec /usr/bin/pacman -U -- <absolute-package-path>
+sudo /usr/bin/pacman -U -- <absolute-package-path>
+  or, when explicitly requested by a graphical client:
+pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>
 ```
 
 Invariant:
@@ -322,6 +326,8 @@ PKGBUILD validation is static and does not source the file. A generated Arch `.i
 
 Persisted strategies: Manual, Direct URL, APT repository, RPM repository, GitHub Releases. Acquisition identity is immutable release provenance and is never repurposed as a future-download setting.
 
+Direct URL checks are artifact-format agnostic. PacSmith first probes HTTP metadata and compares ETag, Last-Modified plus Content-Length, or explicitly supported object-generation headers. A stable validator avoids downloading the artifact. A changed or unavailable validator triggers a complete download when the project’s full-content interval permits it; SHA-256, never the validator, decides whether the bytes are new. Servers without usable validators are identified in the GUI, where full-content checks can be scheduled daily, weekly, monthly, or manually. A manually requested check always runs immediately. Changed bytes then enter the ordinary untrusted-artifact inspection path to establish their package type and version.
+
 A signed APT or RPM repository may be the first acquisition source. Checks require a project-local public key and pinned signer fingerprint. APT verifies clear-signed `InRelease` or detached `Release.gpg` with `gpgv`, rejects a valid signature from any non-pinned key, selects Packages indexes only from the signed Release SHA-256 table, and caps response/decompression sizes. RPM checks verify `repodata/repomd.xml.asc`, the primary metadata checksum recorded in signed `repomd.xml`, and the package SHA-256 in primary metadata.
 
 GitHub uses the public REST API with an optional PAT. Drafts are ignored; prereleases are opt-in except when the user imported a tagged prerelease URL. A user-visible regular expression must full-match exactly one asset. When GitHub exposes a `sha256:` digest it is verified; otherwise the release is explicitly unsigned and PacSmith records the locally computed hash.
@@ -357,7 +363,7 @@ Tool annotations describe read-only, destructive, idempotent, and open-world beh
 
 Every mutating project and release tool input uses human-readable project/package names and release versions from `list_projects`. UUIDs remain available to read tools as stable lookup identifiers, but are not the sole target shown to a person in a harness preflight. Sensitive operations also use the server-verified names in PacSmith's elicitation prompt.
 
-Routine recipe edits do not trigger confirmation spam. The boundary is maintained project state versus deletion, trust/system changes, or published repository state. PacSmith currently does not expose package installation or repository bootstrap/trust installation through MCP.
+Routine recipe edits do not trigger confirmation spam. The boundary is maintained project state versus deletion, trust/system changes, or published repository state. PacSmith does not expose package installation or repository bootstrap/trust installation through MCP. The constrained `pacsmith install <project>` CLI is the host-local installation boundary: it accepts no arbitrary package path, resolves a retained PacSmith artifact, uses sudo in the current TTY by default, and supports explicit `--polkit` for graphical callers.
 
 Automatic updates remain deterministic:
 

@@ -60,9 +60,9 @@ void printUsage(QTextStream &stream) {
               "  pacsmith pkgbuild <project>\n"
               "  pacsmith custom-file <project> list|read <name>|write <name> <path>|delete <name>\n"
               "  pacsmith build <project>\n"
-              "  pacsmith install <project> [package.pkg.tar.zst]\n"
-              "  pacsmith rollback <project> <release-id|version>\n"
-              "  pacsmith uninstall <project>\n"
+              "  pacsmith install [--polkit] <project>\n"
+              "  pacsmith rollback <project> <release-id|version> [--polkit]\n"
+              "  pacsmith uninstall [--polkit] <project>\n"
               "  pacsmith check <project>|--all\n"
               "  pacsmith mcp\n"
               "  pacsmith skill path|install [--force]|uninstall\n"
@@ -355,7 +355,8 @@ int runRepositoryAdd(const QStringList &arguments, pacsmith::LibraryClient &libr
 int runCheck(pacsmith::LibraryClient &library, pacsmith::Project project, QTextStream &out,
              QTextStream &errorStream, pacsmith::BackgroundUpdateState *backgroundState = nullptr) {
     const auto result =
-        pacsmith::UpdateCheckRunner::run(library, std::move(project), errorStream, backgroundState);
+        pacsmith::UpdateCheckRunner::run(
+            library, std::move(project), errorStream, false, backgroundState);
     if (result.prepared) {
         out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
     }
@@ -780,7 +781,22 @@ int main(int argc, char *argv[]) {
         errorStream << "error: " << command << " requires a project ID or name\n";
         return 1;
     }
-    auto project = requireProject(library, arguments.at(2), errorStream);
+    auto projectArgument = arguments.at(2);
+    QStringList packageAuthorizationOptions;
+    if (command == QStringLiteral("install") || command == QStringLiteral("uninstall")) {
+        if (arguments.at(2) == QStringLiteral("--polkit")) {
+            if (arguments.size() < 4) {
+                errorStream << "error: " << command << " requires a project ID or name\n";
+                return 1;
+            }
+            projectArgument = arguments.at(3);
+            packageAuthorizationOptions.append(QStringLiteral("--polkit"));
+            packageAuthorizationOptions.append(arguments.sliced(4));
+        } else {
+            packageAuthorizationOptions = arguments.sliced(3);
+        }
+    }
+    auto project = requireProject(library, projectArgument, errorStream);
     if (!project) return 1;
     auto *release = project->newestRelease();
     if (release == nullptr) {
@@ -1039,6 +1055,14 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     if (command == QStringLiteral("install")) {
+        QString optionError;
+        const auto privilegeMode = pacsmith::parseInstallPrivilegeOptions(
+            packageAuthorizationOptions, &optionError);
+        if (!privilegeMode) {
+            errorStream << "error: " << optionError
+                        << "\nusage: pacsmith install [--polkit] <project>\n";
+            return 1;
+        }
         if (!release->lifecycleScript.contents.isEmpty() &&
             (!release->lifecycleScript.validationPassed ||
              release->lifecycleScript.requiresAcknowledgement())) {
@@ -1050,8 +1074,7 @@ int main(int argc, char *argv[]) {
         }
         QString error;
         QString packagePath;
-        if (arguments.size() >= 4) packagePath = QFileInfo(arguments.at(3)).absoluteFilePath();
-        else if (!release->builtArtifactIds.isEmpty()) {
+        if (!release->builtArtifactIds.isEmpty()) {
             packagePath = library.cacheArtifact(release->builtArtifactIds.first(),
                                                 QStringLiteral("package.pkg.tar.zst"), &error);
         } else if (!release->producedPackages.isEmpty()) packagePath = release->producedPackages.first();
@@ -1083,14 +1106,22 @@ int main(int argc, char *argv[]) {
                              exitCode = result.succeeded() ? 0 : 1;
                              QCoreApplication::exit(exitCode);
         });
-        service.start(std::filesystem::path(packagePath.toUtf8().constData()));
+        service.start(std::filesystem::path(packagePath.toUtf8().constData()), *privilegeMode);
         if (!service.isRunning()) return exitCode;
         application.exec();
         return exitCode;
     }
     if (command == QStringLiteral("rollback")) {
-        if (arguments.size() != 4) {
+        if (arguments.size() < 4) {
             errorStream << "error: rollback requires a release ID or version\n";
+            return 1;
+        }
+        QString optionError;
+        const auto privilegeMode = pacsmith::parseInstallPrivilegeOptions(
+            arguments.sliced(4), &optionError);
+        if (!privilegeMode) {
+            errorStream << "error: " << optionError
+                        << "\nusage: pacsmith rollback <project> <release-id|version> [--polkit]\n";
             return 1;
         }
         const auto selected = std::find_if(project->releases.begin(), project->releases.end(),
@@ -1146,11 +1177,19 @@ int main(int argc, char *argv[]) {
                              exitCode = result.succeeded() ? 0 : 1;
                              QCoreApplication::exit(exitCode);
                          });
-        service.start(std::filesystem::path(packagePath.toUtf8().constData()));
+        service.start(std::filesystem::path(packagePath.toUtf8().constData()), *privilegeMode);
         if (service.isRunning()) application.exec();
         return exitCode;
     }
     if (command == QStringLiteral("uninstall")) {
+        QString optionError;
+        const auto privilegeMode = pacsmith::parseInstallPrivilegeOptions(
+            packageAuthorizationOptions, &optionError);
+        if (!privilegeMode) {
+            errorStream << "error: " << optionError
+                        << "\nusage: pacsmith uninstall [--polkit] <project>\n";
+            return 1;
+        }
         if (project->installedVersion.isEmpty()) {
             out << project->id << "\tnot-installed\n";
             return 0;
@@ -1179,7 +1218,7 @@ int main(int argc, char *argv[]) {
                              exitCode = result.succeeded() ? 0 : 1;
                              QCoreApplication::exit(exitCode);
                          });
-        service.startUninstall(project->archPackageName);
+        service.startUninstall(project->archPackageName, *privilegeMode);
         if (service.isRunning()) application.exec();
         return exitCode;
     }

@@ -1065,10 +1065,19 @@ PackageRelease *LibraryClient::recordDiscoveredRelease(
     discovered.acquisition.githubTag = providerTag;
     discovered.acquisition.publisherDigest = publisherDigest;
     discovered.acquisition.githubPrerelease = providerPrerelease;
-    project.releases.append(discovered);
-    if (error != nullptr) {
-        *error = QStringLiteral("discovered releases require a follow-up import of the vendor artifact");
+    if (tracker.update.strategy == UpdateStrategy::DirectUrl) {
+        discovered.acquisition.kind = AcquisitionKind::DirectUrl;
+        discovered.acquisition.originalUrl = downloadUrl;
     }
+    if (!save(project, error)) return nullptr;
+    const auto created = sendJson(
+        QStringLiteral("POST"),
+        QStringLiteral("/api/v1/projects/") + project.id + QStringLiteral("/releases"),
+        {{QStringLiteral("document"), discovered.toJson()}}, error, 201);
+    if (!created) return nullptr;
+    discovered = PackageRelease::fromJson(*created);
+    project.releases.append(std::move(discovered));
+    if (error != nullptr) error->clear();
     return &project.releases.last();
 }
 

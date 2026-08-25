@@ -202,6 +202,8 @@ bool MainWindow::hasUnsavedProjectDraft() const {
          githubOwner_->text() != update.githubOwner ||
          githubRepository_->text() != update.githubRepository ||
          githubAssetRegex_->text() != update.githubAssetRegex ||
+         directUrlFullCheckInterval_->currentData().toInt() !=
+             update.directUrlFullCheckIntervalHours ||
             githubPrereleases_->isChecked() != update.githubIncludePrereleases) {
             return true;
         }

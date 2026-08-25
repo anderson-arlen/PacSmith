@@ -2,10 +2,12 @@
 
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
+#include "core/credential_store.hpp"
 #include "core/domain_validation.hpp"
 #include "core/payload_review.hpp"
 #include "core/pkgbuild_generator.hpp"
 #include "core/release_review.hpp"
+#include "core/remote_import_service.hpp"
 #include "core/update_check_runner.hpp"
 #include "mcp/permission_policy.hpp"
 
@@ -273,6 +275,18 @@ QJsonArray tools() {
                            {QStringLiteral("existing_project"), project},
                            {QStringLiteral("canonical_identity"), stringProperty(QStringLiteral("Stable source identity such as vendor:product."))}},
                           {QStringLiteral("path")}), annotations(false, false, false, false)),
+        tool(QStringLiteral("import_github_release"),
+             QStringLiteral("Create or update a project directly from a first-party GitHub repository, release, or release-asset URL. PacSmith resolves the release, selects exactly one non-sidecar asset, downloads and verifies it, and performs normal inspection; never download the asset with curl or another external tool."),
+             objectSchema({{QStringLiteral("url"), stringProperty(QStringLiteral("HTTPS github.com repository, release, or release-asset URL."))},
+                           {QStringLiteral("asset_regex"), stringProperty(QStringLiteral("Optional persistent regular expression that must full-match exactly one release asset. An exact release-asset URL supplies this automatically."))},
+                           {QStringLiteral("include_prereleases"), booleanProperty(QStringLiteral("Allow prerelease selection when a specific tag is not present in the URL."))},
+                           {QStringLiteral("existing_project"), project}},
+                          {QStringLiteral("url")}), annotations(false, false, false, true)),
+        tool(QStringLiteral("import_direct_url"),
+             QStringLiteral("Create or update a project directly from a first-party HTTPS artifact URL. PacSmith owns the download, SHA256 calculation, upload, and inspection; never download the artifact with curl or another external tool."),
+             objectSchema({{QStringLiteral("url"), stringProperty(QStringLiteral("Direct HTTPS URL for a vendor package or archive."))},
+                           {QStringLiteral("existing_project"), project}},
+                          {QStringLiteral("url")}), annotations(false, false, false, true)),
         tool(QStringLiteral("update_project_metadata"), QStringLiteral("Edit ordinary project display/package/vendor metadata."),
              objectSchema({{QStringLiteral("project"), project}, {QStringLiteral("display_name"), stringProperty(QStringLiteral("Display name."))},
                            {QStringLiteral("arch_package_name"), stringProperty(QStringLiteral("Arch package name."))},
@@ -359,6 +373,7 @@ QJsonArray tools() {
         tool(QStringLiteral("set_update_configuration"), QStringLiteral("Edit the normal deterministic update-source configuration for a release."),
              objectSchema({{QStringLiteral("release_id"), release}, {QStringLiteral("strategy"), stringProperty(QStringLiteral("manual, direct-url, apt-repository, rpm-repository, or github-release."))},
                            {QStringLiteral("url"), stringProperty(QStringLiteral("Source or repository URL."))},
+                           {QStringLiteral("direct_url_full_check_interval_hours"), integerProperty(QStringLiteral("Hours between automatic full-content checks when a Direct URL exposes no usable validator; zero means manual only."))},
                            {QStringLiteral("github_owner"), stringProperty(QStringLiteral("GitHub owner."))},
                            {QStringLiteral("github_repository"), stringProperty(QStringLiteral("GitHub repository."))},
                            {QStringLiteral("github_asset_regex"), stringProperty(QStringLiteral("Persistent asset-selection regular expression."))},
@@ -821,7 +836,8 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         } else {
             const auto project = loadNamedProject(library_, requestedProject, &error);
             if (!project) return fail(error);
-            const auto checked = UpdateCheckRunner::run(library_, *project, diagnostics);
+            const auto checked = UpdateCheckRunner::run(
+                library_, *project, diagnostics, true);
             batch.checks.append(checked);
             batch.exitCode = checked.exitCode;
         }
@@ -1263,6 +1279,57 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         return toolResult(id, QJsonObject{{QStringLiteral("project_id"), imported->project.id},
                                           {QStringLiteral("release_id"), imported->releaseId}});
     }
+    if (name == QStringLiteral("import_github_release") ||
+        name == QStringLiteral("import_direct_url")) {
+        QString existingProjectId;
+        const auto existingProjectName =
+            argumentString(args, QStringLiteral("existing_project_name"));
+        if (!existingProjectName.isEmpty()) {
+            const auto existing = loadNamedProject(library_, existingProjectName, &error);
+            if (!existing) return fail(error);
+            existingProjectId = existing->id;
+        }
+        const QUrl url(argumentString(args, QStringLiteral("url")), QUrl::StrictMode);
+        std::optional<RemoteArtifactImportResult> imported;
+        if (name == QStringLiteral("import_github_release")) {
+            AppSettingsStore settingsStore;
+            const auto settings = settingsStore.load();
+            const auto source = settings.credentialSources.value(
+                QStringLiteral("github"), CredentialSource::Environment);
+            CredentialStore credentials(settingsStore.ageSecretsPath());
+            auto token = credentials.load(QStringLiteral("github"), source, nullptr)
+                             .value_or(QString{});
+            imported = RemoteImportService::importGitHub(
+                library_, url, argumentString(args, QStringLiteral("asset_regex")),
+                args.value(QStringLiteral("include_prereleases")).toBool(false),
+                existingProjectId, token, &error);
+            token.fill(QChar::Null);
+        } else {
+            imported = RemoteImportService::importDirectUrl(
+                library_, url, existingProjectId, &error);
+        }
+        if (!imported) return fail(error);
+        const auto *importedRelease = imported->imported.project.release(
+            imported->imported.releaseId);
+        return toolResult(id, QJsonObject{
+            {QStringLiteral("project_id"), imported->imported.project.id},
+            {QStringLiteral("project_name"), imported->imported.project.displayName},
+            {QStringLiteral("release_id"), imported->imported.releaseId},
+            {QStringLiteral("release_name"),
+             importedRelease == nullptr ? imported->source.detectedVersion
+                                        : importedRelease->debian.version},
+            {QStringLiteral("source_filename"),
+             importedRelease == nullptr ? imported->source.filename
+                                        : importedRelease->originalSourceFilename},
+            {QStringLiteral("source_sha256"),
+             importedRelease == nullptr ? imported->source.sha256
+                                        : importedRelease->sourceSha256},
+            {QStringLiteral("project_created"), imported->imported.projectCreated},
+            {QStringLiteral("duplicate"), imported->imported.duplicate},
+            {QStringLiteral("github_tag"), imported->source.tag},
+            {QStringLiteral("publisher_digest"), imported->source.publisherDigest},
+        });
+    }
     if (name == QStringLiteral("update_project_metadata")) {
         auto loaded = loadNamedProject(library_, argumentString(args, QStringLiteral("project_name")), &error);
         if (!loaded) return fail(error);
@@ -1598,6 +1665,8 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     }
     if (name == QStringLiteral("set_update_configuration")) {
         const auto strategy = argumentString(args, QStringLiteral("strategy"));
+        const auto previousStrategy = release->update.strategy;
+        const auto previousUrl = release->update.url;
         if (strategy == QStringLiteral("manual")) release->update.strategy = UpdateStrategy::Manual;
         else if (strategy == QStringLiteral("direct-url")) release->update.strategy = UpdateStrategy::DirectUrl;
         else if (strategy == QStringLiteral("apt-repository")) release->update.strategy = UpdateStrategy::AptRepository;
@@ -1617,7 +1686,21 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         assign(QStringLiteral("rpm_package"), release->update.rpmPackageName);
         assign(QStringLiteral("signing_keyring"), release->update.aptSigningKeyring);
         assign(QStringLiteral("trusted_signing_fingerprint"), release->update.trustedSigningFingerprint);
+        if (args.contains(QStringLiteral("direct_url_full_check_interval_hours"))) {
+            release->update.directUrlFullCheckIntervalHours =
+                std::max(0, args.value(QStringLiteral("direct_url_full_check_interval_hours")).toInt());
+        }
         if (args.contains(QStringLiteral("github_include_prereleases"))) release->update.githubIncludePrereleases = args.value(QStringLiteral("github_include_prereleases")).toBool();
+        if (release->update.strategy == UpdateStrategy::DirectUrl &&
+            (previousStrategy != UpdateStrategy::DirectUrl || previousUrl != release->update.url)) {
+            release->update.directUrlEtag.clear();
+            release->update.directUrlLastModified.clear();
+            release->update.directUrlContentLength = -1;
+            release->update.directUrlVendorValidatorName.clear();
+            release->update.directUrlVendorValidator.clear();
+            release->update.directUrlLastSha256.clear();
+            release->update.directUrlLastFullCheck = {};
+        }
         const auto validationError = DomainValidation::updateConfiguration(release->update);
         if (!validationError.isEmpty()) return fail(validationError);
         if ((release->update.strategy == UpdateStrategy::AptRepository || release->update.strategy == UpdateStrategy::RpmRepository) &&

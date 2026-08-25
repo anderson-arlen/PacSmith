@@ -24,6 +24,15 @@ struct UpdateCheckResult {
     QString tag;
     QString publisherDigest;
     QString etag;
+    QString directUrlEtag;
+    QString directUrlLastModified;
+    qint64 directUrlContentLength{-1};
+    QString directUrlVendorValidatorName;
+    QString directUrlVendorValidator;
+    QString directUrlLastSha256;
+    QDateTime directUrlLastFullCheck;
+    QString localArtifactPath;
+    bool fullContentCheckDeferred{false};
     bool prerelease{false};
     QStringList availableAssets;
     QStringList matchingAssets;

@@ -215,6 +215,60 @@ func (s *Service) SaveRelease(ctx context.Context, releaseID string, revision in
 	return releaseDocument(updated), nil
 }
 
+func (s *Service) CreateDiscoveredRelease(ctx context.Context, projectID string,
+	document map[string]any) (Release, error) {
+	project, err := s.GetProject(ctx, projectID)
+	if err != nil {
+		return Release{}, err
+	}
+	debian, ok := mapValue(document, "debian")
+	if !ok {
+		return Release{}, ErrInvalid
+	}
+	version := strings.TrimSpace(stringValue(debian, "version"))
+	filename := strings.TrimSpace(stringValue(document, "originalSourceFilename"))
+	sha := strings.ToLower(strings.TrimSpace(stringValue(document, "sourceSha256")))
+	sourceURL := strings.TrimSpace(stringValue(document, "sourceUrl"))
+	decodedSHA, decodeErr := hex.DecodeString(sha)
+	if version == "" || filename == "" || sourceURL == "" ||
+		decodeErr != nil || len(decodedSHA) != sha256.Size {
+		return Release{}, ErrInvalid
+	}
+	if existing, getErr := s.DB.Queries.GetReleaseByProjectSHA256(
+		ctx, sqlcdb.GetReleaseByProjectSHA256Params{
+			ProjectID: projectID, SourceSha256: sha,
+		}); getErr == nil {
+		return releaseDocument(existing), nil
+	} else if !errors.Is(getErr, sql.ErrNoRows) {
+		return Release{}, getErr
+	}
+
+	releaseID := uuid.NewString()
+	document = cloneObject(document)
+	document["id"] = releaseID
+	document["projectId"] = projectID
+	document["state"] = "discovered"
+	document["sourceType"] = "unknown"
+	document["archPackageName"] = project.ArchPackageName
+	now := nowUTC()
+	document["createdAt"] = now
+	document["modifiedAt"] = now
+	raw, err := json.Marshal(document)
+	if err != nil {
+		return Release{}, err
+	}
+	release, err := s.DB.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID: releaseID, ProjectID: projectID, State: "discovered", SourceType: "unknown",
+		VendorVersion: version, OriginalFilename: filename, SourceSha256: sha,
+		SourceArtifactID: sql.NullString{}, ArchPackageName: project.ArchPackageName,
+		ArchPkgrel: 1, BodyJson: string(raw), CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		return Release{}, err
+	}
+	return releaseDocument(release), nil
+}
+
 func (s *Service) Reanalyze(ctx context.Context, releaseID string) (ImportResult, error) {
 	row, err := s.DB.Queries.GetRelease(ctx, releaseID)
 	if errors.Is(err, sql.ErrNoRows) {

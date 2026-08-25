@@ -726,9 +726,8 @@ QIcon projectIcon(const LibraryClient &library, const Project &project) {
 
 QString retainedPackagePath(const LibraryClient &library, const PackageRelease &release) {
     if (!release.builtArtifactIds.isEmpty()) {
-        QString error;
-        const auto cached = library.cacheArtifact(release.builtArtifactIds.last(),
-                                                  QStringLiteral("package.pkg.tar.zst"), &error);
+        const auto cached = library.cachedArtifactPath(release.builtArtifactIds.last(),
+                                                       QStringLiteral("package.pkg.tar.zst"));
         if (!cached.isEmpty() && QFileInfo::exists(cached)) return cached;
     }
     for (auto build = release.builds.crbegin(); build != release.builds.crend(); ++build) {
@@ -743,6 +742,20 @@ QString retainedPackagePath(const LibraryClient &library, const PackageRelease &
         if (QFileInfo::exists(path)) return path;
     }
     return {};
+}
+
+QString acquireRetainedPackagePath(const LibraryClient &library,
+                                   const PackageRelease &release, QString *error) {
+    if (!release.builtArtifactIds.isEmpty()) {
+        const auto cached = library.cacheArtifact(release.builtArtifactIds.last(),
+                                                  QStringLiteral("package.pkg.tar.zst"), error);
+        if (!cached.isEmpty() && QFileInfo::exists(cached)) return cached;
+    }
+    const auto local = retainedPackagePath(library, release);
+    if (local.isEmpty() && error != nullptr && error->isEmpty()) {
+        *error = QStringLiteral("No retained Arch package artifact exists for this release");
+    }
+    return local;
 }
 
 const BuildRecord *latestSuccessfulBuild(const PackageRelease &release) {
@@ -784,6 +797,10 @@ QString builtPackageSummaryHtml(const LibraryClient &library, const PackageRelea
     }
     const auto packagePath = retainedPackagePath(library, release);
     if (packagePath.isEmpty()) {
+        if (!release.builtArtifactIds.isEmpty()) {
+            return QStringLiteral(
+                "<b>Built package retained by the PacSmith library.</b><br>It will be downloaded to the client cache in the background when installation starts.");
+        }
         if (release.buildStatus == BuildStatus::Failed) {
             return QStringLiteral(
                 "<b>No package on disk.</b><br>The last build failed. Rebuild to produce an Arch package.");

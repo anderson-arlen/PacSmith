@@ -32,7 +32,7 @@ void MainWindow::updateDashboardActions() {
     const bool installed = project_ && !project_->installedVersion.isEmpty();
     if (uninstallButton_ != nullptr) {
         uninstallButton_->setVisible(installed);
-        uninstallButton_->setEnabled(installed && !installService_.isRunning());
+        uninstallButton_->setEnabled(installed && !packageOperationInProgress());
     }
     const auto *tracker = project_ ? project_->activeTrackingRelease() : nullptr;
     if (projectPrimaryButton_ == nullptr) {
@@ -58,7 +58,7 @@ void MainWindow::updateDashboardActions() {
         projectPrimaryButton_->setText(project_->installedVersion.isEmpty()
                                            ? QStringLiteral("Install")
                                            : QStringLiteral("Install Update"));
-        projectPrimaryButton_->setEnabled(!installService_.isRunning());
+        projectPrimaryButton_->setEnabled(!packageOperationInProgress());
     } else if (tracker->state == ReleaseState::Discovered) {
         projectPrimaryButton_->setVisible(true);
         projectPrimaryButton_->setText(QStringLiteral("Download & Prepare"));
@@ -176,7 +176,7 @@ std::optional<MainWindow::EditorSection> MainWindow::firstReviewSection(
 void MainWindow::updateProjectInfoActions() {
     if (projectActionNotice_ == nullptr || projectActionButton_ == nullptr) return;
     const auto *target = dashboardActionRelease();
-    const bool busy = buildInProgress() || installService_.isRunning();
+    const bool busy = buildInProgress() || packageOperationInProgress();
     const auto *editTarget = configurationEditRelease();
     if (editConfigurationButton_ != nullptr) {
         editConfigurationButton_->setVisible(editTarget != nullptr);
@@ -385,7 +385,8 @@ void MainWindow::updateUpdateCheckIndicators() {
     const auto updateState = BackgroundUpdateStateStore::load();
     QString checkingId = updateState.checkingProjectId;
     QString checkingName = updateState.checkingProjectName;
-    const bool inProcess = aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+    const bool inProcess = directUrlUpdateService_->isRunning() ||
+                           aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
                            githubUpdateService_->isRunning();
     if (checkingId.isEmpty() && inProcess && project_) {
         checkingId = project_->id;
@@ -450,7 +451,8 @@ void MainWindow::syncActivityTimer() {
 }
 
 bool MainWindow::updateCheckInProgress() const {
-    if (aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+    if (directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
+        rpmUpdateService_->isRunning() ||
         githubUpdateService_->isRunning()) {
         return true;
     }
@@ -459,7 +461,8 @@ bool MainWindow::updateCheckInProgress() const {
 
 bool MainWindow::listActivityInProgress() const {
     if (!preparingProjectId_.isEmpty()) return true;
-    if (aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+    if (directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
+        rpmUpdateService_->isRunning() ||
         githubUpdateService_->isRunning()) {
         return true;
     }
@@ -469,7 +472,7 @@ bool MainWindow::listActivityInProgress() const {
 
 bool MainWindow::canShowUpdateCheckStatus() const {
     return importThread_ == nullptr && importProgress_ == nullptr &&
-           !buildInProgress() && !installService_.isRunning();
+           !buildInProgress() && !packageOperationInProgress();
 }
 
 void MainWindow::publishUpdateCheckActivity(const bool running, const QString &projectId,
@@ -634,11 +637,13 @@ void MainWindow::refreshProjectList(const QString &selectId,
                                     std::function<void(bool)> completed) {
     const auto generation = ++projectListRefreshGeneration_;
     setProjectListBusy(true, QStringLiteral("Refreshing…"));
-    statusBar()->showMessage(QStringLiteral("Refreshing packages…"));
+    const auto refreshingMessage = QStringLiteral("Refreshing packages…");
+    statusBar()->showMessage(refreshingMessage);
     const auto config = library_.config();
     auto *watcher = new QFutureWatcher<ProjectListRefreshResult>(this);
     connect(watcher, &QFutureWatcher<ProjectListRefreshResult>::finished, this,
-            [this, watcher, generation, selectId, completed = std::move(completed)]() mutable {
+            [this, watcher, generation, selectId, refreshingMessage,
+             completed = std::move(completed)]() mutable {
         auto result = watcher->result();
         watcher->deleteLater();
         if (generation != projectListRefreshGeneration_) return;
@@ -648,6 +653,7 @@ void MainWindow::refreshProjectList(const QString &selectId,
             if (completed) completed(false);
             return;
         }
+        if (statusBar()->currentMessage() == refreshingMessage) statusBar()->clearMessage();
         applyProjectList(std::move(result.projects), selectId);
         if (completed) completed(true);
     });
@@ -677,7 +683,7 @@ void MainWindow::applyProjectList(QList<Project> projects, const QString &select
         if (!project.installedVersion.isEmpty()) {
             if (project.installedRelease() == nullptr || project.externallyInstalled) {
                 visualState = ProjectVisualState::Attention;
-                subtitle = QStringLiteral("⚠ Installed %1 · tracking needs attention")
+                subtitle = QStringLiteral("⚠ Installed %1 · package ownership needs attention")
                                .arg(project.installedVersion);
                 statusDescription = QStringLiteral("Installed package cannot be matched to a retained PacSmith release");
             } else if (project.hasAvailableUpdate()) {
@@ -1063,7 +1069,8 @@ void MainWindow::updateDeleteButton() {
         return;
     }
     const bool busy = projectListRefreshInFlight_ || projectDeleteInFlight_ ||
-                      buildInProgress() || installService_.isRunning() ||
+                      buildInProgress() || packageOperationInProgress() ||
+                      directUrlUpdateService_->isRunning() ||
                       aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
                       githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
                       importThread_ != nullptr;
@@ -1095,8 +1102,9 @@ void MainWindow::deleteCurrentProject() {
                                  .arg(project_->archPackageName));
         return;
     }
-    if (buildInProgress() || installService_.isRunning() ||
-        aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+    if (buildInProgress() || packageOperationInProgress() ||
+        directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
+        rpmUpdateService_->isRunning() ||
         githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
         importThread_ != nullptr) {
         QMessageBox::warning(this, QStringLiteral("Project is busy"),
@@ -1165,7 +1173,7 @@ void MainWindow::populateOverview() {
         ? QStringLiteral("<b>Not installed.</b> Latest known vendor release: %1. Retained releases remain available for building or installation.")
               .arg(latestText)
         : project_->externallyInstalled
-            ? QStringLiteral("<b>Externally installed:</b> %1. Latest known vendor release: %2. This pacman version does not match a retained PacSmith build; automatic update tracking is paused.")
+            ? QStringLiteral("<b>Externally installed:</b> %1. Latest known vendor release: %2. This pacman version does not match a retained PacSmith build; update monitoring uses the newest analyzed release until the installation is reconciled.")
                   .arg(project_->installedVersion.toHtmlEscaped(), latestText)
             : project_->hasAvailableUpdate()
                 ? QStringLiteral("<b>Update available.</b> Installed: %1 from release %2. Latest known vendor release: %3.")
@@ -1317,7 +1325,10 @@ void MainWindow::populateOverview() {
                       currentRelease()->update.strategy == UpdateStrategy::Manual
                           ? QStringLiteral("○ Automatic update source not configured")
                       : currentRelease()->update.strategy == UpdateStrategy::DirectUrl
-                          ? QStringLiteral("○ Direct URL configured; version discovery is not implemented")
+                          ? currentRelease()->update.lastChecked.isValid()
+                              ? QStringLiteral("✓ Direct URL checked: %1")
+                                    .arg(currentRelease()->update.lastCheckMessage)
+                              : QStringLiteral("○ Direct URL tracking configured; not checked yet")
                       : currentRelease()->update.strategy == UpdateStrategy::GitHubRelease
                           ? currentRelease()->update.lastChecked.isValid()
                               ? QStringLiteral("✓ GitHub releases checked: %1")

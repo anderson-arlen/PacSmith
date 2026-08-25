@@ -33,6 +33,7 @@ public:
         BackgroundUpdateState *backgroundState = nullptr);
     [[nodiscard]] static UpdateCheckRunResult run(
         LibraryClient &library, Project project, QTextStream &diagnostics,
+        bool forceFullContentCheck = false,
         BackgroundUpdateState *backgroundState = nullptr);
     [[nodiscard]] static UpdateCheckBatchResult runAll(
         LibraryClient &library, QTextStream &diagnostics);

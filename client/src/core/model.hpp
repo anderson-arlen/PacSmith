@@ -360,6 +360,14 @@ struct UpdateConfiguration {
     QDateTime lastChecked;
     QString lastCheckMessage;
     bool signatureVerified{false};
+    QString directUrlEtag;
+    QString directUrlLastModified;
+    qint64 directUrlContentLength{-1};
+    QString directUrlVendorValidatorName;
+    QString directUrlVendorValidator;
+    QString directUrlLastSha256;
+    QDateTime directUrlLastFullCheck;
+    int directUrlFullCheckIntervalHours{24};
     QStringList detectedCandidates;
     QList<AptRepositoryCandidate> aptCandidates;
     QList<RpmRepositoryCandidate> rpmCandidates;
@@ -542,9 +550,8 @@ struct Project {
     [[nodiscard]] PackageRelease *installedRelease();
     [[nodiscard]] const PackageRelease *installedRelease() const;
     // Update configuration belongs to a release. The project dashboard uses the
-    // installed release as its active tracker, or the newest analyzed release
-    // while nothing is installed. An externally installed package deliberately
-    // has no PacSmith tracker.
+    // installed PacSmith release when one can be identified, otherwise the newest
+    // analyzed release. Installed-package ownership remains a separate decision.
     [[nodiscard]] PackageRelease *activeTrackingRelease();
     [[nodiscard]] const PackageRelease *activeTrackingRelease() const;
     // True when a retained vendor version is newer than the PacSmith release

@@ -27,8 +27,7 @@ public:
         }
         UpdateCheckResult result;
         result.supported = true;
-        result.success = true;
-        result.message = QStringLiteral("Direct URL is configured; automatic version discovery is not implemented yet");
+        result.message = QStringLiteral("Direct URL checks use the asynchronous validator and SHA256 service");
         return result;
     }
 };

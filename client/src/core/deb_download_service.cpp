@@ -1,6 +1,7 @@
 #include "core/deb_download_service.hpp"
 
 #include "core/path_safety.hpp"
+#include "core/project_store/project_store.hpp"
 
 #include <QDir>
 #include <QFileInfo>
@@ -37,6 +38,16 @@ void DebDownloadService::start(const QUrl &url, const QString &expectedSha256,
     if (!QDir{}.mkpath(QFileInfo(targetPath_).absolutePath())) {
         emit failed(QStringLiteral("Could not create the download directory"));
         return;
+    }
+    if (!expectedSha256.isEmpty() && QFileInfo::exists(targetPath_)) {
+        QString hashError;
+        const auto existingHash = sha256File(targetPath, &hashError);
+        if (existingHash == expectedSha256.toLower()) {
+            const auto size = QFileInfo(targetPath_).size();
+            emit progress(size, size);
+            emit finished(QFileInfo(targetPath_).absoluteFilePath());
+            return;
+        }
     }
     output_.setFileName(targetPath_);
     if (!output_.open(QIODevice::WriteOnly)) {

@@ -65,7 +65,11 @@ add_library(pacsmith_core STATIC
     src/core/payload_inspector.cpp
     src/core/deb_analyzer.cpp
     src/core/deb_download_service.cpp
+    src/core/direct_url_update_service.cpp
+    src/core/direct_url_update_service.hpp
     src/core/github_update_service.cpp
+    src/core/remote_import_service.cpp
+    src/core/remote_import_service.hpp
     src/core/project_store/project_store.cpp
     src/core/project_store/internal.cpp
     src/core/project_store/import.cpp
@@ -158,6 +162,8 @@ if(BUILD_TESTING)
         tests/core_tests/core_tests.cpp
         tests/core_tests/parser.cpp
         tests/core_tests/library_events.cpp
+        tests/core_tests/direct_url_update.cpp
+        tests/core_tests/remote_import.cpp
         tests/core_tests/script_evidence.cpp
         tests/core_tests/repository.cpp
         tests/core_tests/project_persistence.cpp

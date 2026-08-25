@@ -617,7 +617,11 @@ void CoreTests::selectsActiveTrackingRelease() {
 
     project.installedReleaseId.clear();
     project.externallyInstalled = true;
-    QVERIFY(project.activeTrackingRelease() == nullptr);
+    project.releases[1].update.strategy = pacsmith::UpdateStrategy::DirectUrl;
+    QCOMPARE(project.activeTrackingRelease()->id, QStringLiteral("2.0"));
+    QCOMPARE(project.activeTrackingRelease()->update.strategy,
+             pacsmith::UpdateStrategy::DirectUrl);
+    QVERIFY(!project.ownsInstalledPackage());
 
     project.externallyInstalled = false;
     project.installedVersion.clear();

@@ -69,6 +69,13 @@ void forgetDetectedVendorVersion(Project &project, const QString &version) {
         release.update.detectedSha256.clear();
         release.update.detectedUrl.clear();
         release.update.githubEtag.clear();
+        release.update.directUrlEtag.clear();
+        release.update.directUrlLastModified.clear();
+        release.update.directUrlContentLength = -1;
+        release.update.directUrlVendorValidatorName.clear();
+        release.update.directUrlVendorValidator.clear();
+        release.update.directUrlLastSha256.clear();
+        release.update.directUrlLastFullCheck = {};
     }
 }
 

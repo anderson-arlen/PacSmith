@@ -85,6 +85,12 @@ void CoreTests::buildsExternalTerminalCommandsSafely() {
 
 void CoreTests::buildsNonInteractivePacmanArgumentsSafely() {
     const auto hostilePath = QStringLiteral("/tmp/vendor package;$(touch nope).pkg.tar.zst");
+    QCOMPARE(pacsmith::InstallService::privilegeProgram(
+                 pacsmith::InstallPrivilegeMode::TtySudo),
+             QStringLiteral("/usr/bin/sudo"));
+    QCOMPARE(pacsmith::InstallService::privilegeProgram(
+                 pacsmith::InstallPrivilegeMode::Polkit),
+             QStringLiteral("/usr/bin/pkexec"));
     QCOMPARE(pacsmith::InstallService::installArguments(hostilePath, true),
              QStringList({QStringLiteral("/usr/bin/pacman"), QStringLiteral("--noconfirm"),
                           QStringLiteral("-U"), QStringLiteral("--"), hostilePath}));
@@ -97,6 +103,21 @@ void CoreTests::buildsNonInteractivePacmanArgumentsSafely() {
     QVERIFY(!interactive.contains(QStringLiteral("sh")));
     QVERIFY(!interactive.contains(QStringLiteral("-c")));
     QCOMPARE(interactive.last(), hostilePath);
+
+    QString optionError;
+    const auto ttyMode = pacsmith::parseInstallPrivilegeOptions({}, &optionError);
+    QVERIFY(ttyMode.has_value());
+    QCOMPARE(*ttyMode, pacsmith::InstallPrivilegeMode::TtySudo);
+    const auto polkitMode = pacsmith::parseInstallPrivilegeOptions(
+        {QStringLiteral("--polkit")}, &optionError);
+    QVERIFY(polkitMode.has_value());
+    QCOMPARE(*polkitMode, pacsmith::InstallPrivilegeMode::Polkit);
+    QVERIFY(!pacsmith::parseInstallPrivilegeOptions(
+                 {QStringLiteral("/tmp/untrusted.pkg.tar.zst")}, &optionError).has_value());
+    QVERIFY(optionError.contains(QStringLiteral("only supported")));
+    QVERIFY(!pacsmith::parseInstallPrivilegeOptions(
+                 {QStringLiteral("--polkit"), QStringLiteral("--extra")},
+                 &optionError).has_value());
 }
 
 void CoreTests::buildsRebuildableMakepkgArguments() {

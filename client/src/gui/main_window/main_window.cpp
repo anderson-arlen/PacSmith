@@ -14,6 +14,11 @@ struct LibrarySettingsLoadResult {
     QString error;
 };
 
+struct PackageOperationFinishResult {
+    std::optional<Project> project;
+    QString error;
+};
+
 bool sameBackgroundSettings(const BackgroundUpdateSettings &left,
                             const BackgroundUpdateSettings &right) {
     return left.enabled == right.enabled && left.startAtLogin == right.startAtLogin &&
@@ -84,10 +89,12 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     qRegisterMetaType<UpdateCheckResult>();
     networkIoThread_.setObjectName(QStringLiteral("pacsmith-network-io"));
     debDownloadService_ = new DebDownloadService;
+    directUrlUpdateService_ = new DirectUrlUpdateService;
     aptUpdateService_ = new AptUpdateService;
     rpmUpdateService_ = new RpmUpdateService;
     githubUpdateService_ = new GitHubUpdateService;
     debDownloadService_->moveToThread(&networkIoThread_);
+    directUrlUpdateService_->moveToThread(&networkIoThread_);
     aptUpdateService_->moveToThread(&networkIoThread_);
     rpmUpdateService_->moveToThread(&networkIoThread_);
     githubUpdateService_->moveToThread(&networkIoThread_);
@@ -466,11 +473,31 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     connect(&installService_, &InstallService::failedToStart, this, [this](const QString &message) {
         projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
         pendingPackageOperation_.clear();
-        if (project_) {
-            currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("install"),
-                                      QStringLiteral("Installation session failed: %1").arg(message)});
-            persistCurrent();
+        if (project_ && currentRelease() != nullptr) {
+            currentRelease()->history.append(
+                {QDateTime::currentDateTimeUtc(), QStringLiteral("install"),
+                 QStringLiteral("Installation session failed: %1").arg(message)});
+            projectCache_.insert(project_->id, *project_);
             populateHistory();
+            const auto config = library_.config();
+            const auto projectSnapshot = *project_;
+            auto *watcher = new QFutureWatcher<QString>(this);
+            connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
+                const auto error = watcher->result();
+                watcher->deleteLater();
+                if (!error.isEmpty()) {
+                    statusBar()->showMessage(
+                        QStringLiteral("Could not record package-operation failure: %1").arg(error),
+                        10000);
+                }
+            });
+            watcher->setFuture(QtConcurrent::run([config, projectSnapshot] mutable {
+                LibraryClient client(config);
+                QString error;
+                auto project = projectSnapshot;
+                static_cast<void>(client.save(project, &error));
+                return error;
+            }));
         }
         statusBar()->showMessage(QStringLiteral("Package operation failed"), 10000);
         finishCommandProgress(false, QStringLiteral("Package operation could not start: %1").arg(message));
@@ -482,20 +509,20 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         updateDeleteButton();
     });
     connect(&installService_, &InstallService::finished, this, [this](const ProcessResult &result) {
-        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
-        if (!project_) return;
-        if (result.succeeded()) static_cast<void>(library_.reconcileInstalled(*project_, nullptr));
+        projectList_->setEnabled(false);
+        if (!project_) {
+            pendingPackageOperation_.clear();
+            finishCommandProgress(result.succeeded(),
+                                  result.succeeded() ? QStringLiteral("Package operation completed.")
+                                                     : QStringLiteral("Package operation failed."));
+            return;
+        }
         const auto operation = pendingPackageOperation_.isEmpty()
             ? QStringLiteral("install") : pendingPackageOperation_;
-        currentRelease()->history.append({result.finishedAt, operation,
-                                  result.succeeded() ? QStringLiteral("Package operation succeeded")
-                                                     : QStringLiteral("Package operation failed (exit %1)").arg(result.exitCode)});
-        project_->history.append({result.finishedAt, operation,
-                                  result.succeeded() ? QStringLiteral("Package operation succeeded")
-                                                     : QStringLiteral("Package operation failed")});
-        pendingPackageOperation_.clear();
-        persistCurrent();
         const auto projectId = project_->id;
+        const auto releaseId = currentReleaseId_;
+        const auto projectSnapshot = *project_;
+        const auto config = library_.config();
         const auto succeeded = result.succeeded();
         const auto summary = operation == QStringLiteral("uninstall")
             ? (succeeded ? QStringLiteral("Uninstall completed successfully.")
@@ -505,18 +532,74 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
                              : QStringLiteral("Rollback failed (exit %1).").arg(result.exitCode))
                 : (succeeded ? QStringLiteral("Installation completed successfully.")
                              : QStringLiteral("Installation failed (exit %1).").arg(result.exitCode));
-        finishCommandProgress(succeeded, summary);
-        statusBar()->showMessage(succeeded ? QStringLiteral("Installation succeeded")
-                                           : QStringLiteral("Installation failed"), 10000);
-        if (commandProgress_ == nullptr) {
-            QMessageBox::information(this, QStringLiteral("Package operation"),
-                                     succeeded ? QStringLiteral("Pacman completed successfully.")
-                                               : QStringLiteral("Pacman did not complete successfully. Review the captured output in the progress dialog."));
+        packageOperationFinishInFlight_ = true;
+        statusBar()->showMessage(QStringLiteral("Refreshing installed package state…"));
+        if (commandProgress_ != nullptr) {
+            commandProgress_->setStatus(QStringLiteral("Pacman finished; refreshing installed package state…"));
         }
-        refreshProjectList(projectId, [this, succeeded](const bool refreshed) {
-            if (refreshed && project_) refreshCurrentProject();
-            if (succeeded) syncTrayUpdateCensus();
+        updateDashboardActions();
+        populateBuild();
+        updateDeleteButton();
+
+        auto *watcher = new QFutureWatcher<PackageOperationFinishResult>(this);
+        connect(watcher, &QFutureWatcher<PackageOperationFinishResult>::finished, this,
+                [this, watcher, projectId, operation, succeeded, summary] {
+            auto finalized = watcher->result();
+            watcher->deleteLater();
+            packageOperationFinishInFlight_ = false;
+            pendingPackageOperation_.clear();
+            if (finalized.project && project_ && finalized.project->id == projectId) {
+                project_ = std::move(*finalized.project);
+                projectCache_.insert(project_->id, *project_);
+            }
+            const auto finalSummary = finalized.error.isEmpty()
+                ? summary
+                : QStringLiteral("%1 Package state refresh warning: %2")
+                      .arg(summary, finalized.error);
+            finishCommandProgress(succeeded && finalized.error.isEmpty(), finalSummary);
+            const auto operationName = operation == QStringLiteral("uninstall")
+                ? QStringLiteral("Uninstall")
+                : operation == QStringLiteral("rollback")
+                    ? QStringLiteral("Rollback") : QStringLiteral("Installation");
+            const auto finalStatus = finalized.error.isEmpty()
+                ? QStringLiteral("%1 %2").arg(
+                      operationName, succeeded ? QStringLiteral("succeeded")
+                                               : QStringLiteral("failed"))
+                : QStringLiteral("%1 finished; package state refresh needs attention")
+                      .arg(operationName);
+            refreshProjectList(projectId, [this, succeeded, finalStatus](const bool refreshed) {
+                if (refreshed && project_) refreshCurrentProject();
+                if (succeeded) syncTrayUpdateCensus();
+                if (refreshed) statusBar()->showMessage(finalStatus, 10000);
+            });
         });
+        watcher->setFuture(QtConcurrent::run(
+            [config, projectSnapshot, releaseId, operation, result] mutable {
+                LibraryClient client(config);
+                PackageOperationFinishResult finalized;
+                auto project = projectSnapshot;
+                if (result.succeeded()) {
+                    static_cast<void>(client.reconcileInstalled(project, &finalized.error));
+                }
+                if (auto *release = project.release(releaseId); release != nullptr) {
+                    release->history.append(
+                        {result.finishedAt, operation,
+                         result.succeeded()
+                             ? QStringLiteral("Package operation succeeded")
+                             : QStringLiteral("Package operation failed (exit %1)")
+                                   .arg(result.exitCode)});
+                }
+                project.history.append(
+                    {result.finishedAt, operation,
+                     result.succeeded() ? QStringLiteral("Package operation succeeded")
+                                        : QStringLiteral("Package operation failed")});
+                QString saveError;
+                if (!client.save(project, &saveError) && finalized.error.isEmpty()) {
+                    finalized.error = saveError;
+                }
+                finalized.project = std::move(project);
+                return finalized;
+            }));
     });
 
     connect(debDownloadService_, &DebDownloadService::progress, this,
@@ -570,6 +653,22 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         pendingDownloadedImport_ = path;
         importPackage(path);
     });
+    connect(directUrlUpdateService_, &DirectUrlUpdateService::progressChanged, this,
+            [this](const QString &message) { updateCheckStatus_->setText(message); });
+    connect(directUrlUpdateService_, &DirectUrlUpdateService::downloadProgress, this,
+            [this](const qint64 received, const qint64 total) {
+                updateCheckStatus_->setText(
+                    total > 0
+                        ? QStringLiteral("Downloading remote artifact… %1 / %2 MiB")
+                              .arg(received / (1024 * 1024))
+                              .arg(total / (1024 * 1024))
+                        : QStringLiteral("Downloading remote artifact… %1 MiB")
+                              .arg(received / (1024 * 1024)));
+            });
+    connect(directUrlUpdateService_, &DirectUrlUpdateService::finished, this,
+            [this](const UpdateCheckResult &result) {
+                applyUpdateCheckResult(result, QStringLiteral("Direct URL"));
+            });
     connect(&signingKeyDownloadService_, &RepositoryKeyDownloadService::progress, this,
             [this](const qint64 received, const qint64 total) {
         if (signingKeyProgress_ == nullptr) return;
@@ -1118,13 +1217,14 @@ void MainWindow::placeRepositoryEditor() {
 }
 
 void MainWindow::syncUpdateCheckButtons() {
-    const bool busy = aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
+    const bool busy = directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
+                      rpmUpdateService_->isRunning() ||
                       githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
                       importThread_ != nullptr;
     bool allowed = false;
     if (!busy && project_ && updateEditorRelease() != nullptr && updateStrategy_ != nullptr) {
         const auto index = updateStrategy_->currentIndex();
-        allowed = index == 2 || index == 3 || index == 4;
+        allowed = index == 1 || index == 2 || index == 3 || index == 4;
     }
     if (updateCheckButton_ != nullptr) updateCheckButton_->setEnabled(allowed);
     if (historyCheckUpdatesButton_ != nullptr) historyCheckUpdatesButton_->setEnabled(allowed);
@@ -1279,6 +1379,7 @@ MainWindow::~MainWindow() {
     loadingProjectId_.clear();
     if (networkIoThread_.isRunning()) {
         shutdownNetworkService(debDownloadService_);
+        shutdownNetworkService(directUrlUpdateService_);
         shutdownNetworkService(aptUpdateService_);
         shutdownNetworkService(rpmUpdateService_);
         shutdownNetworkService(githubUpdateService_);
@@ -1287,10 +1388,12 @@ MainWindow::~MainWindow() {
         return;
     }
     delete debDownloadService_;
+    delete directUrlUpdateService_;
     delete aptUpdateService_;
     delete rpmUpdateService_;
     delete githubUpdateService_;
     debDownloadService_ = nullptr;
+    directUrlUpdateService_ = nullptr;
     aptUpdateService_ = nullptr;
     rpmUpdateService_ = nullptr;
     githubUpdateService_ = nullptr;
@@ -1303,9 +1406,9 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         event->ignore();
         return;
     }
-    if (installService_.isRunning()) {
-        QMessageBox::information(this, QStringLiteral("Installation in progress"),
-                                 QStringLiteral("Wait for the current pacman operation to finish before closing PacSmith."));
+    if (packageOperationInProgress()) {
+        QMessageBox::information(this, QStringLiteral("Package operation in progress"),
+                                 QStringLiteral("Wait for the current package operation to finish before closing PacSmith."));
         event->ignore();
         return;
     }
@@ -1317,6 +1420,7 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     if (aptUpdateService_->isRunning()) cancelOnServiceThread(*aptUpdateService_);
     if (rpmUpdateService_->isRunning()) cancelOnServiceThread(*rpmUpdateService_);
     if (githubUpdateService_->isRunning()) cancelOnServiceThread(*githubUpdateService_);
+    if (directUrlUpdateService_->isRunning()) cancelOnServiceThread(*directUrlUpdateService_);
     if (debDownloadService_->isRunning()) cancelOnServiceThread(*debDownloadService_);
     QMainWindow::closeEvent(event);
 }

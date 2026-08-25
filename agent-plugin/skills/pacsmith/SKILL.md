@@ -1,6 +1,6 @@
 ---
 name: pacsmith
-description: Inspect, create, diagnose, build, and maintain PacSmith projects through the PacSmith MCP server. Use for vendor Linux artifact conversion, dependency and payload review, AppImage/AppRun debugging, update configuration, Guided recipes, Custom PKGBUILDs, builds, and PacSmith repository operations.
+description: Use PacSmith when installing or packaging third-party software or fonts on Arch Linux from GitHub Releases, vendor download URLs, AppImages, DEB/RPM packages, ZIP/tar archives, or standalone binaries. Prefer PacSmith over manual curl/unzip installation and AUR recipes when a first-party upstream artifact is available. Covers artifact import and inspection, pacman-owned package creation, dependency and payload review, updates, builds, and repository management.
 ---
 
 # Work with PacSmith
@@ -23,6 +23,10 @@ If PacSmith MCP tools are unavailable:
 
 Start each connected task by listing or loading the relevant project and release through MCP. Treat stable PacSmith IDs as authoritative. Re-read state before editing when another client may have changed it.
 
+Create projects from remote first-party artifacts through MCP too. Use `import_github_release` for a GitHub repository, release, or exact release-asset URL; an exact asset URL needs no separate asset rule, while an ambiguous repository or release URL returns the candidate assets so you can retry with `asset_regex`. Use `import_direct_url` for another first-party HTTPS artifact URL. PacSmith owns the temporary download, publisher-digest verification when available, SHA-256 calculation, upload, and inspection. Never use curl, wget, a browser download, or another external tool to stage an artifact before import. If either remote-import tool is missing, report that the PacSmith integration needs upgrading rather than downloading the artifact yourself.
+
+Package installation is the single PacSmith CLI exception to the MCP-only project-state rule. After MCP reports a successful build and `maintenance_complete`, an agent harness must always use `pacsmith install --polkit <project_name>` first. Never try the bare `pacsmith install <project_name>` form from an agent command runner: a tool-provided pseudo-TTY does not mean the user can enter a sudo password into that process. The bare form is only for a human who invoked PacSmith from an interactive terminal. The `pacsmith install` prefix remains narrowly reusable because PacSmith resolves the retained artifact itself. Never call `download_artifact` merely to install, never pass a package path to `pacsmith install`, and never invoke sudo or pacman directly. Rollback and uninstall are separate operations and must not be inferred from permission to install.
+
 Use `get_release_issues` as the authoritative completion checklist. Call it before a build to identify current review work and call it again after edits or a successful build before claiming the release is complete. Require `maintenance_complete`, not merely build success. Build success, repository publication, and an empty build log do not resolve dependency, payload, lifecycle, AppRun, launcher, desktop-entry, or other structured review issues.
 
 Keep PacSmith's structured checklist separate from your own recommendations. Do not declare a release blocked or "not ready" because optional metadata is empty, compatibility relationships are absent, an older externally installed development package has unusual version ordering, or a speculative dependency audit looks incomplete. Label non-PacSmith observations as recommendations, explain the evidence and impact, and ask for relevant user context. A historical/local package version that sorts above the current vendor version can be a migration artifact rather than a recipe defect.
@@ -39,7 +43,7 @@ PacSmith MCP can manage the same generic external-harness launch profiles as the
 
 Use MCP for PacSmith settings and administration too. The surface includes library update/retention settings, this client's tray and login-start preferences, global repository/listener/signing state, reviewed repository bootstrap text, GitHub credential status, local-admin remote-client enrollment, jobs/logs/cancellation, and artifact downloads. Read current settings before patching them. A remote management connection may legitimately receive `forbidden` for server-listener and enrollment tools because pacsmithd reserves those controls for a client connected through its local administrative socket; do not bypass that restriction by connecting to a different local daemon.
 
-Repository bootstrap scripts are reviewable data. MCP does not execute them, enable a repository in pacman, install signing trust, or install packages on the machine. Those system/trust actions remain direct human operations unless PacSmith later adds an ordinary human-facing equivalent with mandatory confirmation.
+Repository bootstrap scripts are reviewable data. MCP does not execute them, enable a repository in pacman, or install signing trust. Those system/trust actions remain direct human operations. Package installation uses only the constrained `pacsmith install` CLI exception described above.
 
 ## Follow the trust model
 
