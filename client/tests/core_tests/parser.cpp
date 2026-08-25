@@ -1,7 +1,5 @@
 #include "core_tests.hpp"
 
-#include "core/ai_service.hpp"
-#include "core/ai_model_catalog_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/apt_repository.hpp"
@@ -9,7 +7,6 @@
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
 #include "core/credential_store.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/github_update_service.hpp"
@@ -101,7 +98,7 @@ void CoreTests::loadsVerifiedDependencyMappings() {
     QCOMPARE(mappings.value(QStringLiteral("libc6")), QStringLiteral("glibc"));
 }
 
-void CoreTests::mapsChatGptDependencies() {
+void CoreTests::mapsKnownDependencies() {
     const QMap<QString, QString> expected{
         {QStringLiteral("libnotify4"), QStringLiteral("libnotify")},
         {QStringLiteral("xdg-utils"), QStringLiteral("xdg-utils")},
@@ -254,4 +251,3 @@ void CoreTests::preservesUserMappingOverrides() {
     QCOMPARE(dependencies.first().archPackage, QStringLiteral("my-gtk-provider"));
     QCOMPARE(dependencies.first().mappingSource, QString{});
 }
-

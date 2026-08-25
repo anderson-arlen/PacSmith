@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anderson-arlen/pacsmith/server/internal/ai"
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
 	"github.com/anderson-arlen/pacsmith/server/internal/httpapi"
@@ -74,6 +73,10 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	for _, name := range []string{"openai.api_key", "xai.api_key", "chatgpt.session"} {
+		_ = opened.Store.Delete(ctx, name)
+		_ = db.Queries.DeleteCredentialMeta(ctx, name)
+	}
 	runtime, err := pki.LoadOrGenerate(ctx, db, opened.Store)
 	if err != nil {
 		_ = db.Close()
@@ -92,7 +95,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(cfg.Dirs.Work, "repo"), filepath.Join(cfg.Dirs.Data, "gnupg"))
 	lib.Repo = repoSvc
-	manager, err := jobs.New(db, filepath.Join(cfg.Dirs.Work, "jobs"), JobHandler(lib, opened.Store))
+	manager, err := jobs.New(db, filepath.Join(cfg.Dirs.Work, "jobs"), JobHandler(lib))
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -175,8 +178,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 	return d, nil
 }
 
-func JobHandler(lib *library.Service, secrets *secret.LockedStore) jobs.Handler {
-	aiService := &ai.Service{Secrets: secrets}
+func JobHandler(lib *library.Service) jobs.Handler {
 	return func(ctx context.Context, job jobs.Job, payload json.RawMessage, log func(string)) (json.RawMessage, error) {
 		switch job.Kind {
 		case jobs.KindImport:
@@ -221,68 +223,10 @@ func JobHandler(lib *library.Service, secrets *secret.LockedStore) jobs.Handler 
 				return raw, err
 			}
 			return raw, marshalErr
-		case jobs.KindAi:
-			var req struct {
-				ReleaseID string `json:"release_id"`
-			}
-			if err := json.Unmarshal(payload, &req); err != nil {
-				return nil, err
-			}
-			settings, err := libraryAISettings(ctx, lib)
-			if err != nil {
-				return nil, err
-			}
-			release, err := lib.GetRelease(ctx, req.ReleaseID)
-			if err != nil {
-				return nil, err
-			}
-			resolution := aiService.ResolvePackage(ctx, ai.PackageRequest{
-				Settings: settings,
-				Document: release.Document,
-			}, log)
-			raw, marshalErr := json.Marshal(resolution)
-			if marshalErr != nil {
-				return nil, marshalErr
-			}
-			return raw, resolution.Err()
-		case jobs.KindAiGitHubAsset:
-			var req struct {
-				Owner      string   `json:"github_owner"`
-				Repository string   `json:"github_repository"`
-				Preferred  string   `json:"preferred_asset"`
-				Assets     []string `json:"available_assets"`
-			}
-			if err := json.Unmarshal(payload, &req); err != nil {
-				return nil, err
-			}
-			settings, err := libraryAISettings(ctx, lib)
-			if err != nil {
-				return nil, err
-			}
-			resolution := aiService.ResolveGitHubAsset(ctx, ai.GitHubAssetRequest{
-				Settings:   settings,
-				Owner:      req.Owner,
-				Repository: req.Repository,
-				Preferred:  req.Preferred,
-				Assets:     req.Assets,
-			}, log)
-			raw, marshalErr := json.Marshal(resolution)
-			if marshalErr != nil {
-				return nil, marshalErr
-			}
-			return raw, resolution.Err()
 		default:
 			return nil, fmt.Errorf("unknown job kind %q", job.Kind)
 		}
 	}
-}
-
-func libraryAISettings(ctx context.Context, lib *library.Service) (ai.Settings, error) {
-	row, err := lib.DB.Queries.GetLibrarySettings(ctx)
-	if err != nil {
-		return ai.Settings{}, err
-	}
-	return ai.SettingsFromStore(row.AiProvider, row.AiModel, row.AiReasoningEffort, row.AiExecutionMode), nil
 }
 
 func (d *Daemon) Close() error {

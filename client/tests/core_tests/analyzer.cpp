@@ -1,7 +1,5 @@
 #include "core_tests.hpp"
 
-#include "core/ai_service.hpp"
-#include "core/ai_model_catalog_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/apt_repository.hpp"
@@ -9,7 +7,6 @@
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
 #include "core/credential_store.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/github_update_service.hpp"
@@ -821,6 +818,79 @@ void CoreTests::acceptsStandardExternalAppImageRuntimeSymlinks() {
     QCOMPARE(storedAppRun->textPreview, QStringLiteral("#!/bin/sh\nexit 0\n"));
 }
 
+void CoreTests::acceptsExecutableSymlinkAppRun() {
+    const auto mksquashfs = QStandardPaths::findExecutable(QStringLiteral("mksquashfs"));
+    const auto unsquashfs = QStandardPaths::findExecutable(QStringLiteral("unsquashfs"));
+    if (mksquashfs.isEmpty() || unsquashfs.isEmpty()) {
+        QSKIP("squashfs-tools is required for the AppImage analyzer regression test");
+    }
+
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto appDir = temporary.filePath(QStringLiteral("AppDir"));
+    const auto target = appDir + QStringLiteral("/Letos/letos");
+    QVERIFY(QDir().mkpath(QFileInfo(target).path()));
+    QFile executable(target);
+    QVERIFY(executable.open(QIODevice::WriteOnly));
+    QCOMPARE(executable.write(QByteArrayLiteral("#!/bin/sh\nexit 0\n")), 17);
+    executable.close();
+    QVERIFY(QFile::setPermissions(
+        target, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                    QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+                    QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                    QFileDevice::ExeOther));
+    std::error_code linkError;
+    std::filesystem::create_symlink(
+        std::filesystem::path("Letos/letos"),
+        std::filesystem::path((appDir + QStringLiteral("/AppRun")).toUtf8().constData()),
+        linkError);
+    QVERIFY2(!linkError, linkError.message().c_str());
+
+    const auto squashfs = temporary.filePath(QStringLiteral("payload.squashfs"));
+    QProcess pack;
+    pack.setProgram(mksquashfs);
+    pack.setArguments({appDir, squashfs, QStringLiteral("-noappend"),
+                       QStringLiteral("-processors"), QStringLiteral("1"),
+                       QStringLiteral("-quiet")});
+    pack.start();
+    QVERIFY(pack.waitForFinished(30000));
+    QCOMPARE(pack.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(pack.exitCode(), 0);
+
+    QFile payload(squashfs);
+    QVERIFY(payload.open(QIODevice::ReadOnly));
+    const auto appImagePath = temporary.filePath(QStringLiteral("Letos-4.0.3-x86_64.AppImage"));
+    QFile appImage(appImagePath);
+    QVERIFY(appImage.open(QIODevice::WriteOnly));
+    QByteArray header(4096, '\0');
+    header.replace(0, 4, QByteArrayLiteral("\x7f" "ELF"));
+    header.replace(8, 3, QByteArrayLiteral("AI\x02"));
+    QCOMPARE(appImage.write(header), header.size());
+    const auto squashfsContents = payload.readAll();
+    QCOMPARE(appImage.write(squashfsContents), squashfsContents.size());
+    appImage.close();
+
+    QString error;
+    const auto analyzed = pacsmith::SourceAnalyzer::analyze(
+        std::filesystem::path(appImagePath.toUtf8().constData()), &error);
+    QVERIFY2(analyzed.has_value(), qPrintable(error));
+    QVERIFY(analyzed->installMapping.appRun.present);
+    QVERIFY(!analyzed->installMapping.appRun.script);
+    QCOMPARE(analyzed->installMapping.appRun.reviewReason,
+             QStringLiteral("Symlink AppRun; not a text script"));
+    const auto appRun = std::find_if(
+        analyzed->payload.cbegin(), analyzed->payload.cend(), [](const auto &entry) {
+            return entry.path == QStringLiteral("AppRun");
+        });
+    QVERIFY(appRun != analyzed->payload.cend());
+    QCOMPARE(appRun->type, QStringLiteral("symlink"));
+    QCOMPARE(appRun->symlinkTarget, QStringLiteral("Letos/letos"));
+    QVERIFY(appRun->executable);
+    QCOMPARE(analyzed->installMapping.launchers.size(), 1);
+    QCOMPARE(analyzed->installMapping.launchers.first().sourcePath,
+             QStringLiteral("AppRun"));
+}
+
 void CoreTests::flagsAppRunFilenameDispatchForReview() {
     const auto mksquashfs = QStandardPaths::findExecutable(QStringLiteral("mksquashfs"));
     const auto unsquashfs = QStandardPaths::findExecutable(QStringLiteral("unsquashfs"));
@@ -892,4 +962,3 @@ void CoreTests::flagsAppRunFilenameDispatchForReview() {
     QVERIFY(analyzed->installMapping.appRun.requiresReview());
     QVERIFY(analyzed->installMapping.appRun.reviewReason.contains(QStringLiteral("APPIMAGE")));
 }
-

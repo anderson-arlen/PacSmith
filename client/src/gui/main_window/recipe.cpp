@@ -2,6 +2,130 @@
 
 namespace pacsmith::gui {
 
+namespace {
+
+QStringList metadataList(const QString &text) {
+    QStringList result;
+    for (const auto &part : text.split(QRegularExpression(QStringLiteral("[,\\n]")),
+                                      Qt::SkipEmptyParts)) {
+        const auto value = part.trimmed();
+        if (!value.isEmpty() && !result.contains(value)) result.append(value);
+    }
+    return result;
+}
+
+} // namespace
+
+void MainWindow::populatePackageMetadata() {
+    if (!project_ || currentRelease() == nullptr || packageDescription_ == nullptr) return;
+    QSignalBlocker displayBlock(packageDisplayName_);
+    QSignalBlocker archNameBlock(packageArchName_);
+    QSignalBlocker vendorBlock(packageVendorName_);
+    QSignalBlocker descriptionBlock(packageDescription_);
+    QSignalBlocker homepageBlock(packageHomepage_);
+    QSignalBlocker licensesBlock(packageLicenses_);
+    QSignalBlocker providesBlock(packageProvides_);
+    QSignalBlocker conflictsBlock(packageConflicts_);
+    const auto &metadata = currentRelease()->packageMetadata;
+    packageDisplayName_->setText(project_->displayName);
+    packageArchName_->setText(project_->archPackageName);
+    packageVendorName_->setText(project_->vendorName);
+    packageDescription_->setText(metadata.description);
+    packageHomepage_->setText(metadata.homepage);
+    packageLicenses_->setText(metadata.licenses.join(QStringLiteral(", ")));
+    packageProvides_->setText(metadata.provides.join(QStringLiteral(", ")));
+    packageConflicts_->setText(metadata.conflicts.join(QStringLiteral(", ")));
+}
+
+void MainWindow::savePackageMetadata() {
+    if (!project_ || currentRelease() == nullptr || packageDescription_ == nullptr) return;
+    const auto licenses = metadataList(packageLicenses_->text());
+    const auto provides = metadataList(packageProvides_->text());
+    const auto conflicts = metadataList(packageConflicts_->text());
+    if (licenses.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("License required"),
+                             QStringLiteral("Enter at least one SPDX license expression or custom:vendor."));
+        return;
+    }
+    if (packageDisplayName_->text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Display name required"),
+                             QStringLiteral("Enter a display name for this project."));
+        return;
+    }
+    const auto packageNameError =
+        DomainValidation::archPackageName(packageArchName_->text().trimmed());
+    if (!packageNameError.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Invalid Arch package name"),
+                             packageNameError);
+        return;
+    }
+    const QUrl homepage(packageHomepage_->text().trimmed(), QUrl::StrictMode);
+    if (!packageHomepage_->text().trimmed().isEmpty() &&
+        (!homepage.isValid() || (homepage.scheme() != QStringLiteral("https") &&
+                                 homepage.scheme() != QStringLiteral("http")))) {
+        QMessageBox::warning(this, QStringLiteral("Invalid homepage"),
+                             QStringLiteral("Homepage must be an absolute HTTP or HTTPS URL."));
+        return;
+    }
+    for (const auto &relation : provides + conflicts) {
+        const auto error = DomainValidation::packageRelation(relation);
+        if (!error.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Invalid package relationship"),
+                                 QStringLiteral("%1: %2").arg(relation, error));
+            return;
+        }
+    }
+    auto &metadata = currentRelease()->packageMetadata;
+    project_->displayName = packageDisplayName_->text().trimmed();
+    project_->archPackageName = packageArchName_->text().trimmed();
+    project_->vendorName = packageVendorName_->text().trimmed();
+    for (auto &release : project_->releases) {
+        release.displayName = project_->displayName;
+        release.archPackageName = project_->archPackageName;
+        release.vendorName = project_->vendorName;
+    }
+    metadata.description = packageDescription_->text().trimmed();
+    metadata.homepage = packageHomepage_->text().trimmed();
+    metadata.licenses = licenses;
+    metadata.provides = provides;
+    metadata.conflicts = conflicts;
+    refreshGeneratedPkgbuildAfterModelChange();
+    populatePackageMetadata();
+    statusBar()->showMessage(QStringLiteral("Package metadata saved"), 5000);
+}
+
+void MainWindow::addAdditionalDependency() {
+    if (!project_ || currentRelease() == nullptr) return;
+    bool accepted = false;
+    const auto value = QInputDialog::getText(
+        this, QStringLiteral("Add runtime dependency"),
+        QStringLiteral("Official Arch package name (optionally with a version constraint):"),
+        QLineEdit::Normal, {}, &accepted).trimmed();
+    if (!accepted || value.isEmpty()) return;
+    const auto validationError = DomainValidation::packageRelation(value);
+    if (!validationError.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Invalid dependency"), validationError);
+        return;
+    }
+    auto &dependencies = currentRelease()->packageMetadata.additionalDependencies;
+    if (!dependencies.contains(value)) dependencies.append(value);
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateDependencies();
+    populateOverview();
+    populateBuild();
+}
+
+void MainWindow::removeAdditionalDependency() {
+    if (!project_ || currentRelease() == nullptr || additionalDependencies_ == nullptr ||
+        additionalDependencies_->currentItem() == nullptr) return;
+    currentRelease()->packageMetadata.additionalDependencies.removeAll(
+        additionalDependencies_->currentItem()->text());
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateDependencies();
+    populateOverview();
+    populateBuild();
+}
+
 void MainWindow::populatePkgbuild() {
     if (!project_ || currentRelease() == nullptr) return;
     QString error;
@@ -23,9 +147,6 @@ void MainWindow::populatePkgbuild() {
     auto state = currentRelease()->pkgbuildManuallyModified
         ? QStringLiteral("⚠ Custom PKGBUILD. Guided configuration is ignored until you switch back.")
         : QStringLiteral("✓ Generated from Guided configuration");
-    if (!currentRelease()->previousManualPkgbuild.isEmpty()) {
-        state += QStringLiteral("\nThe previous release had a Custom PKGBUILD. PacSmith generated this release fresh and kept the prior text at files/previous-manual-PKGBUILD for reference; it was not merged automatically.");
-    }
     if (pkgbuildState_ != nullptr &&
         (pkgbuildEditor_ == nullptr || !pkgbuildEditor_->document()->isModified())) {
         pkgbuildState_->setText(state);
@@ -65,7 +186,7 @@ void MainWindow::populateUpdates() {
         rpmArchitecture_, rpmPackageName_,
         aptSigningKeyUrl_, aptSigningKeyDownloadButton_, aptSigningKeyring_, aptSigningKey_,
         githubOwner_, githubRepository_, githubAssetRegex_,
-        githubPrereleases_, githubRegexAiButton_, updateCandidates_, updateSaveButton_};
+        githubPrereleases_, updateCandidates_, updateSaveButton_};
     if (tracker == nullptr) {
         updateOwnerLabel_->setText(
             QStringLiteral("No release currently owns the project update view. Prepare an artifact first, or reconcile the installed package with a retained PacSmith release."));
@@ -215,8 +336,6 @@ void MainWindow::populateUpdates() {
     aptSigningKeyDownloadButton_->setEnabled(repository && !signingKeyDownloadService_.isRunning());
     aptSigningKeyring_->setEnabled(repository);
     aptSigningKey_->setEnabled(repository);
-    githubRegexAiButton_->setEnabled(github && aiSettings_.provider != AiProviderKind::None &&
-                                     !aiInProgress());
     syncUpdateCheckButtons();
     const auto githubPolicy = tracker->update.githubIncludePrereleases
         ? QStringLiteral(" Preview tracking is enabled, so newer prereleases may be selected even when a stable release exists.")
@@ -272,7 +391,7 @@ void MainWindow::populateBuild() {
                                 : !currentRelease()->lifecycleScript.validationPassed
                                     ? QStringLiteral("⚠ Lifecycle script failed validation")
                                 : currentRelease()->lifecycleScript.requiresAcknowledgement()
-                                    ? QStringLiteral("⚠ AI-generated privileged script requires acknowledgement before install")
+                                    ? QStringLiteral("⚠ Privileged script requires exact-content acknowledgement before install")
                                     : QStringLiteral("✓ Privileged lifecycle script acknowledged");
     const auto iconState = currentRelease()->installMapping.icon.isConfigured()
                                ? QStringLiteral("✓ Application icon selected")
@@ -459,18 +578,6 @@ bool MainWindow::saveUpdateConfiguration() {
                         : updateStrategy_->currentIndex() == 2 ? UpdateStrategy::AptRepository
                         : updateStrategy_->currentIndex() == 3 ? UpdateStrategy::RpmRepository
                                                                : UpdateStrategy::GitHubRelease;
-    if (strategy == UpdateStrategy::GitHubRelease) {
-        const QRegularExpression expression(githubAssetRegex_->text().trimmed());
-        if (githubOwner_->text().trimmed().isEmpty() || githubRepository_->text().trimmed().isEmpty() ||
-            githubAssetRegex_->text().trimmed().isEmpty() || !expression.isValid()) {
-            QMessageBox::warning(this, QStringLiteral("Incomplete GitHub update source"),
-                                 expression.isValid()
-                                     ? QStringLiteral("GitHub owner, repository, and an asset-name regular expression are required.")
-                                     : QStringLiteral("The asset-name regular expression is invalid: %1")
-                                           .arg(expression.errorString()));
-            return false;
-        }
-    }
     tracker->update.strategy = strategy;
     tracker->update.url = updateUrl_->text().trimmed();
     tracker->update.aptSuite = aptSuite_->text().trimmed();
@@ -486,6 +593,11 @@ bool MainWindow::saveUpdateConfiguration() {
     if (tracker->update.strategy == UpdateStrategy::GitHubRelease) {
         tracker->update.url = QStringLiteral("https://github.com/%1/%2/releases")
             .arg(tracker->update.githubOwner, tracker->update.githubRepository);
+    }
+    const auto validationError = DomainValidation::updateConfiguration(tracker->update);
+    if (!validationError.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Invalid update source"), validationError);
+        return false;
     }
     tracker->update.aptSigningKeyring = aptSigningKeyring_->text().trimmed();
     if (aptSigningKey_->currentIndex() >= 0 &&

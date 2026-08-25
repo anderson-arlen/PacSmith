@@ -90,3 +90,14 @@ RETURNING *;
 
 -- name: ListBuildsForRelease :many
 SELECT * FROM builds WHERE release_id = ? ORDER BY started_at;
+
+-- name: InsertBuildArtifact :exec
+INSERT OR IGNORE INTO build_artifacts (build_id, artifact_id)
+VALUES (?, ?);
+
+-- name: ListBuildArtifactsForBuild :many
+SELECT artifacts.*
+FROM build_artifacts
+JOIN artifacts ON artifacts.id = build_artifacts.artifact_id
+WHERE build_artifacts.build_id = ?
+ORDER BY artifacts.created_at, artifacts.id;

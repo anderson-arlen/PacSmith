@@ -71,6 +71,40 @@ Project projectFromObject(const LibraryClient &client, const QJsonObject &object
     return project;
 }
 
+QJsonObject releaseConfiguration(const PackageRelease &release) {
+    const auto document = release.toJson();
+    QJsonObject configuration;
+    static const QStringList editableFields{
+        QStringLiteral("displayName"), QStringLiteral("iconPath"),
+        QStringLiteral("iconSourcePath"), QStringLiteral("iconSha256"),
+        QStringLiteral("installMapping"), QStringLiteral("vendorName"),
+        QStringLiteral("archPkgrelOverride"), QStringLiteral("packageMetadata"),
+        QStringLiteral("dependencies"),
+        QStringLiteral("maintainerScripts"), QStringLiteral("scriptFindings"),
+        QStringLiteral("payloadRules"), QStringLiteral("generatedPkgbuild"),
+        QStringLiteral("generatedPkgbuildSha256"), QStringLiteral("pkgbuildManuallyModified"),
+        QStringLiteral("lifecycleScript"), QStringLiteral("fieldProvenance"),
+        QStringLiteral("aiChanges"), QStringLiteral("update"),
+        QStringLiteral("buildStatus"), QStringLiteral("state"),
+        QStringLiteral("lastBuildLog"), QStringLiteral("producedPackages"),
+        QStringLiteral("history"),
+    };
+    for (const auto &field : editableFields) configuration.insert(field, document.value(field));
+    return configuration;
+}
+
+QJsonObject changedReleaseConfiguration(const PackageRelease &release,
+                                        const QJsonObject &current) {
+    const auto desired = releaseConfiguration(release);
+    QJsonObject changed;
+    for (auto iterator = desired.constBegin(); iterator != desired.constEnd(); ++iterator) {
+        if (current.value(iterator.key()) != iterator.value()) {
+            changed.insert(iterator.key(), iterator.value());
+        }
+    }
+    return changed;
+}
+
 } // namespace
 
 namespace {
@@ -180,14 +214,15 @@ bool LibraryClient::save(Project &project, QString *error) const {
                                   error, 200);
     if (!patched) return false;
     for (auto &release : project.releases) {
-        auto document = release.toJson();
-        document.remove(QStringLiteral("installedVersion"));
-        document.remove(QStringLiteral("installedReleaseId"));
-        document.remove(QStringLiteral("externallyInstalled"));
-        const auto saved = sendJson(QStringLiteral("PUT"),
-                                    QStringLiteral("/api/v1/releases/") + release.id,
+        const auto current = getJson(QStringLiteral("/api/v1/releases/") + release.id, error);
+        if (!current) return false;
+        const auto configuration = changedReleaseConfiguration(release, *current);
+        if (configuration.isEmpty()) continue;
+        const auto saved = sendJson(QStringLiteral("PATCH"),
+                                    QStringLiteral("/api/v1/releases/") + release.id +
+                                        QStringLiteral("/configuration"),
                                     {{QStringLiteral("revision"), release.revision},
-                                     {QStringLiteral("document"), document}},
+                                     {QStringLiteral("configuration"), configuration}},
                                     error, 200);
         if (!saved) return false;
         release = PackageRelease::fromJson(*saved);
@@ -285,9 +320,10 @@ std::optional<ImportResult> LibraryClient::reanalyzeRelease(const QString &relea
 
 std::optional<QString> LibraryClient::readFile(const QString &releaseId, const QString &name,
                                                QString *error) const {
+    const auto encoded = QString::fromUtf8(QUrl::toPercentEncoding(name));
     const auto response = transport_.request(
         QStringLiteral("GET"),
-        QStringLiteral("/api/v1/releases/") + releaseId + QStringLiteral("/files/") + name);
+        QStringLiteral("/api/v1/releases/") + releaseId + QStringLiteral("/files/") + encoded);
     if (isError(response, error) || response.status != 200) {
         if (error != nullptr && error->isEmpty()) {
             *error = apiError(response.body, QStringLiteral("could not read file"));
@@ -299,10 +335,26 @@ std::optional<QString> LibraryClient::readFile(const QString &releaseId, const Q
 
 bool LibraryClient::writeFile(const QString &releaseId, const QString &name,
                               const QString &contents, qint64 revision, QString *error) const {
+    const auto encoded = QString::fromUtf8(QUrl::toPercentEncoding(name));
     return sendJson(QStringLiteral("PUT"),
-                    QStringLiteral("/api/v1/releases/") + releaseId + QStringLiteral("/files/") + name,
+                    QStringLiteral("/api/v1/releases/") + releaseId + QStringLiteral("/files/") + encoded,
                     {{QStringLiteral("revision"), revision}, {QStringLiteral("contents"), contents}},
                     error, 200).has_value();
+}
+
+bool LibraryClient::deleteFile(const QString &releaseId, const QString &name,
+                               const qint64 revision, QString *error) const {
+    const auto path = QStringLiteral("/api/v1/releases/") + releaseId +
+                      QStringLiteral("/files/") + QString::fromUtf8(QUrl::toPercentEncoding(name)) +
+                      QStringLiteral("?revision=") + QString::number(revision);
+    const auto response = transport_.request(QStringLiteral("DELETE"), path);
+    if (isError(response, error) || response.status != 200) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = apiError(response.body, QStringLiteral("could not delete support file"));
+        }
+        return false;
+    }
+    return true;
 }
 
 std::optional<JobStatus> LibraryClient::startBuild(const QString &releaseId, QString *error) const {
@@ -315,53 +367,6 @@ std::optional<JobStatus> LibraryClient::startBuild(const QString &releaseId, QSt
     job.id = accepted->value(QStringLiteral("job_id")).toString();
     job.status = QStringLiteral("queued");
     return job;
-}
-
-std::optional<JobStatus> LibraryClient::startAiReview(const QString &releaseId, QString *error) const {
-    const auto accepted = sendJson(QStringLiteral("POST"),
-                                   QStringLiteral("/api/v1/releases/") + releaseId +
-                                       QStringLiteral("/ai"),
-                                   {}, error, 202);
-    if (!accepted) return std::nullopt;
-    JobStatus job;
-    job.id = accepted->value(QStringLiteral("job_id")).toString();
-    job.status = QStringLiteral("queued");
-    return job;
-}
-
-std::optional<JobStatus> LibraryClient::startGitHubAssetAi(
-    const QString &owner, const QString &repository, const QStringList &assets,
-    const QString &preferredAsset, QString *error) const {
-    QJsonArray available;
-    for (const auto &asset : assets) available.append(asset);
-    const auto accepted = sendJson(
-        QStringLiteral("POST"), QStringLiteral("/api/v1/ai/github-asset-rule"),
-        {{QStringLiteral("github_owner"), owner},
-         {QStringLiteral("github_repository"), repository},
-         {QStringLiteral("preferred_asset"), preferredAsset},
-         {QStringLiteral("available_assets"), available}},
-        error, 202);
-    if (!accepted) return std::nullopt;
-    JobStatus job;
-    job.id = accepted->value(QStringLiteral("job_id")).toString();
-    job.status = QStringLiteral("queued");
-    return job;
-}
-
-std::optional<QStringList> LibraryClient::listAiModels(const QString &provider,
-                                                       QString *error) const {
-    auto path = QStringLiteral("/api/v1/ai/models");
-    if (!provider.isEmpty()) {
-        path += QStringLiteral("?provider=") + QString::fromUtf8(QUrl::toPercentEncoding(provider));
-    }
-    const auto object = getJson(path, error);
-    if (!object) return std::nullopt;
-    QStringList models;
-    for (const auto &value : object->value(QStringLiteral("models")).toArray()) {
-        const auto id = value.toString().trimmed();
-        if (!id.isEmpty()) models.append(id);
-    }
-    return models;
 }
 
 std::optional<JobStatus> LibraryClient::getJob(const QString &jobId, QString *error) const {
@@ -446,8 +451,7 @@ QString LibraryClient::cacheArtifact(const QString &artifactId, const QString &f
 }
 
 std::optional<ServerInfo> LibraryClient::serverInfo(QString *error) const {
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(QStringLiteral("GET"), QStringLiteral("/api/v1/server"));
+    const auto response = transport_.request(QStringLiteral("GET"), QStringLiteral("/api/v1/server"));
     if (isError(response, error) || response.status != 200) {
         if (error != nullptr && error->isEmpty()) {
             *error = apiError(response.body, QStringLiteral("could not read server info"));
@@ -481,8 +485,7 @@ std::optional<ListenSettings> LibraryClient::saveListen(const ListenSettings &se
                                                         QString *error) const {
     QJsonArray hosts;
     for (const auto &host : settings.hosts) hosts.append(host);
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(
+    const auto response = transport_.request(
         QStringLiteral("PATCH"), QStringLiteral("/api/v1/server"),
         {{QStringLiteral("Content-Type"), QStringLiteral("application/json")}},
         QJsonDocument(QJsonObject{
@@ -514,13 +517,7 @@ std::optional<ListenSettings> LibraryClient::saveListen(const ListenSettings &se
     return saved;
 }
 
-void LibrarySettings::applyTo(AiSettings &settings) const {
-    settings.provider = provider;
-    settings.model = model;
-    settings.reasoningEffort = reasoningEffort;
-    settings.executionMode = executionMode;
-    settings.automaticallyResolveReviewItems = automaticallyResolve;
-    settings.githubTokenConfigured = githubTokenConfigured;
+void LibrarySettings::applyTo(AppSettings &settings) const {
     settings.updates.enabled = updatesEnabled;
     settings.updates.daily = updatesDaily;
     settings.updates.weekDay = weekDay;
@@ -530,28 +527,9 @@ void LibrarySettings::applyTo(AiSettings &settings) const {
     settings.updates.retainedCompleteReleases = retainedCompleteReleases;
 }
 
-QString serverReasoningName(const AiReasoningEffort effort) {
-    if (effort == AiReasoningEffort::ProviderDefault) {
-        return QStringLiteral("provider-default");
-    }
-    return aiReasoningEffortName(effort);
-}
-
 LibrarySettings librarySettingsFromObject(const QJsonObject &object) {
     LibrarySettings settings;
     settings.revision = object.value(QStringLiteral("revision")).toInteger(1);
-    const auto ai = object.value(QStringLiteral("ai")).toObject();
-    settings.provider = aiProviderFromName(ai.value(QStringLiteral("provider")).toString());
-    settings.model = ai.value(QStringLiteral("model")).toString();
-    settings.reasoningEffort =
-        aiReasoningEffortFromName(ai.value(QStringLiteral("reasoning_effort")).toString());
-    settings.executionMode =
-        aiExecutionModeFromName(ai.value(QStringLiteral("execution_mode")).toString());
-    settings.automaticallyResolve = ai.value(QStringLiteral("automatically_resolve")).toBool();
-    settings.githubTokenConfigured = ai.value(QStringLiteral("github_token_configured")).toBool();
-    settings.openaiConfigured = ai.value(QStringLiteral("openai_configured")).toBool();
-    settings.xaiConfigured = ai.value(QStringLiteral("xai_configured")).toBool();
-    settings.chatgptConfigured = ai.value(QStringLiteral("chatgpt_configured")).toBool();
     const auto updates = object.value(QStringLiteral("updates")).toObject();
     settings.updatesEnabled = updates.value(QStringLiteral("enabled")).toBool();
     settings.updatesDaily = updates.value(QStringLiteral("daily")).toBool(true);
@@ -570,12 +548,6 @@ LibrarySettings librarySettingsFromObject(const QJsonObject &object) {
 QJsonObject librarySettingsToObject(const LibrarySettings &settings) {
     return {
         {QStringLiteral("revision"), settings.revision},
-        {QStringLiteral("ai"),
-         QJsonObject{{QStringLiteral("provider"), aiProviderName(settings.provider)},
-                     {QStringLiteral("model"), settings.model},
-                     {QStringLiteral("reasoning_effort"), serverReasoningName(settings.reasoningEffort)},
-                     {QStringLiteral("execution_mode"), aiExecutionModeName(settings.executionMode)},
-                     {QStringLiteral("automatically_resolve"), settings.automaticallyResolve}}},
         {QStringLiteral("updates"),
          QJsonObject{{QStringLiteral("enabled"), settings.updatesEnabled},
                      {QStringLiteral("daily"), settings.updatesDaily},
@@ -695,8 +667,7 @@ std::optional<ProjectRepository> LibraryClient::promoteProjectRepo(const QString
 }
 
 QList<RemoteClient> LibraryClient::clients(QString *error) const {
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(QStringLiteral("GET"), QStringLiteral("/api/v1/clients"));
+    const auto response = transport_.request(QStringLiteral("GET"), QStringLiteral("/api/v1/clients"));
     if (isError(response, error) || response.status != 200) return {};
     QList<RemoteClient> out;
     const auto array = QJsonDocument::fromJson(response.body).object().value(QStringLiteral("clients")).toArray();
@@ -711,8 +682,7 @@ QList<RemoteClient> LibraryClient::clients(QString *error) const {
 }
 
 QList<Registration> LibraryClient::pendingRegistrations(QString *error) const {
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(QStringLiteral("GET"), QStringLiteral("/api/v1/registrations"));
+    const auto response = transport_.request(QStringLiteral("GET"), QStringLiteral("/api/v1/registrations"));
     if (isError(response, error) || response.status != 200) return {};
     QList<Registration> out;
     const auto array = QJsonDocument::fromJson(response.body).object()
@@ -729,24 +699,21 @@ QList<Registration> LibraryClient::pendingRegistrations(QString *error) const {
 }
 
 bool LibraryClient::approveRegistration(const QString &id, QString *error) const {
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(QStringLiteral("POST"),
+    const auto response = transport_.request(QStringLiteral("POST"),
                                         QStringLiteral("/api/v1/registrations/") + id +
                                             QStringLiteral("/approve"));
     return !isError(response, error) && response.status == 200;
 }
 
 bool LibraryClient::rejectRegistration(const QString &id, QString *error) const {
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(QStringLiteral("POST"),
+    const auto response = transport_.request(QStringLiteral("POST"),
                                         QStringLiteral("/api/v1/registrations/") + id +
                                             QStringLiteral("/reject"));
     return !isError(response, error) && response.status == 200;
 }
 
 bool LibraryClient::revokeClient(const QString &id, QString *error) const {
-    HttpTransport local(ConnectionConfig::localDefault());
-    const auto response = local.request(QStringLiteral("POST"),
+    const auto response = transport_.request(QStringLiteral("POST"),
                                         QStringLiteral("/api/v1/clients/") + id +
                                             QStringLiteral("/revoke"));
     return !isError(response, error) && response.status == 200;

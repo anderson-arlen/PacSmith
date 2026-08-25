@@ -151,19 +151,16 @@ void MainWindow::saveInstallMapping() {
         release.sourceType != SourcePackageType::AppImage &&
         release.sourceType != SourcePackageType::ElfBinary) return;
     const auto destination = installBinaryDestination_->text().trimmed();
-    static const QRegularExpression commandPath(
-        QStringLiteral("^/usr/bin/[A-Za-z0-9@._+\\-]+$"));
     if (release.sourceType == SourcePackageType::ElfBinary && !destination.isEmpty() &&
-        !commandPath.match(destination).hasMatch()) {
+        !DomainValidation::command(QFileInfo(destination).fileName(), destination).isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Unsafe command destination"),
                              QStringLiteral("The command destination must be a simple absolute path below /usr/bin."));
         return;
     }
     if ((release.sourceType == SourcePackageType::Archive && archiveLayout_->currentIndex() == 0) ||
         release.sourceType == SourcePackageType::AppImage) {
-        static const QRegularExpression optName(QStringLiteral("^[A-Za-z0-9@._+\\-]+$"));
         const auto opt = installOptDirectory_->text().trimmed();
-        if (!optName.match(opt).hasMatch()) {
+        if (!DomainValidation::optDirectory(opt).isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Unsafe /opt directory"),
                                  QStringLiteral("Use a single directory name containing letters, digits, '.', '_', '+', '@', or '-'."));
             return;
@@ -197,6 +194,11 @@ void MainWindow::populateDependencies() {
     populating_ = true;
     QStringList packagesToValidate;
     dependenciesTable_->setRowCount(static_cast<int>(currentRelease()->dependencies.size()));
+    if (additionalDependencies_ != nullptr) {
+        additionalDependencies_->clear();
+        additionalDependencies_->addItems(
+            currentRelease()->packageMetadata.additionalDependencies);
+    }
     for (int row = 0; row < static_cast<int>(currentRelease()->dependencies.size()); ++row) {
         const auto &dependency = currentRelease()->dependencies.at(row);
         auto *debianItem = new QTableWidgetItem(dependency.rawExpression);
@@ -319,7 +321,7 @@ void MainWindow::loadRepositoryPackageCatalog() {
         }
     });
     watcher->setFuture(QtConcurrent::run([] {
-        return SystemInformationBroker::repositoryPackageNames();
+        return SystemPackageQuery::repositoryPackageNames();
     }));
 }
 
@@ -347,11 +349,7 @@ void MainWindow::scheduleRepositoryPackageValidation(const QStringList &packages
     watcher->setFuture(QtConcurrent::run([pending] {
         QHash<QString, bool> results;
         for (const auto &package : pending) {
-            const auto result = SystemInformationBroker::execute(
-                {QStringLiteral("pacsmith-dependency-editor"),
-                 QStringLiteral("repository-package"), package,
-                 QStringLiteral("Validate a required dependency mapping")});
-            results.insert(package, result.value(QStringLiteral("available")).toBool());
+            results.insert(package, SystemPackageQuery::repositoryPackageAvailable(package));
         }
         return results;
     }));
@@ -406,7 +404,7 @@ void MainWindow::populateScripts() {
             const auto provenanceName = valueOriginName(finding.provenance.origin);
             auto *provenanceItem = new QTableWidgetItem(
                 finding.provenance.origin == ValueOrigin::Ai
-                    ? QStringLiteral("AI · %1/%2").arg(finding.provenance.provider, finding.provenance.model)
+                    ? QStringLiteral("Legacy AI provenance · %1/%2").arg(finding.provenance.provider, finding.provenance.model)
                     : provenanceName);
             scriptItem->setFlags(scriptItem->flags() & ~Qt::ItemIsEditable);
             summaryItem->setFlags(summaryItem->flags() & ~Qt::ItemIsEditable);
@@ -489,7 +487,7 @@ void MainWindow::populateScripts() {
     saveLifecycleButton_->setVisible(false);
     cancelLifecycleButton_->setVisible(false);
     const auto lifecycleOrigin = lifecycle.provenance.origin == ValueOrigin::Ai
-                                     ? QStringLiteral("<span style='color:#55cc77'>AI-generated</span>")
+                                     ? QStringLiteral("<span style='color:#55cc77'>Legacy AI provenance</span>")
                                  : lifecycle.provenance.origin == ValueOrigin::User
                                      ? QStringLiteral("User-authored")
                                      : QStringLiteral("Generated");

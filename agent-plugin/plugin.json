@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pacsmith",
+  "version": "0.1.0",
+  "description": "Inspect and maintain PacSmith packaging projects through the normal PacSmith MCP client connection.",
+  "author": {
+    "name": "PacSmith contributors"
+  },
+  "repository": "https://github.com/anderson-arlen/pacsmith",
+  "license": "MIT",
+  "keywords": [
+    "arch-linux",
+    "packaging",
+    "mcp"
+  ]
+}

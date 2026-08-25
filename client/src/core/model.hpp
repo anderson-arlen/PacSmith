@@ -51,6 +51,20 @@ struct DebianMetadata {
     [[nodiscard]] static DebianMetadata fromJson(const QJsonObject &object);
 };
 
+// User-maintained Arch package metadata is separate from immutable metadata
+// extracted from the vendor artifact.
+struct PackageMetadata {
+    QString description;
+    QString homepage;
+    QStringList licenses;
+    QStringList provides;
+    QStringList conflicts;
+    QStringList additionalDependencies;
+
+    [[nodiscard]] QJsonObject toJson() const;
+    [[nodiscard]] static PackageMetadata fromJson(const QJsonObject &object);
+};
+
 // Describes where a particular immutable source artifact came from.  This is
 // deliberately separate from SourcePackageType: a GitHub release may contain
 // a DEB, an Arch package, an archive, or a standalone ELF binary.
@@ -142,7 +156,7 @@ struct IconConfiguration {
 int applyDesktopIconName(QList<DesktopEntryConfiguration> &entries, const QString &iconName);
 
 // Vendor AppDir entry point for an extracted AppImage. Text scripts can be
-// edited in the recipe (or by AI) and overlaid after unsquashfs; the AppImage
+// edited in the recipe and overlaid after unsquashfs; the AppImage
 // bytes stay immutable. Binary or symlink AppRuns are not text-editable.
 struct AppRunConfiguration {
     bool present{false};
@@ -419,6 +433,7 @@ struct PackageRelease {
     int archPkgrel{1};
     QString archPkgrelOverride;
     DebianMetadata debian;
+    PackageMetadata packageMetadata;
     QList<DependencyMapping> dependencies;
     QList<MaintainerScript> maintainerScripts;
     QList<ScriptFinding> scriptFindings;
@@ -428,7 +443,7 @@ struct PackageRelease {
     QString generatedPkgbuildSha256;
     bool pkgbuildManuallyModified{false};
     QString customPkgbuild;
-    QString previousManualPkgbuild;
+    QMap<QString, QString> customFiles;
     ArchLifecycleScript lifecycleScript;
     QMap<QString, FieldProvenance> fieldProvenance;
     QList<AiChangeRecord> aiChanges;

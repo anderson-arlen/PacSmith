@@ -277,9 +277,40 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 		saved := mustDo(t, client, origin, http.MethodPut, "/api/v1/releases/"+releaseID, map[string]string{
 			"Content-Type": "application/json",
 		}, payload)
-		defer saved.Body.Close()
 		if saved.StatusCode != http.StatusOK {
 			t.Fatalf("save release %d %s", saved.StatusCode, readBody(t, saved))
+		}
+		var savedRelease map[string]any
+		decodeJSON(t, saved, &savedRelease)
+		saved.Body.Close()
+		configurationPatch, err := json.Marshal(map[string]any{
+			"revision": savedRelease["revision"],
+			"configuration": map[string]any{
+				"payloadRules": []map[string]any{{"path": "usr/share/doc/readme", "excluded": true}},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		patched := mustDo(t, client, origin, http.MethodPatch,
+			"/api/v1/releases/"+releaseID+"/configuration",
+			map[string]string{"Content-Type": "application/json"}, configurationPatch)
+		if patched.StatusCode != http.StatusOK {
+			t.Fatalf("patch release configuration %d %s", patched.StatusCode, readBody(t, patched))
+		}
+		var patchedRelease map[string]any
+		decodeJSON(t, patched, &patchedRelease)
+		patched.Body.Close()
+		forbiddenPatch, _ := json.Marshal(map[string]any{
+			"revision":      patchedRelease["revision"],
+			"configuration": map[string]any{"payload": []any{}},
+		})
+		forbidden := mustDo(t, client, origin, http.MethodPatch,
+			"/api/v1/releases/"+releaseID+"/configuration",
+			map[string]string{"Content-Type": "application/json"}, forbiddenPatch)
+		defer forbidden.Body.Close()
+		if forbidden.StatusCode != http.StatusBadRequest {
+			t.Fatalf("inspection evidence patch status %d %s", forbidden.StatusCode, readBody(t, forbidden))
 		}
 		varsAfter := mustDo(t, client, origin, http.MethodGet, "/api/v1/releases/"+releaseID+"/files/pacsmith.vars", nil, nil)
 		defer varsAfter.Body.Close()
@@ -325,20 +356,8 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 		}
 		var settings map[string]any
 		decodeJSON(t, got, &settings)
-		ai, _ := settings["ai"].(map[string]any)
-		if fmt.Sprint(ai["provider"]) != "none" {
-			t.Fatalf("default provider %+v", ai)
-		}
-		if github, _ := ai["github_token_configured"].(bool); !github {
-			t.Fatal("github token should already be configured from the previous subtest")
-		}
-		settings["ai"] = map[string]any{
-			"provider":                "openai",
-			"model":                   "gpt-4.1",
-			"reasoning_effort":        "low",
-			"execution_mode":          "fast",
-			"automatically_resolve":   true,
-			"github_token_configured": true,
+		if _, exists := settings["ai"]; exists {
+			t.Fatalf("retired AI settings are still exposed: %+v", settings["ai"])
 		}
 		settings["updates"] = map[string]any{
 			"enabled":               true,
@@ -365,11 +384,7 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 		}
 		var updated struct {
 			Revision int64 `json:"revision"`
-			AI       struct {
-				Provider string `json:"provider"`
-				Model    string `json:"model"`
-			} `json:"ai"`
-			Updates struct {
+			Updates  struct {
 				Enabled bool `json:"enabled"`
 				Hour    int  `json:"hour"`
 				Weekday int  `json:"weekday"`
@@ -379,8 +394,7 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			} `json:"cleanup"`
 		}
 		decodeJSON(t, patched, &updated)
-		if updated.AI.Provider != "openai" || updated.AI.Model != "gpt-4.1" ||
-			!updated.Updates.Enabled || updated.Updates.Hour != 4 || updated.Updates.Weekday != 3 ||
+		if !updated.Updates.Enabled || updated.Updates.Hour != 4 || updated.Updates.Weekday != 3 ||
 			updated.Cleanup.RetainedPackageVersions != 5 {
 			t.Fatalf("updated %+v", updated)
 		}
@@ -392,37 +406,21 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			t.Fatalf("expected revision conflict, got %d %s", conflict.StatusCode, readBody(t, conflict))
 		}
 	})
-	t.Run("ai_is_server_owned", func(t *testing.T) {
-		models := mustDo(t, client, origin, http.MethodGet, "/api/v1/ai/models?provider=openai", nil, nil)
-		defer models.Body.Close()
-		if models.StatusCode != http.StatusBadRequest {
-			t.Fatalf("models without credential %d %s", models.StatusCode, readBody(t, models))
+	t.Run("builtin_ai_api_is_gone", func(t *testing.T) {
+		for _, path := range []string{"/api/v1/ai/models", "/api/v1/ai/github-asset-rule"} {
+			response := mustDo(t, client, origin, http.MethodGet, path, nil, nil)
+			response.Body.Close()
+			if response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusMethodNotAllowed {
+				t.Fatalf("retired endpoint %s returned %d", path, response.StatusCode)
+			}
 		}
-		list := mustDo(t, client, origin, http.MethodGet, "/api/v1/projects", nil, nil)
-		defer list.Body.Close()
-		var projects struct {
-			Projects []struct {
-				Releases []struct {
-					ID string `json:"id"`
-				} `json:"releases"`
-			} `json:"projects"`
-		}
-		decodeJSON(t, list, &projects)
-		if len(projects.Projects) == 0 || len(projects.Projects[0].Releases) == 0 {
-			t.Fatalf("expected imported release %+v", projects)
-		}
-		releaseID := projects.Projects[0].Releases[0].ID
-		review := mustDo(t, client, origin, http.MethodPost, "/api/v1/releases/"+releaseID+"/ai", nil, nil)
-		defer review.Body.Close()
-		if review.StatusCode != http.StatusBadRequest {
-			t.Fatalf("ai without credential %d %s", review.StatusCode, readBody(t, review))
-		}
-		github := mustDo(t, client, origin, http.MethodPost, "/api/v1/ai/github-asset-rule", map[string]string{
-			"Content-Type": "application/json",
-		}, []byte(`{"github_owner":"o","github_repository":"r","available_assets":["app-1.0-x86_64.AppImage"]}`))
-		defer github.Body.Close()
-		if github.StatusCode != http.StatusBadRequest {
-			t.Fatalf("github ai without credential %d %s", github.StatusCode, readBody(t, github))
+		for _, name := range []string{"openai.api_key", "xai.api_key", "chatgpt.session"} {
+			response := mustDo(t, client, origin, http.MethodPut, "/api/v1/credentials/"+name,
+				map[string]string{"Content-Type": "application/json"}, []byte(`{"value":"retired"}`))
+			response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("retired credential %s returned %d", name, response.StatusCode)
+			}
 		}
 	})
 }
@@ -507,7 +505,7 @@ func NewHandler(t *testing.T) (http.Handler, paths.Dirs) {
 	lib := &library.Service{DB: db, Artifacts: registry, WorkDir: filepath.Join(dirs.Work, "releases")}
 	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(dirs.Work, "repo"), filepath.Join(dirs.Data, "gnupg"))
 	lib.Repo = repoSvc
-	manager, err := jobs.New(db, filepath.Join(dirs.Work, "jobs"), daemon.JobHandler(lib, opened.Store))
+	manager, err := jobs.New(db, filepath.Join(dirs.Work, "jobs"), daemon.JobHandler(lib))
 	if err != nil {
 		t.Fatal(err)
 	}

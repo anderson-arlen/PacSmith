@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,75 @@ func TestWriteReleaseIconCopiesArtifact(t *testing.T) {
 	}
 }
 
+func TestPatchReleaseConfigurationPreservesLargeInspectionEvidence(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := &Service{DB: db}
+	now := nowUTC()
+	project, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "project-large", DisplayName: "Large Vendor App", ArchPackageName: "large-vendor-bin",
+		SourceIdentity: "local:large", HistoryJson: "[]", CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	largePreview := strings.Repeat("inspection-evidence-", 70_000)
+	body, err := json.Marshal(map[string]any{
+		"payload":      []map[string]any{{"path": "opt/vendor/resources.bin", "textPreview": largePreview}},
+		"dependencies": []map[string]any{{"rawExpression": "vendor-runtime", "status": "unresolved"}},
+		"payloadRules": []any{},
+		"state":        "needs-review",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 1<<20 {
+		t.Fatalf("test release body is only %d bytes", len(body))
+	}
+	release, err := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID: "release-large", ProjectID: project.ID, State: "needs-review", SourceType: "deb",
+		VendorVersion: "1.0", OriginalFilename: "large.deb", SourceSha256: strings.Repeat("a", 64),
+		ArchPackageName: project.ArchPackageName, ArchPkgrel: 1, BodyJson: string(body),
+		CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependencies := []any{map[string]any{
+		"rawExpression": "vendor-runtime", "status": "resolved", "archPackage": "vulkan-driver",
+	}}
+	updated, err := svc.PatchReleaseConfiguration(ctx, release.ID, release.Revision,
+		map[string]any{"dependencies": dependencies})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := updated.Document["payload"].([]any)
+	if !ok || len(payload) != 1 {
+		t.Fatalf("large payload evidence was not preserved: %#v", updated.Document["payload"])
+	}
+	entry, _ := payload[0].(map[string]any)
+	if entry["textPreview"] != largePreview {
+		t.Fatal("large payload evidence changed during configuration patch")
+	}
+	unchanged, err := svc.PatchReleaseConfiguration(ctx, release.ID, updated.Revision,
+		map[string]any{"dependencies": dependencies})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Revision != updated.Revision {
+		t.Fatalf("no-op patch advanced revision from %d to %d", updated.Revision, unchanged.Revision)
+	}
+	if _, err := svc.PatchReleaseConfiguration(ctx, release.ID, updated.Revision,
+		map[string]any{"payload": []any{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inspection evidence mutation error = %v, want ErrInvalid", err)
+	}
+}
+
 func TestUnconfiguredIconArtifactIsNotExposed(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -202,6 +272,86 @@ func TestUnconfiguredIconArtifactIsNotExposed(t *testing.T) {
 		if item.Role == "icon" {
 			t.Fatal("reanalyze left a stale icon artifact attached")
 		}
+	}
+}
+
+func TestGetReleaseDerivesBuildSummaryAndArtifacts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{DB: db, Artifacts: &artifact.Registry{DB: db, Store: store}}
+	now := nowUTC()
+	project, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "project-build", DisplayName: "Built App", ArchPackageName: "built-app-bin",
+		SourceIdentity: "local:built", HistoryJson: "[]", CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"buildStatus": "never-built", "state": "needs-review", "lastBuildLog": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID: "release-build", ProjectID: project.ID, State: "needs-review", SourceType: "deb",
+		VendorVersion: "2.0", OriginalFilename: "built.deb", SourceSha256: strings.Repeat("c", 64),
+		ArchPackageName: project.ArchPackageName, ArchPkgrel: 1, BodyJson: string(body),
+		CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := svc.Artifacts.Put(ctx, "built-app-bin-2.0-3-x86_64.pkg.tar.zst",
+		"arch_package", bytes.NewReader([]byte("package")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := db.Queries.InsertBuild(ctx, sqlcdb.InsertBuildParams{
+		ID: "build-success", ReleaseID: release.ID, Status: "succeeded", LogText: "done",
+		StartedAt: nullString(now), FinishedAt: nullString(now),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Queries.InsertReleaseArtifact(ctx, sqlcdb.InsertReleaseArtifactParams{
+		ReleaseID: release.ID, ArtifactID: built.ID, Role: "built_package",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Queries.InsertBuildArtifact(ctx, sqlcdb.InsertBuildArtifactParams{
+		BuildID: build.ID, ArtifactID: built.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.GetRelease(ctx, release.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "built" || got.Document["buildStatus"] != "succeeded" {
+		t.Fatalf("derived release state = %q, status = %#v", got.State, got.Document["buildStatus"])
+	}
+	builds, ok := got.Document["builds"].([]map[string]any)
+	if !ok || len(builds) != 1 {
+		t.Fatalf("build records = %#v", got.Document["builds"])
+	}
+	artifacts, ok := builds[0]["artifacts"].([]map[string]any)
+	if !ok || len(artifacts) != 1 {
+		t.Fatalf("build artifacts = %#v", builds[0]["artifacts"])
+	}
+	if artifacts[0]["packageName"] != "built-app-bin" ||
+		artifacts[0]["packageVersion"] != "2.0-3" {
+		t.Fatalf("artifact metadata = %#v", artifacts[0])
 	}
 }
 

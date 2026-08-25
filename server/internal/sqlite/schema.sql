@@ -79,6 +79,12 @@ CREATE TABLE builds (
 
 CREATE INDEX builds_release_idx ON builds (release_id);
 
+CREATE TABLE build_artifacts (
+    build_id TEXT NOT NULL REFERENCES builds (id) ON DELETE CASCADE,
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    PRIMARY KEY (build_id, artifact_id)
+);
+
 CREATE TABLE jobs (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,

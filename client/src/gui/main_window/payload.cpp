@@ -128,13 +128,13 @@ void MainWindow::populatePayload() {
                         }
                     } else if (review.disposition == PayloadDisposition::Excluded) {
                         item->setText(3, aiGenerated && provenance.userApproved
-                                                    ? QStringLiteral("Excluded — AI-proposed, user approved")
-                                                : aiGenerated ? QStringLiteral("Excluded — AI-generated")
+                                                    ? QStringLiteral("Excluded — legacy AI proposal, user approved")
+                                                : aiGenerated ? QStringLiteral("Excluded — legacy AI provenance")
                                                     : QStringLiteral("Excluded — acknowledged"));
                     } else {
                         item->setText(3, aiGenerated && provenance.userApproved
-                                                    ? QStringLiteral("Kept — AI-proposed, user approved")
-                                                : aiGenerated ? QStringLiteral("Kept — AI-generated")
+                                                    ? QStringLiteral("Kept — legacy AI proposal, user approved")
+                                                : aiGenerated ? QStringLiteral("Kept — legacy AI provenance")
                                                     : QStringLiteral("Kept — acknowledged"));
                     }
                     if (aiGenerated && !review.needsReview) {
@@ -476,8 +476,7 @@ void MainWindow::saveAppRun() {
     auto &appRun = currentRelease()->installMapping.appRun;
     if (!appRun.present || !appRun.script) return;
     const auto contents = appRunEditor_->toPlainText();
-    if (!contents.startsWith(QStringLiteral("#!")) || contents.contains(QChar(QChar::Null)) ||
-        contents.size() > 256 * 1024) {
+    if (!DomainValidation::appRun(contents).isEmpty()) {
         appRunStatus_->setText(QStringLiteral("⚠ AppRun must remain a #! script of at most 256 KiB."));
         return;
     }
@@ -526,17 +525,13 @@ void MainWindow::restoreOriginalAppRun() {
     populateAppRunEditor();
 }
 
-void MainWindow::commandEdited(const int row, const int column) {
+void MainWindow::commandEdited(const int row, const int) {
     if (populating_ || !project_ || row < 0 ||
         row >= currentRelease()->installMapping.launchers.size()) return;
     auto &launcher = currentRelease()->installMapping.launchers[row];
     const auto command = commandsTable_->item(row, 2)->text().trimmed();
     const auto destination = commandsTable_->item(row, 3)->text().trimmed();
-    static const QRegularExpression commandPattern(QStringLiteral("^[A-Za-z0-9@._+\\-]+$"));
-    static const QRegularExpression destinationPattern(
-        QStringLiteral("^/usr/bin/[A-Za-z0-9@._+\\-]+$"));
-    if ((column == 2 && !commandPattern.match(command).hasMatch()) ||
-        (column == 3 && !destinationPattern.match(destination).hasMatch())) {
+    if (!DomainValidation::command(command, destination).isEmpty()) {
         statusBar()->showMessage(
             QStringLiteral("Command names must be simple names and destinations must be below /usr/bin"),
             8000);
@@ -749,34 +744,9 @@ void MainWindow::saveSelectedDesktopEntry() {
         row >= currentRelease()->installMapping.desktopEntries.size()) return;
     const auto contents = desktopEntryEditor_->toPlainText();
     const auto destination = desktopEntryDestination_->text().trimmed();
-    QStringList errors;
-    if (!contents.contains(QRegularExpression(QStringLiteral(R"(^\s*\[Desktop Entry\]\s*$)"),
-                                               QRegularExpression::MultilineOption))) {
-        errors.append(QStringLiteral("Missing [Desktop Entry] section"));
-    }
-    if (!contents.contains(QRegularExpression(QStringLiteral(R"(^Name(?:\[[^\]]+\])?=.+$)"),
-                                               QRegularExpression::MultilineOption))) {
-        errors.append(QStringLiteral("Missing Name="));
-    }
-    if (!contents.contains(QRegularExpression(QStringLiteral(R"(^Type=(?:Application|Link|Directory)$)"),
-                                               QRegularExpression::MultilineOption))) {
-        errors.append(QStringLiteral("Type must be Application, Link, or Directory"));
-    }
-    const auto exec = QRegularExpression(QStringLiteral(R"(^Exec=(.+)$)"),
-                                         QRegularExpression::MultilineOption).match(contents);
-    if (!exec.hasMatch() || exec.captured(1).contains(QLatin1Char('\n')) ||
-        exec.captured(1).contains(QLatin1Char('`')) ||
-        exec.captured(1).contains(QStringLiteral("$(")) ||
-        exec.captured(1).contains(QLatin1Char(';'))) {
-        errors.append(QStringLiteral("Exec must be present and must not contain shell syntax"));
-    }
-    static const QRegularExpression destinationPattern(
-        QStringLiteral("^/usr/share/applications/[A-Za-z0-9@._+\\-]+\\.desktop$"));
-    if (!destinationPattern.match(destination).hasMatch()) {
-        errors.append(QStringLiteral("Destination must be a simple .desktop name under /usr/share/applications"));
-    }
-    if (!errors.isEmpty()) {
-        desktopEntryStatus_->setText(QStringLiteral("⚠ %1").arg(errors.join(QStringLiteral("; "))));
+    const auto validationError = DomainValidation::desktopEntry(contents, destination);
+    if (!validationError.isEmpty()) {
+        desktopEntryStatus_->setText(QStringLiteral("⚠ %1").arg(validationError));
         return;
     }
     auto &desktop = currentRelease()->installMapping.desktopEntries[row];

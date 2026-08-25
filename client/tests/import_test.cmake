@@ -126,4 +126,107 @@ foreach(expected IN ITEMS "pkgname=\"\${_PACSMITH_PKGNAME}\"" "depends=('glibc' 
     endif()
 endforeach()
 
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" plugin path
+    RESULT_VARIABLE plugin_path_result OUTPUT_VARIABLE plugin_path ERROR_VARIABLE plugin_path_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT plugin_path_result EQUAL 0 OR NOT IS_DIRECTORY "${plugin_path}" OR
+   NOT EXISTS "${plugin_path}/plugin.json" OR NOT EXISTS "${plugin_path}/mcp.json" OR
+   NOT EXISTS "${plugin_path}/skills/pacsmith/SKILL.md")
+    stop_pacsmithd()
+    message(FATAL_ERROR "Portable Agent Plugin path was invalid: ${plugin_path_error} ${plugin_path}")
+endif()
+
+set(mcp_input "${runtime_dir}/mcp-input.jsonl")
+file(WRITE "${mcp_input}"
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"pacsmith-test\",\"version\":\"1\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"list_projects\",\"arguments\":{\"query\":\"pacsmith-smoke\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"get_project\",\"arguments\":{\"project\":\"pacsmith-smoke\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_project\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\"}}}\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" mcp
+    INPUT_FILE "${mcp_input}"
+    RESULT_VARIABLE mcp_result OUTPUT_VARIABLE mcp_output ERROR_VARIABLE mcp_error)
+if(NOT mcp_result EQUAL 0)
+    stop_pacsmithd()
+    message(FATAL_ERROR "pacsmith mcp failed: ${mcp_error}\n${mcp_output}")
+endif()
+foreach(expected IN ITEMS
+        "\"protocolVersion\":\"2025-11-25\""
+        "\"name\":\"get_dependencies\""
+        "\"name\":\"get_package_metadata\""
+        "\"name\":\"get_release_issues\""
+        "\"name\":\"set_dependency_mapping\""
+        "\"name\":\"check_updates\""
+        "\"name\":\"upsert_harness_profile\""
+        "\"readOnlyHint\":true"
+        "\"destructiveHint\":true"
+        "pacsmith-smoke"
+        "requires explicit PacSmith confirmation")
+    string(FIND "${mcp_output}" "${expected}" found)
+    if(found EQUAL -1)
+        stop_pacsmithd()
+        message(FATAL_ERROR "MCP output omitted ${expected}: ${mcp_output}")
+    endif()
+endforeach()
+string(REGEX MATCH "\"release_id\":\"([0-9a-f-]+)\"" release_match "${mcp_output}")
+set(release_id "${CMAKE_MATCH_1}")
+if(release_id STREQUAL "")
+    stop_pacsmithd()
+    message(FATAL_ERROR "Could not obtain release ID through MCP: ${mcp_output}")
+endif()
+
+set(mcp_write_input "${runtime_dir}/mcp-write-input.jsonl")
+file(WRITE "${mcp_write_input}"
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"pacsmith-test\",\"version\":\"1\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_release_issues\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"set_dependency_mapping\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"dependency\":\"unknown-vendor-runtime\",\"status\":\"ignored\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"get_dependencies\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"upsert_harness_profile\",\"arguments\":{\"name\":\"Test harness\",\"executable\":\"agent-cli\",\"arguments\":[\"--prompt\",\"{prompt}\",\"literal;not-shell\"],\"default\":true}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"list_harness_profiles\",\"arguments\":{}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"check_updates\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"acknowledge_vendor_script\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"name\":\"postinst\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"acknowledge_vendor_script\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"name\":\"postrm\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"get_release_issues\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"set_package_metadata\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"description\":\"Smoke package\",\"homepage\":\"https://vendor.example/smoke\",\"licenses\":[\"MIT\"],\"provides\":[\"smoke-virtual\"],\"conflicts\":[]}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"add_runtime_dependency\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"arch_package\":\"libnotify\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"get_package_metadata\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" mcp
+    INPUT_FILE "${mcp_write_input}"
+    RESULT_VARIABLE mcp_write_result OUTPUT_VARIABLE mcp_write_output ERROR_VARIABLE mcp_write_error)
+if(NOT mcp_write_result EQUAL 0 OR NOT mcp_write_output MATCHES "unknown-vendor-runtime"
+   OR NOT mcp_write_output MATCHES "Ignored" OR NOT mcp_write_output MATCHES "Test harness"
+   OR NOT mcp_write_output MATCHES "agent-cli" OR NOT mcp_write_output MATCHES "checks"
+   OR NOT mcp_write_output MATCHES "postinst" OR NOT mcp_write_output MATCHES "postrm"
+   OR NOT mcp_write_output MATCHES "remaining_issue_count"
+   OR NOT mcp_write_output MATCHES "review_complete"
+   OR NOT mcp_write_output MATCHES "maintenance_complete"
+   OR NOT mcp_write_output MATCHES "https://vendor.example/smoke"
+   OR NOT mcp_write_output MATCHES "smoke-virtual"
+   OR NOT mcp_write_output MATCHES "libnotify")
+    stop_pacsmithd()
+    message(FATAL_ERROR "MCP domain write/read round trip failed: ${mcp_write_error}\n${mcp_write_output}")
+endif()
+
+set(mcp_confirm_input "${runtime_dir}/mcp-confirm-input.jsonl")
+file(WRITE "${mcp_confirm_input}"
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"elicitation\":{\"form\":{}}},\"clientInfo\":{\"name\":\"pacsmith-test\",\"version\":\"1\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_project\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":\"pacsmith-confirm-1\",\"result\":{\"action\":\"decline\"}}\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" mcp
+    INPUT_FILE "${mcp_confirm_input}"
+    RESULT_VARIABLE mcp_confirm_result OUTPUT_VARIABLE mcp_confirm_output ERROR_VARIABLE mcp_confirm_error)
+if(NOT mcp_confirm_result EQUAL 0 OR NOT mcp_confirm_output MATCHES "elicitation/create"
+   OR NOT mcp_confirm_output MATCHES "pacsmith-smoke-bin"
+   OR NOT mcp_confirm_output MATCHES "declined or canceled")
+    stop_pacsmithd()
+    message(FATAL_ERROR "MCP confirmation round trip failed: ${mcp_confirm_error}\n${mcp_confirm_output}")
+endif()
+
 stop_pacsmithd()

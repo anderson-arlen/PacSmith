@@ -5,27 +5,13 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 )
 
 type librarySettingsJSON struct {
 	Revision int64               `json:"revision"`
-	AI       aiSettingsJSON      `json:"ai"`
 	Updates  updateSettingsJSON  `json:"updates"`
 	Cleanup  cleanupSettingsJSON `json:"cleanup"`
-}
-
-type aiSettingsJSON struct {
-	Provider              string `json:"provider"`
-	Model                 string `json:"model"`
-	ReasoningEffort       string `json:"reasoning_effort"`
-	ExecutionMode         string `json:"execution_mode"`
-	AutomaticallyResolve  bool   `json:"automatically_resolve"`
-	GitHubTokenConfigured bool   `json:"github_token_configured"`
-	OpenAIConfigured      bool   `json:"openai_configured"`
-	XAIConfigured         bool   `json:"xai_configured"`
-	ChatGPTConfigured     bool   `json:"chatgpt_configured"`
 }
 
 type updateSettingsJSON struct {
@@ -81,17 +67,6 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settingsFromRow(r *http.Request, row sqlcdb.LibrarySetting) librarySettingsJSON {
 	return librarySettingsJSON{
 		Revision: row.Revision,
-		AI: aiSettingsJSON{
-			Provider:              row.AiProvider,
-			Model:                 row.AiModel,
-			ReasoningEffort:       row.AiReasoningEffort,
-			ExecutionMode:         row.AiExecutionMode,
-			AutomaticallyResolve:  row.AiAutoResolve != 0,
-			GitHubTokenConfigured: s.credentialConfigured(r, "github.token"),
-			OpenAIConfigured:      s.credentialConfigured(r, "openai.api_key"),
-			XAIConfigured:         s.credentialConfigured(r, "xai.api_key"),
-			ChatGPTConfigured:     s.credentialConfigured(r, "chatgpt.session"),
-		},
 		Updates: updateSettingsJSON{
 			Enabled:              row.UpdatesEnabled != 0,
 			Daily:                row.UpdatesDaily != 0,
@@ -107,48 +82,21 @@ func (s *Server) settingsFromRow(r *http.Request, row sqlcdb.LibrarySetting) lib
 	}
 }
 
-func (s *Server) credentialConfigured(r *http.Request, name string) bool {
-	if s.Secrets == nil {
-		return false
-	}
-	ok, err := s.Secrets.Exists(r.Context(), name)
-	if err != nil && !errors.Is(err, secret.ErrNotFound) {
-		return false
-	}
-	return ok
-}
-
 func settingsPatch(current sqlcdb.LibrarySetting, body librarySettingsJSON) sqlcdb.UpdateLibrarySettingsParams {
 	revision := body.Revision
 	if revision == 0 {
 		revision = current.Revision
-	}
-	provider := body.AI.Provider
-	if provider == "" {
-		provider = current.AiProvider
-	}
-	model := body.AI.Model
-	if provider == "none" {
-		model = ""
-	}
-	effort := body.AI.ReasoningEffort
-	if effort == "" {
-		effort = current.AiReasoningEffort
-	}
-	mode := body.AI.ExecutionMode
-	if mode == "" {
-		mode = current.AiExecutionMode
 	}
 	weekday := int64(body.Updates.Weekday)
 	if weekday == 0 {
 		weekday = current.UpdatesWeekday
 	}
 	return sqlcdb.UpdateLibrarySettingsParams{
-		AiProvider:               provider,
-		AiModel:                  model,
-		AiReasoningEffort:        effort,
-		AiExecutionMode:          mode,
-		AiAutoResolve:            boolInt(body.AI.AutomaticallyResolve),
+		AiProvider:               "none",
+		AiModel:                  "",
+		AiReasoningEffort:        "provider-default",
+		AiExecutionMode:          "standard",
+		AiAutoResolve:            0,
 		UpdatesEnabled:           boolInt(body.Updates.Enabled),
 		UpdatesDaily:             boolInt(body.Updates.Daily),
 		UpdatesWeekday:           weekday,
@@ -162,21 +110,6 @@ func settingsPatch(current sqlcdb.LibrarySetting, body librarySettingsJSON) sqlc
 }
 
 func validateSettings(next sqlcdb.UpdateLibrarySettingsParams) error {
-	switch next.AiProvider {
-	case "none", "chatgpt", "openai", "xai":
-	default:
-		return errors.New("invalid AI provider")
-	}
-	switch next.AiReasoningEffort {
-	case "provider-default", "none", "low", "medium", "high", "xhigh", "max":
-	default:
-		return errors.New("invalid reasoning effort")
-	}
-	switch next.AiExecutionMode {
-	case "standard", "fast":
-	default:
-		return errors.New("invalid execution mode")
-	}
 	if next.UpdatesWeekday < 1 || next.UpdatesWeekday > 7 {
 		return errors.New("weekday must be 1-7")
 	}

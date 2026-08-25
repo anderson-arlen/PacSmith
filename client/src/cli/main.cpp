@@ -1,5 +1,4 @@
 #include "core/apt_update_service.hpp"
-#include "core/ai_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/credential_store.hpp"
@@ -18,10 +17,12 @@
 #include "core/rpm_update_service.hpp"
 #include "core/terminal_install_service.hpp"
 #include "core/update_source.hpp"
+#include "core/update_check_runner.hpp"
+#include "cli/agent_integration.hpp"
 #include "cli/admin.hpp"
+#include "mcp/server.hpp"
 
 #include <QCoreApplication>
-#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QEventLoop>
@@ -57,13 +58,15 @@ void printUsage(QTextStream &stream) {
               "  pacsmith lifecycle <project> [--acknowledge <sha256>|--discard]\n"
               "  pacsmith payload <project> [--show <path>]\n"
               "  pacsmith pkgbuild <project>\n"
+              "  pacsmith custom-file <project> list|read <name>|write <name> <path>|delete <name>\n"
               "  pacsmith build <project>\n"
               "  pacsmith install <project> [package.pkg.tar.zst]\n"
               "  pacsmith rollback <project> <release-id|version>\n"
               "  pacsmith uninstall <project>\n"
               "  pacsmith check <project>|--all\n"
-              "  pacsmith ai status\n"
-              "  pacsmith ai resolve <project>\n"
+              "  pacsmith mcp\n"
+              "  pacsmith skill path|install [--force]|uninstall\n"
+              "  pacsmith plugin path\n"
               "  pacsmith connect status|local|remote <host>[:port]\n"
               "  pacsmith server status\n"
               "  pacsmith server info\n"
@@ -80,60 +83,6 @@ std::optional<pacsmith::Project> requireProject(const pacsmith::LibraryClient &l
     auto project = library.load(name, &error);
     if (!project) errorStream << "error: " << error << '\n';
     return project;
-}
-
-QString projectActivityName(const pacsmith::Project &project) {
-    return project.displayName.isEmpty() ? project.archPackageName : project.displayName;
-}
-
-QString downloadStatusMessage(const QString &name, const QString &phase, const qint64 received,
-                              const qint64 total) {
-    if (!phase.isEmpty() && phase != QStringLiteral("Downloading")) {
-        return QStringLiteral("Preparing %1: %2").arg(name, phase);
-    }
-    if (total > 0) {
-        return QStringLiteral("Downloading %1 update… %2 / %3 MiB")
-            .arg(name)
-            .arg(received / (1024 * 1024))
-            .arg(total / (1024 * 1024));
-    }
-    if (received > 0) {
-        return QStringLiteral("Downloading %1 update… %2 MiB")
-            .arg(name)
-            .arg(received / (1024 * 1024));
-    }
-    return QStringLiteral("Downloading %1 update…").arg(name);
-}
-
-void savePreparation(pacsmith::BackgroundUpdateState *state, const QString &projectId,
-                     const QString &projectName, const QString &phase, const qint64 received,
-                     const qint64 total) {
-    if (state == nullptr) return;
-    state->preparingProjectId = projectId;
-    state->preparingProjectName = projectName;
-    state->preparationPhase = phase;
-    state->preparationBytesReceived = received;
-    state->preparationBytesTotal = total;
-    state->message = downloadStatusMessage(projectName, phase, received, total);
-    static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(*state));
-}
-
-void clearPreparation(pacsmith::BackgroundUpdateState *state) {
-    if (state == nullptr) return;
-    if (state->preparingProjectId.isEmpty() && state->preparingProjectName.isEmpty()) return;
-    state->preparingProjectId.clear();
-    state->preparingProjectName.clear();
-    state->preparationPhase.clear();
-    state->preparationBytesReceived = 0;
-    state->preparationBytesTotal = -1;
-    static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(*state));
-}
-
-void publishCheckProgress(pacsmith::BackgroundUpdateState &state,
-                          const pacsmith::LibraryClient &library) {
-    applyAvailableUpdateCensus(state, library.list());
-    static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
-    static_cast<void>(pacsmith::notifyRunningGui(QStringLiteral("projects")));
 }
 
 QString scriptFriendly(const QString &value) {
@@ -403,262 +352,16 @@ int runRepositoryAdd(const QStringList &arguments, pacsmith::LibraryClient &libr
     return 0;
 }
 
-bool automaticallyResolvePreparedRelease(pacsmith::LibraryClient &library,
-                                         pacsmith::Project &project,
-                                         const QString &releaseId,
-                                         const pacsmith::AiSettings &settings,
-                                         QString *message) {
-    QString settingsError;
-    const auto librarySettings = library.librarySettings(&settingsError);
-    const bool automatic = librarySettings ? librarySettings->automaticallyResolve
-                                           : settings.automaticallyResolveReviewItems;
-    const auto provider = librarySettings ? librarySettings->provider : settings.provider;
-    const auto model = librarySettings ? librarySettings->model : settings.model;
-    if (!automatic || provider == pacsmith::AiProviderKind::None || model.isEmpty()) {
-        if (message != nullptr) *message = QStringLiteral("Automatic AI review is disabled or incomplete");
-        return false;
-    }
-    auto *release = project.release(releaseId);
-    if (release == nullptr || release->state == pacsmith::ReleaseState::Discovered) return false;
-    QString error;
-    const auto job = library.startAiReview(release->id, &error);
-    if (!job) {
-        if (message != nullptr) *message = QStringLiteral("Automatic AI review is pending: %1").arg(error);
-        return false;
-    }
-    const auto finished = library.waitForJob(job->id, &error);
-    if (!finished) {
-        if (message != nullptr) *message = QStringLiteral("Automatic AI review is pending: %1").arg(error);
-        return false;
-    }
-    auto resolution = pacsmith::aiResolutionFromJson(finished->result);
-    if (!resolution.success) {
-        if (resolution.error.isEmpty()) resolution.error = finished->error;
-        if (message != nullptr) *message = QStringLiteral("Automatic AI review is pending: %1").arg(resolution.error);
-        return false;
-    }
-    const auto applied = pacsmith::AiResolutionApplier::apply(*release, resolution, {});
-    if (!release->lifecycleScript.contents.isEmpty()) {
-        if (!library.saveLifecycle(project, *release, &error)) {
-            if (message != nullptr) *message = error;
-            return false;
-        }
-    }
-    if (release->update.strategy == pacsmith::UpdateStrategy::Manual &&
-        !release->update.url.isEmpty() && !release->update.aptSuite.isEmpty()) {
-        release->update.strategy = pacsmith::UpdateStrategy::AptRepository;
-    }
-    release->generatedPkgbuild = pacsmith::PkgbuildGenerator::generate(*release);
-    release->generatedPkgbuildSha256 = pacsmith::sha256Hex(release->generatedPkgbuild.toUtf8());
-    QString saveError;
-    const auto saved = release->pkgbuildManuallyModified
-        ? library.save(project, &saveError)
-        : library.savePkgbuild(project, *release, release->generatedPkgbuild, &saveError);
-    if (!saved) {
-        if (message != nullptr) *message = saveError;
-        return false;
-    }
-    if (message != nullptr) {
-        *message = applied.errors.isEmpty()
-            ? QStringLiteral("Automatic AI review applied")
-            : QStringLiteral("Automatic AI review applied with %1 blocked proposal(s)").arg(applied.errors.size());
-    }
-    return applied.errors.isEmpty();
-}
-
 int runCheck(pacsmith::LibraryClient &library, pacsmith::Project project, QTextStream &out,
              QTextStream &errorStream, pacsmith::BackgroundUpdateState *backgroundState = nullptr) {
-    static_cast<void>(library.reconcileInstalled(project, nullptr));
-    auto *release = project.activeTrackingRelease();
-    if (release == nullptr) {
-        const auto reason = project.externallyInstalled || !project.installedVersion.isEmpty()
-            ? QStringLiteral("installed package does not match a PacSmith release")
-            : QStringLiteral("project has no analyzed release to track");
-        out << project.id << "\tpaused\t" << reason << '\n';
-        if (backgroundState != nullptr) {
-            backgroundState->message = QStringLiteral("Some projects have no eligible update tracker");
-        }
-        return 0;
+    const auto result =
+        pacsmith::UpdateCheckRunner::run(library, std::move(project), errorStream, backgroundState);
+    if (result.prepared) {
+        out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
     }
-    pacsmith::UpdateCheckResult result;
-    if (release->update.strategy == pacsmith::UpdateStrategy::AptRepository) {
-        QEventLoop loop;
-        pacsmith::AptUpdateService service;
-        bool completedSynchronously = false;
-        QObject::connect(&service, &pacsmith::AptUpdateService::progressChanged,
-                         [&errorStream](const QString &message) { errorStream << message << '\n'; });
-        QObject::connect(&service, &pacsmith::AptUpdateService::finished,
-                         [&result, &loop, &completedSynchronously](const pacsmith::UpdateCheckResult &checked) {
-                             result = checked;
-                             completedSynchronously = true;
-                             loop.quit();
-                         });
-        service.start(*release, library.releasePath(*release));
-        if (service.isRunning() && !completedSynchronously) loop.exec();
-    } else if (release->update.strategy == pacsmith::UpdateStrategy::RpmRepository) {
-        QEventLoop loop;
-        pacsmith::RpmUpdateService service;
-        bool completedSynchronously = false;
-        QObject::connect(&service, &pacsmith::RpmUpdateService::progressChanged,
-                         [&errorStream](const QString &message) { errorStream << message << '\n'; });
-        QObject::connect(&service, &pacsmith::RpmUpdateService::finished,
-                         [&result, &loop, &completedSynchronously](const pacsmith::UpdateCheckResult &checked) {
-                             result = checked;
-                             completedSynchronously = true;
-                             loop.quit();
-                         });
-        service.start(*release, library.releasePath(*release));
-        if (service.isRunning() && !completedSynchronously) loop.exec();
-    } else if (release->update.strategy == pacsmith::UpdateStrategy::GitHubRelease) {
-        QEventLoop loop;
-        pacsmith::GitHubUpdateService service;
-        QString token;
-        pacsmith::AppSettingsStore settingsStore;
-        const auto settings = settingsStore.load();
-        const auto source = settings.credentialSources.value(
-            QStringLiteral("github"), pacsmith::CredentialSource::Environment);
-        pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
-        token = credentials.load(QStringLiteral("github"), source, nullptr).value_or(QString{});
-        QObject::connect(&service, &pacsmith::GitHubUpdateService::progressChanged,
-                         [&errorStream](const QString &message) { errorStream << message << '\n'; });
-        QObject::connect(&service, &pacsmith::GitHubUpdateService::finished,
-                         [&result, &loop](const pacsmith::UpdateCheckResult &checked) {
-                             result = checked;
-                             loop.quit();
-                         });
-        service.start(*release, token);
-        token.fill(QChar::Null);
-        if (service.isRunning()) loop.exec();
-    } else {
-        const auto source = pacsmith::UpdateSourceFactory::create(release->update.strategy);
-        result = source->check(*release);
-    }
-    release->update.lastChecked = QDateTime::currentDateTimeUtc();
-    release->update.lastCheckMessage = result.message;
-    release->update.signatureVerified = result.signatureVerified;
-    if (result.success && !result.detectedVersion.isEmpty()) {
-        release->update.detectedVersion = result.detectedVersion;
-        release->update.detectedFilename = result.filename;
-        release->update.detectedSha256 = result.sha256;
-        release->update.detectedUrl = result.downloadUrl;
-        if (!result.etag.isEmpty()) release->update.githubEtag = result.etag;
-        if (result.releaseId > 0) release->update.githubReleaseId = result.releaseId;
-        if (result.assetId > 0) release->update.githubAssetId = result.assetId;
-        if (!result.tag.isEmpty()) release->update.githubTag = result.tag;
-        if (!result.publisherDigest.isEmpty()) {
-            release->update.githubPublisherDigest = result.publisherDigest;
-        }
-    }
-    project.history.append({release->update.lastChecked, QStringLiteral("update-check"), result.message});
-    release->history.append({release->update.lastChecked, QStringLiteral("update-check"), result.message});
-    QString saveError;
-    QString discoveredId;
-    if (result.success && result.updateAvailable) {
-        if (auto *discovered = library.recordDiscoveredRelease(
-                project, *release, result.detectedVersion, result.filename,
-                result.sha256, result.downloadUrl, &saveError, result.releaseId,
-                result.assetId, result.tag, result.publisherDigest, result.prerelease)) {
-            discoveredId = discovered->id;
-        } else if (!saveError.isEmpty()) {
-            errorStream << "warning: " << saveError << '\n';
-        }
-    }
-    pacsmith::AppSettingsStore settingsStore;
-    const auto settings = settingsStore.load();
-    if (result.success && result.updateAvailable && settings.updates.automaticallyPrepare &&
-        !discoveredId.isEmpty()) {
-        const auto *discovered = project.release(discoveredId);
-        if (discovered != nullptr && discovered->state == pacsmith::ReleaseState::Discovered) {
-            pacsmith::BackgroundUpdateState ownedActivity;
-            pacsmith::BackgroundUpdateState *activity = backgroundState;
-            if (activity == nullptr) {
-                ownedActivity = pacsmith::BackgroundUpdateStateStore::load();
-                activity = &ownedActivity;
-            }
-            const auto projectName = projectActivityName(project);
-            savePreparation(activity, project.id, projectName, QStringLiteral("Downloading"), 0, -1);
-            pacsmith::DebDownloadService downloader;
-            QString downloadedPath;
-            QString downloadError;
-            QEventLoop downloadLoop;
-            QElapsedTimer lastSave;
-            lastSave.start();
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::progress,
-                             [activity, &lastSave, projectId = project.id, projectName](
-                                 const qint64 received, const qint64 total) {
-                                 activity->preparingProjectId = projectId;
-                                 activity->preparingProjectName = projectName;
-                                 activity->preparationPhase = QStringLiteral("Downloading");
-                                 activity->preparationBytesReceived = received;
-                                 activity->preparationBytesTotal = total;
-                                 activity->message =
-                                     downloadStatusMessage(projectName, QStringLiteral("Downloading"),
-                                                           received, total);
-                                 if (lastSave.elapsed() >= 150) {
-                                     static_cast<void>(
-                                         pacsmith::BackgroundUpdateStateStore::save(*activity));
-                                     lastSave.restart();
-                                 }
-                             });
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::finished,
-                             [&downloadedPath, &downloadLoop](const QString &path) {
-                                 downloadedPath = path;
-                                 downloadLoop.quit();
-                             });
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::failed,
-                             [&downloadError, &downloadLoop](const QString &message) {
-                                 downloadError = message;
-                                 downloadLoop.quit();
-                             });
-            downloader.start(QUrl(discovered->sourceUrl), discovered->sourceSha256,
-                             std::filesystem::path(
-                                 pacsmith::defaultDownloadPath(project.id, discovered->id,
-                                                               discovered->originalSourceFilename)
-                                     .toUtf8().constData()));
-            if (downloader.isRunning()) downloadLoop.exec();
-            if (!downloadedPath.isEmpty()) {
-                savePreparation(activity, project.id, projectName, QStringLiteral("Inspecting"),
-                                0, -1);
-                QString importError;
-                pacsmith::ImportOptions importOptions;
-                importOptions.version = discovered->debian.version;
-                importOptions.acquisition = discovered->acquisition;
-                importOptions.githubAssetRegex = discovered->update.githubAssetRegex;
-                importOptions.githubIncludePrereleases =
-                    discovered->update.githubIncludePrereleases;
-                importOptions.existingProjectId = project.id;
-                const auto imported = library.importSource(
-                    std::filesystem::path(downloadedPath.toUtf8().constData()), importOptions,
-                    &importError);
-                static_cast<void>(QFile::remove(downloadedPath));
-                if (!imported) errorStream << "warning: automatic preparation failed: " << importError << '\n';
-                else {
-                    auto preparedProject = imported->project;
-                    QString aiMessage;
-                    static_cast<void>(automaticallyResolvePreparedRelease(
-                        library, preparedProject, imported->releaseId, settings, &aiMessage));
-                    if (!aiMessage.isEmpty()) errorStream << aiMessage << '\n';
-                    out << project.id << "\tprepared\t" << result.detectedVersion << '\n';
-                }
-            } else if (!downloadError.isEmpty()) {
-                errorStream << "warning: automatic download failed: " << downloadError << '\n';
-            }
-            clearPreparation(activity);
-        }
-    }
-    if (auto reloaded = library.load(project.id, nullptr)) project = std::move(*reloaded);
-    const auto cleanup = library.cleanup(
-        project, {settings.updates.retainedPackageVersions,
-                  settings.updates.retainedCompleteReleases,
-                  settings.updates.automaticallyPrepare}, &saveError);
-    if (!cleanup.message.isEmpty()) errorStream << cleanup.message << '\n';
-    if (!library.save(project, &saveError)) errorStream << "warning: " << saveError << '\n';
-    if (!result.success && backgroundState != nullptr) ++backgroundState->failedChecks;
-    out << project.id << '\t' << (!result.success ? "error" : result.updateAvailable ? "update" : "no-update") << '\t'
-        << result.message << '\n';
-    return !result.supported ? 2 : result.success ? 0 : 1;
+    out << result.projectId << '\t' << result.status << '\t' << result.message << '\n';
+    return result.exitCode;
 }
-
 int runInstallSession(QCoreApplication &application, const QStringList &arguments,
                       QTextStream &out, QTextStream &errorStream) {
     if (arguments.size() != 8 || arguments.at(2) != QStringLiteral("--socket") ||
@@ -790,6 +493,21 @@ int main(int argc, char *argv[]) {
     if (command == QStringLiteral("connect")) {
         return runConnectCommand(arguments, out, errorStream);
     }
+    if (command == QStringLiteral("skill") || command == QStringLiteral("plugin")) {
+        return pacsmith::cli::runAgentIntegrationCommand(arguments, out, errorStream);
+    }
+    if (command == QStringLiteral("mcp") && arguments.size() >= 3 &&
+        (arguments.at(2) == QStringLiteral("--help") || arguments.at(2) == QStringLiteral("-h"))) {
+        out << "Run PacSmith's stdio Model Context Protocol server.\n\n"
+               "Usage: pacsmith mcp\n\n"
+               "The server uses the same configured local Unix-socket or remote HTTPS/mTLS "
+               "PacSmith connection as this CLI. JSON-RPC is written only to stdout; diagnostics "
+               "use stderr. Sensitive system, trust, credential, publication, automation, and "
+               "destructive tools require MCP form elicitation and fail closed when unsupported. "
+               "`pacsmith plugin path` locates "
+               "the portable Skill plus MCP bundle for harness installation.\n";
+        return 0;
+    }
     if (command == QStringLiteral("gui")) {
         QString program = QCoreApplication::applicationDirPath() + QStringLiteral("/pacsmith-gui");
         if (!QFileInfo::exists(program)) program = QStringLiteral("pacsmith-gui");
@@ -800,6 +518,13 @@ int main(int argc, char *argv[]) {
     if (!pacsmith::applyLibraryRuntime(library.config(), &runtimeError)) {
         errorStream << "error: " << runtimeError << '\n';
         return 1;
+    }
+    if (command == QStringLiteral("mcp")) {
+        if (arguments.size() != 2) {
+            errorStream << "error: use 'pacsmith mcp' or 'pacsmith mcp --help'\n";
+            return 1;
+        }
+        return pacsmith::mcp::Server(std::move(library)).run();
     }
     if (command == QStringLiteral("server")) {
         return runServerCommand(arguments, library, out, errorStream);
@@ -1042,135 +767,14 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     if (command == QStringLiteral("check") && arguments.size() == 3 && arguments.at(2) == QStringLiteral("--all")) {
-        pacsmith::BackgroundUpdateState state;
-        state.checking = true;
-        state.lastRun = QDateTime::currentDateTimeUtc();
-        state.message = QStringLiteral("Checking PacSmith project update trackers");
-        publishCheckProgress(state, library);
-        int exitCode = 0;
-        for (auto project : library.list()) {
-            state.checkingProjectId = project.id;
-            state.checkingProjectName = project.displayName.isEmpty() ? project.archPackageName
-                                                                      : project.displayName;
-            state.message = QStringLiteral("Checking %1 for updates").arg(state.checkingProjectName);
-            publishCheckProgress(state, library);
-            exitCode = std::max(exitCode, runCheck(library, project, out, errorStream, &state));
-            publishCheckProgress(state, library);
-        }
-        state.checking = false;
-        state.checkingProjectId.clear();
-        state.checkingProjectName.clear();
-        state.preparingProjectId.clear();
-        state.preparingProjectName.clear();
-        state.preparationPhase.clear();
-        state.preparationBytesReceived = 0;
-        state.preparationBytesTotal = -1;
-        state.lastRun = QDateTime::currentDateTimeUtc();
-        applyAvailableUpdateCensus(state, library.list());
-        state.message = state.availableUpdates > 0
-            ? QStringLiteral("%1 update(s) available").arg(state.availableUpdates)
-            : state.failedChecks > 0 ? QStringLiteral("Update checks completed with failures")
-                                     : QStringLiteral("All eligible project trackers are current");
-        static_cast<void>(pacsmith::BackgroundUpdateStateStore::save(state));
-        static_cast<void>(pacsmith::notifyRunningGui(QStringLiteral("projects")));
-        return exitCode;
-    }
-    if (command == QStringLiteral("ai") && arguments.size() >= 3) {
-        QString settingsError;
-        const auto librarySettings = library.librarySettings(&settingsError);
-        if (!librarySettings) {
-            errorStream << "error: " << settingsError << '\n';
-            return 1;
-        }
-        if (arguments.at(2) == QStringLiteral("status")) {
-            const auto credentialReady =
-                (librarySettings->provider == pacsmith::AiProviderKind::ChatGpt &&
-                 librarySettings->chatgptConfigured) ||
-                (librarySettings->provider == pacsmith::AiProviderKind::OpenAi &&
-                 librarySettings->openaiConfigured) ||
-                (librarySettings->provider == pacsmith::AiProviderKind::Xai &&
-                 librarySettings->xaiConfigured);
-            out << "provider\t" << pacsmith::aiProviderName(librarySettings->provider) << '\n'
-                << "model\t" << librarySettings->model << '\n'
-                << "automatic\t" << (librarySettings->automaticallyResolve ? "yes" : "no") << '\n'
-                << "credential\t" << (credentialReady ? "configured" : "missing") << '\n';
-            return librarySettings->provider == pacsmith::AiProviderKind::None ? 1 : 0;
-        }
-        if (arguments.at(2) != QStringLiteral("resolve") || arguments.size() != 4) {
-            errorStream << "error: use 'pacsmith ai status' or 'pacsmith ai resolve <project>'\n";
-            return 1;
-        }
-        if (librarySettings->provider == pacsmith::AiProviderKind::None ||
-            librarySettings->model.isEmpty()) {
-            errorStream << "error: configure an AI provider and model in pacsmith-gui Settings first\n";
-            return 1;
-        }
-        auto aiProject = requireProject(library, arguments.at(3), errorStream);
-        if (!aiProject) return 1;
-        auto *aiRelease = aiProject->newestRelease();
-        if (aiRelease == nullptr) {
-            errorStream << "error: project has no prepared releases\n";
-            return 1;
-        }
-        QString jobError;
-        const auto job = library.startAiReview(aiRelease->id, &jobError);
-        if (!job) {
-            errorStream << "error: " << jobError << '\n';
-            return 1;
-        }
-        errorStream << "AI review running on the library daemon…\n";
-        const auto finished = library.waitForJob(job->id, &jobError);
-        if (!finished) {
-            errorStream << "error: " << jobError << '\n';
-            return 1;
-        }
-        auto resolution = pacsmith::aiResolutionFromJson(finished->result);
-        if (!resolution.success) {
-            if (resolution.error.isEmpty()) resolution.error = finished->error;
-            errorStream << "error: " << resolution.error << '\n';
-            if (!resolution.errorDetails.isEmpty()) {
-                errorStream << resolution.errorDetails << '\n';
+        const auto batch = pacsmith::UpdateCheckRunner::runAll(library, errorStream);
+        for (const auto &result : batch.checks) {
+            if (result.prepared) {
+                out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
             }
-            return 1;
+            out << result.projectId << '\t' << result.status << '\t' << result.message << '\n';
         }
-        QSet<QString> approvedUserFields;
-        const auto conflicts = pacsmith::AiResolutionApplier::manualConflicts(*aiRelease, resolution);
-        if (!conflicts.isEmpty() && askYesNo(errorStream,
-                QStringLiteral("AI wants to replace user-owned fields %1. Approve?")
-                    .arg(conflicts.join(QStringLiteral(", "))))) {
-            approvedUserFields = QSet<QString>(conflicts.cbegin(), conflicts.cend());
-        }
-        const auto applied = pacsmith::AiResolutionApplier::apply(*aiRelease, resolution, approvedUserFields);
-        if (!aiRelease->lifecycleScript.contents.isEmpty()) {
-            QString lifecycleError;
-            if (!library.saveLifecycle(*aiProject, *aiRelease, &lifecycleError)) {
-                errorStream << "error: " << lifecycleError << '\n';
-                return 1;
-            }
-        }
-        if (aiRelease->update.strategy == pacsmith::UpdateStrategy::Manual &&
-            !aiRelease->update.url.isEmpty() && !aiRelease->update.aptSuite.isEmpty()) {
-            aiRelease->update.strategy = pacsmith::UpdateStrategy::AptRepository;
-        }
-        aiRelease->history.append(
-            {QDateTime::currentDateTimeUtc(), QStringLiteral("ai-resolution"),
-             QStringLiteral("Applied %1 change(s) from %2/%3")
-                 .arg(resolution.changes.size()).arg(resolution.provider, resolution.model)});
-        aiRelease->generatedPkgbuild = pacsmith::PkgbuildGenerator::generate(*aiRelease);
-        aiRelease->generatedPkgbuildSha256 = pacsmith::sha256Hex(aiRelease->generatedPkgbuild.toUtf8());
-        QString saveError;
-        if (!aiRelease->pkgbuildManuallyModified) {
-            if (!library.savePkgbuild(*aiProject, *aiRelease, aiRelease->generatedPkgbuild, &saveError)) {
-                errorStream << "error: " << saveError << '\n';
-                return 1;
-            }
-        } else if (!library.save(*aiProject, &saveError)) {
-            errorStream << "error: " << saveError << '\n';
-            return 1;
-        }
-        for (const auto &error : applied.errors) errorStream << "warning: " << error << '\n';
-        out << aiProject->id << "\tapplied\t" << resolution.changes.size() << " changes\n";
-        return 0;
+        return batch.exitCode;
     }
     if (arguments.size() < 3) {
         errorStream << "error: " << command << " requires a project ID or name\n";
@@ -1181,6 +785,56 @@ int main(int argc, char *argv[]) {
     auto *release = project->newestRelease();
     if (release == nullptr) {
         errorStream << "error: project has no releases\n";
+        return 1;
+    }
+
+    if (command == QStringLiteral("custom-file")) {
+        if (arguments.size() < 4) {
+            errorStream << "error: custom-file requires list, read, write, or delete\n";
+            return 1;
+        }
+        const auto action = arguments.at(3);
+        if (action == QStringLiteral("list") && arguments.size() == 4) {
+            for (auto iterator = release->customFiles.cbegin(); iterator != release->customFiles.cend(); ++iterator) {
+                out << iterator.key() << '\n';
+            }
+            return 0;
+        }
+        if ((action == QStringLiteral("read") || action == QStringLiteral("delete")) &&
+            arguments.size() == 5) {
+            const auto name = arguments.at(4);
+            QString error;
+            if (action == QStringLiteral("read")) {
+                const auto contents = library.readFile(release->id, name, &error);
+                if (!contents) {
+                    errorStream << "error: " << error << '\n';
+                    return 1;
+                }
+                out << *contents;
+                return 0;
+            }
+            if (!library.deleteFile(release->id, name, release->revision, &error)) {
+                errorStream << "error: " << error << '\n';
+                return 1;
+            }
+            return 0;
+        }
+        if (action == QStringLiteral("write") && arguments.size() == 6) {
+            QFile input(arguments.at(5));
+            if (!input.open(QIODevice::ReadOnly)) {
+                errorStream << "error: could not read " << arguments.at(5) << ": " << input.errorString() << '\n';
+                return 1;
+            }
+            QString error;
+            if (!library.writeFile(release->id, arguments.at(4), QString::fromUtf8(input.readAll()),
+                                   release->revision, &error)) {
+                errorStream << "error: " << error << '\n';
+                return 1;
+            }
+            return 0;
+        }
+        errorStream << "error: usage: pacsmith custom-file <project> "
+                       "list|read <name>|write <name> <path>|delete <name>\n";
         return 1;
     }
 

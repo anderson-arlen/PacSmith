@@ -111,46 +111,6 @@ bool payloadRuleCovers(const PayloadRule &rule, const QString &path) {
     return path == rule.path || path.startsWith(rule.path + QLatin1Char('/'));
 }
 
-QList<AiDependencyCandidate> requiredAiDependencyCandidates(
-    const PackageRelease &release, const AiResolution &resolution) {
-    QHash<int, QString> packages;
-    QHash<int, bool> required;
-    QSet<int> aiOwned;
-    for (int index = 0; index < release.dependencies.size(); ++index) {
-        const auto &dependency = release.dependencies.at(index);
-        packages.insert(index, dependency.archPackage);
-        required.insert(index, requiresRepositoryPackage(dependency));
-        if (dependency.mappingSource.startsWith(QStringLiteral("AI:"),
-                                                Qt::CaseInsensitive)) {
-            aiOwned.insert(index);
-        }
-    }
-    static const QRegularExpression pattern(
-        QStringLiteral(R"(^dependency\.(\d+)\.(archPackage|treatment)$)"));
-    for (const auto &change : resolution.changes) {
-        const auto match = pattern.match(change.field);
-        if (!match.hasMatch()) continue;
-        const auto index = match.captured(1).toInt();
-        if (index < 0 || index >= release.dependencies.size()) continue;
-        aiOwned.insert(index);
-        if (match.captured(2) == QStringLiteral("archPackage")) {
-            packages.insert(index, change.value.trimmed());
-            required.insert(index, true);
-            continue;
-        }
-        auto treatment = change.value.trimmed().toLower();
-        if (treatment == QStringLiteral("require")) treatment = QStringLiteral("required");
-        required.insert(index, treatment == QStringLiteral("required"));
-        if (treatment == QStringLiteral("unresolved")) packages.insert(index, QString{});
-    }
-    QList<AiDependencyCandidate> result;
-    for (const auto index : aiOwned) {
-        const auto package = packages.value(index).trimmed();
-        if (required.value(index) && !package.isEmpty()) result.append({index, package});
-    }
-    std::ranges::sort(result, {}, &AiDependencyCandidate::index);
-    return result;
-}
 QString repositoryArchitecture(const bool apt) {
     const auto current = QSysInfo::currentCpuArchitecture().toLower();
     if (current == QStringLiteral("x86_64") || current == QStringLiteral("amd64")) {
@@ -460,8 +420,7 @@ int githubArtifactPreference(const QString &asset) {
 }
 
 std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
-    QWidget *parent, const QStringList &assets, const bool includePrereleases,
-    const GitHubAiAssist &aiAssist) {
+    QWidget *parent, const QStringList &assets, const bool includePrereleases) {
     if (assets.isEmpty()) {
         QMessageBox::warning(parent, QStringLiteral("No release assets"),
                              QStringLiteral("The selected GitHub release has no downloadable assets."));
@@ -490,11 +449,7 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
     expressionLayout->setContentsMargins(0, 0, 0, 0);
     auto *expression = new QLineEdit(&dialog);
     expression->setPlaceholderText(QStringLiteral("Example: chamber-.*-linux-amd64(?:\\.tar\\.gz)?"));
-    auto *aiButton = new QPushButton(QStringLiteral("Generate with AI…"), expressionRow);
-    aiButton->setEnabled(static_cast<bool>(aiAssist));
-    aiButton->setToolTip(QStringLiteral("Ask the configured AI provider to choose an appropriate artifact family and generate a rule that tracks later versions"));
     expressionLayout->addWidget(expression, 1);
-    expressionLayout->addWidget(aiButton);
     layout->addWidget(expressionRow);
     auto *prerelease = new QCheckBox(
         QStringLiteral("Track prereleases even after a stable release exists"), &dialog);
@@ -539,16 +494,6 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
                      [=](QListWidgetItem *item) {
         if (isGitHubSidecarAsset(item->text())) return;
         expression->setText(suggestedAssetRegex(item->text()));
-    });
-    QObject::connect(aiButton, &QPushButton::clicked, &dialog,
-                     [list, expression, status, aiButton, &dialog, aiAssist,
-                      installableAssets] {
-        QString preferred;
-        if (const auto *item = list->currentItem(); item != nullptr &&
-            !isGitHubSidecarAsset(item->text())) {
-            preferred = item->text();
-        }
-        aiAssist(installableAssets, preferred, expression, status, aiButton, &dialog);
     });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -622,53 +567,6 @@ QString acquisitionKindTitle(const AcquisitionKind kind) {
     case AcquisitionKind::GitHubRelease: return QStringLiteral("GitHub release");
     }
     return QStringLiteral("Local file");
-}
-
-QString reasoningEffortLabel(const AiReasoningEffort effort) {
-    switch (effort) {
-    case AiReasoningEffort::ProviderDefault: return QStringLiteral("Provider default");
-    case AiReasoningEffort::None: return QStringLiteral("None");
-    case AiReasoningEffort::Low: return QStringLiteral("Low");
-    case AiReasoningEffort::Medium: return QStringLiteral("Medium");
-    case AiReasoningEffort::High: return QStringLiteral("High");
-    case AiReasoningEffort::XHigh: return QStringLiteral("Extra high");
-    case AiReasoningEffort::Max: return QStringLiteral("Maximum");
-    }
-    return QStringLiteral("Provider default");
-}
-
-QList<AiReasoningEffort> supportedReasoningEfforts(const AiProviderKind provider,
-                                                   const QString &model) {
-    const auto id = model.trimmed().toLower();
-    if (id.isEmpty()) return {};
-    if (provider == AiProviderKind::Xai) {
-        if (id.startsWith(QStringLiteral("grok-4.6")) ||
-            id.startsWith(QStringLiteral("grok-4.20"))) {
-            return {AiReasoningEffort::Low, AiReasoningEffort::Medium,
-                    AiReasoningEffort::High, AiReasoningEffort::XHigh};
-        }
-        if (id.startsWith(QStringLiteral("grok-4.5"))) {
-            return {AiReasoningEffort::Low, AiReasoningEffort::Medium,
-                    AiReasoningEffort::High};
-        }
-        return {};
-    }
-    if (provider == AiProviderKind::OpenAi || provider == AiProviderKind::ChatGpt) {
-        if (id.startsWith(QStringLiteral("gpt-5.6"))) {
-            return {AiReasoningEffort::None, AiReasoningEffort::Low,
-                    AiReasoningEffort::Medium, AiReasoningEffort::High,
-                    AiReasoningEffort::XHigh, AiReasoningEffort::Max};
-        }
-        if (id.startsWith(QStringLiteral("gpt-5"))) {
-            return {AiReasoningEffort::Low, AiReasoningEffort::Medium,
-                    AiReasoningEffort::High, AiReasoningEffort::XHigh};
-        }
-        if (id.startsWith(QChar('o'))) {
-            return {AiReasoningEffort::Low, AiReasoningEffort::Medium,
-                    AiReasoningEffort::High};
-        }
-    }
-    return {};
 }
 
 void makeReadOnlyCodeEditor(QPlainTextEdit *editor) {
@@ -802,11 +700,6 @@ void showDetailedMessageDialog(QWidget *parent, const QString &title, const QStr
 
     dialog.resize(showDetailsInitially ? QSize(960, 680) : QSize(640, 240));
     dialog.exec();
-}
-
-void showAiErrorDialog(QWidget *parent, const AiResolution &resolution) {
-    showDetailedMessageDialog(parent, QStringLiteral("AI resolution failed"), resolution.error,
-                              resolution.errorDetails, QStyle::SP_MessageBoxCritical);
 }
 
 QString projectDirectory(const LibraryClient &library, const Project &project) {

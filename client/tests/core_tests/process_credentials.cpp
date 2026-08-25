@@ -1,7 +1,5 @@
 #include "core_tests.hpp"
 
-#include "core/ai_service.hpp"
-#include "core/ai_model_catalog_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/apt_repository.hpp"
@@ -9,7 +7,6 @@
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
 #include "core/credential_store.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/github_update_service.hpp"
@@ -41,53 +38,6 @@
 
 #include <algorithm>
 #include <filesystem>
-
-void CoreTests::parsesAiModelCatalog() {
-    QString error;
-    const auto models = pacsmith::AiModelCatalogService::parseModelIds(
-        QByteArrayLiteral(R"({"object":"list","data":[{"id":"gpt-z"},{"id":"gpt-a"},{"id":"gpt-a"}]})"),
-        &error);
-    QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(models, QStringList({QStringLiteral("gpt-a"), QStringLiteral("gpt-z")}));
-
-    const auto invalid = pacsmith::AiModelCatalogService::parseModelIds(
-        QByteArrayLiteral(R"({"object":"list"})"), &error);
-    QVERIFY(invalid.isEmpty());
-    QVERIFY(!error.isEmpty());
-}
-
-void CoreTests::parsesChatGptCredentialsAndCatalog() {
-    const QJsonObject claims{
-        {QStringLiteral("https://api.openai.com/profile"),
-         QJsonObject{{QStringLiteral("email"), QStringLiteral("user@example.com")}}},
-        {QStringLiteral("https://api.openai.com/auth"),
-         QJsonObject{{QStringLiteral("chatgpt_account_id"), QStringLiteral("acct-test")},
-                     {QStringLiteral("chatgpt_plan_type"), QStringLiteral("plus")}}}};
-    const auto payload = QJsonDocument(claims).toJson(QJsonDocument::Compact).toBase64(
-        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
-    const auto token = QByteArrayLiteral("header.") + payload + QByteArrayLiteral(".signature");
-    const QJsonObject response{{QStringLiteral("access_token"), QString::fromLatin1(token)},
-                               {QStringLiteral("refresh_token"), QStringLiteral("refresh-test")},
-                               {QStringLiteral("expires_in"), 3600}};
-    QString error;
-    const auto credentials = pacsmith::parseChatGptTokenResponse(
-        QJsonDocument(response).toJson(QJsonDocument::Compact), {}, &error);
-    QVERIFY2(credentials.has_value(), qPrintable(error));
-    QCOMPARE(credentials->accountId, QStringLiteral("acct-test"));
-    QCOMPARE(credentials->email, QStringLiteral("user@example.com"));
-    QCOMPARE(credentials->planType, QStringLiteral("plus"));
-    QVERIFY(credentials->expiresAtMs > QDateTime::currentMSecsSinceEpoch());
-    const auto restored = pacsmith::ChatGptCredentials::fromSerialized(credentials->serialize(), &error);
-    QVERIFY2(restored.has_value(), qPrintable(error));
-    QCOMPARE(restored->refreshToken, QStringLiteral("refresh-test"));
-
-    const auto models = pacsmith::AiModelCatalogService::parseChatGptModelIds(
-        QByteArrayLiteral(
-            R"({"models":[{"slug":"gpt-visible","visibility":"list"},{"slug":"gpt-hidden","visibility":"hide"},{"slug":"gpt-disabled","show_in_picker":false},{"id":"gpt-fallback"}]})"),
-        &error);
-    QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(models, QStringList({QStringLiteral("gpt-visible"), QStringLiteral("gpt-fallback")}));
-}
 
 void CoreTests::buildsExternalTerminalCommandsSafely() {
     QTemporaryDir temporary;
@@ -201,7 +151,7 @@ void CoreTests::encryptsCredentialsWithAge() {
         QVERIFY2(store.createAge(password, &error), qPrintable(error));
         QVERIFY(store.hasAgeFile());
         QVERIFY(store.ageUnlocked());
-        QVERIFY2(store.store(QStringLiteral("openai"), pacsmith::CredentialSource::Age,
+        QVERIFY2(store.store(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age,
                              QStringLiteral("test-secret-value"), password, &error), qPrintable(error));
         QVERIFY(QFileInfo::exists(path));
         const auto encrypted = QFileInfo(path).size();
@@ -211,7 +161,7 @@ void CoreTests::encryptsCredentialsWithAge() {
         pacsmith::CredentialStore store(path);
         QString error;
         QVERIFY2(store.unlockAge(password, &error), qPrintable(error));
-        const auto secret = store.load(QStringLiteral("openai"), pacsmith::CredentialSource::Age, &error);
+        const auto secret = store.load(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age, &error);
         QVERIFY2(secret.has_value(), qPrintable(error));
         QCOMPARE(*secret, QStringLiteral("test-secret-value"));
         QVERIFY2(store.store(QStringLiteral("github"), pacsmith::CredentialSource::Age,
@@ -219,11 +169,11 @@ void CoreTests::encryptsCredentialsWithAge() {
         const auto github = store.load(QStringLiteral("github"), pacsmith::CredentialSource::Age, &error);
         QVERIFY2(github.has_value(), qPrintable(error));
         QCOMPARE(*github, QStringLiteral("gh-token"));
-        QVERIFY2(store.remove(QStringLiteral("openai"), pacsmith::CredentialSource::Age,
+        QVERIFY2(store.remove(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age,
                               {}, &error), qPrintable(error));
-        QVERIFY(!store.load(QStringLiteral("openai"), pacsmith::CredentialSource::Age, &error));
+        QVERIFY(!store.load(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age, &error));
         store.lockAge();
-        QVERIFY(!store.load(QStringLiteral("openai"), pacsmith::CredentialSource::Age, &error));
+        QVERIFY(!store.load(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age, &error));
     }
 }
 
@@ -239,4 +189,3 @@ void CoreTests::usesInjectedGithubTokenWhenAgeIsLocked() {
     if (previous.isEmpty()) qunsetenv("PACSMITH_GITHUB_TOKEN");
     else QVERIFY(qputenv("PACSMITH_GITHUB_TOKEN", previous));
 }
-

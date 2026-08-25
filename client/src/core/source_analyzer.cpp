@@ -181,6 +181,26 @@ void captureAppRun(AppRunConfiguration &appRun, const QByteArray &contents) {
         : QStringLiteral("AppDir entry point");
 }
 
+bool executableAppRunSymlink(const std::filesystem::path &root,
+                             const std::filesystem::path &appRun) {
+    std::error_code error;
+    const auto resolvedRoot = std::filesystem::canonical(root, error);
+    if (error) return false;
+    const auto resolved = std::filesystem::canonical(appRun, error);
+    if (error) return false;
+    const auto relative = resolved.lexically_relative(resolvedRoot);
+    if (relative.empty() || relative == "." || relative.is_absolute() ||
+        *relative.begin() == "..") {
+        return false;
+    }
+    const auto status = std::filesystem::status(resolved, error);
+    if (error || !std::filesystem::is_regular_file(status)) return false;
+    constexpr auto executable = std::filesystem::perms::owner_exec |
+                                std::filesystem::perms::group_exec |
+                                std::filesystem::perms::others_exec;
+    return (status.permissions() & executable) != std::filesystem::perms::none;
+}
+
 int appImageDesktopScore(const DesktopEntryConfiguration &desktop,
                          const QString &packageName) {
     const bool topLevel = !desktop.sourcePath.contains(QLatin1Char('/'));
@@ -1088,6 +1108,11 @@ std::optional<SourceAnalysis> analyzeAppImage(const std::filesystem::path &path,
                 return std::nullopt;
             }
             payload.symlinkTarget = targetText;
+            if (payload.path == QStringLiteral("AppRun") &&
+                executableAppRunSymlink(root, iterator->path())) {
+                payload.executable = true;
+                hasAppRun = true;
+            }
         } else if (std::filesystem::is_regular_file(status)) {
             payload.type = QStringLiteral("file");
             payload.size = static_cast<qint64>(iterator->file_size(filesystemError));

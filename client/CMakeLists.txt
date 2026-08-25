@@ -29,14 +29,15 @@ function(pacsmith_target_defaults target)
 endfunction()
 
 add_library(pacsmith_core STATIC
+    src/core/agent_skill.cpp
     src/core/app_settings.cpp
+    src/core/harness_launcher.cpp
     src/core/background_updates.cpp
-    src/core/ai_model_catalog_service.cpp
-    src/core/ai_service.cpp
-    src/core/chatgpt_auth.cpp
     src/core/model.cpp
     src/core/http_transport.cpp
     src/core/daemon_control.cpp
+    src/core/domain_validation.cpp
+    src/core/release_review.cpp
     src/core/enrollment.cpp
     src/core/library_client.cpp
     src/core/package_artifact.cpp
@@ -58,6 +59,7 @@ add_library(pacsmith_core STATIC
     src/core/rpm_update_service.hpp
     src/core/script_evidence.cpp
     src/core/source_analyzer.cpp
+    src/core/system_package_query.cpp
     src/core/payload_review.cpp
     src/core/payload_inspector.cpp
     src/core/deb_analyzer.cpp
@@ -71,7 +73,8 @@ add_library(pacsmith_core STATIC
     src/core/process_services.cpp
     src/core/terminal_install_service.cpp
     src/core/terminal_install_service.hpp
-    src/core/update_source.cpp)
+    src/core/update_source.cpp
+    src/core/update_check_runner.cpp)
 target_include_directories(pacsmith_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pacsmith_core PUBLIC Qt6::Core Qt6::Network CURL::libcurl PRIVATE LibArchive::LibArchive PkgConfig::LibAlpm)
 if(LibSecret_FOUND)
@@ -84,14 +87,22 @@ qt_add_resources(pacsmith_core core_resources
     FILES resources/dependency-mappings.json)
 pacsmith_target_defaults(pacsmith_core)
 
-add_executable(pacsmith src/cli/main.cpp src/cli/admin.cpp)
+add_executable(pacsmith
+    src/cli/main.cpp
+    src/cli/agent_integration.cpp
+    src/cli/admin.cpp
+    src/mcp/server.cpp
+    src/mcp/permission_policy.cpp)
 target_link_libraries(pacsmith PRIVATE pacsmith_core Qt6::Core)
+target_compile_definitions(pacsmith PRIVATE
+    PACSMITH_BUILD_DIR="${CMAKE_BINARY_DIR}"
+    PACSMITH_PLUGIN_DIR="${CMAKE_INSTALL_FULL_DATADIR}/pacsmith/agent-plugin"
+    PACSMITH_SOURCE_PLUGIN_DIR="${CMAKE_SOURCE_DIR}/agent-plugin")
 pacsmith_target_defaults(pacsmith)
 
 add_executable(pacsmith-gui
     src/gui/main.cpp
     src/gui/age_unlock.cpp
-    src/gui/ai_progress_dialog.cpp
     src/gui/application_session.cpp
     src/gui/command_progress_dialog.cpp
     src/gui/connection_dialog.cpp
@@ -136,20 +147,27 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(DIRECTORY resources/icons/hicolor
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/agent-plugin/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/pacsmith/agent-plugin)
 
 if(BUILD_TESTING)
     add_executable(pacsmith-tests
         tests/core_tests/core_tests.hpp
         tests/core_tests/core_tests.cpp
         tests/core_tests/parser.cpp
-        tests/core_tests/script_ai.cpp
+        tests/core_tests/script_evidence.cpp
         tests/core_tests/repository.cpp
         tests/core_tests/project_persistence.cpp
+        tests/core_tests/mcp_harness.cpp
         tests/core_tests/pkgbuild.cpp
         tests/core_tests/analyzer.cpp
-        tests/core_tests/process_credentials.cpp)
+        tests/core_tests/process_credentials.cpp
+        src/mcp/server.cpp
+        src/mcp/permission_policy.cpp)
     target_include_directories(pacsmith-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/core_tests)
     target_link_libraries(pacsmith-tests PRIVATE pacsmith_core Qt6::Test)
+    target_compile_definitions(pacsmith-tests PRIVATE
+        PACSMITH_SOURCE_PLUGIN_DIR="${CMAKE_SOURCE_DIR}/agent-plugin")
     pacsmith_target_defaults(pacsmith-tests)
     add_test(NAME pacsmith-core-tests COMMAND pacsmith-tests)
     add_executable(pacsmith-gui-tests

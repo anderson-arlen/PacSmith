@@ -38,4 +38,6 @@ if(BUILD_TESTING)
     add_test(NAME pacsmithd-go-tests
         COMMAND "${GO_EXECUTABLE}" test ./...
         WORKING_DIRECTORY "${PACSMITHD_MODULE_DIR}")
+    set_tests_properties(pacsmithd-go-tests PROPERTIES
+        ENVIRONMENT "GOCACHE=${CMAKE_BINARY_DIR}/go-cache")
 endif()

@@ -405,11 +405,17 @@ func TestGenerateCompatProvides(t *testing.T) {
 	rel := Release{
 		ArchPackageName:        "acme-slack",
 		CompatPackageName:      "slack-desktop",
-		Provides:               []string{"virtual-slack"},
-		Conflicts:              []string{"old-slack"},
 		OriginalSourceFilename: "slack.deb",
 		SourceSHA256:           strings.Repeat("b", 64),
 		Debian:                 DebianMetadata{Version: "1.0", Architecture: "amd64"},
+		PackageMetadata: PackageMetadata{
+			Description:            "Slack-compatible client",
+			Homepage:               "https://example.test/slack",
+			Licenses:               []string{"MIT", "Apache-2.0"},
+			Provides:               []string{"virtual-slack"},
+			Conflicts:              []string{"old-slack"},
+			AdditionalDependencies: []string{"libnotify", "gtk3"},
+		},
 	}
 	pkgbuild := Generate(rel)
 	vars := IdentityVariables(rel)
@@ -428,5 +434,9 @@ func TestGenerateCompatProvides(t *testing.T) {
 	}
 	if !strings.Contains(vars, "_PACSMITH_PROVIDES=('virtual-slack')") {
 		t.Fatalf("vars missing explicit provides\n%s", vars)
+	}
+	if !strings.Contains(vars, "_PACSMITH_LICENSES=('MIT' 'Apache-2.0')") ||
+		!strings.Contains(pkgbuild, "depends=('libnotify' 'gtk3')") {
+		t.Fatalf("metadata or explicit dependencies missing\n%s\n%s", vars, pkgbuild)
 	}
 }

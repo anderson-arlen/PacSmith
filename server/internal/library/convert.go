@@ -9,6 +9,7 @@ import (
 
 	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
 	"github.com/anderson-arlen/pacsmith/server/internal/recipe"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 )
 
 func sourceTypeName(t inspect.SourceType) string {
@@ -80,6 +81,11 @@ func recipeFromAnalysis(projectID, releaseID, filename, sha256 string, analysis 
 			Architecture: analysis.Metadata.Architecture,
 			Description:  analysis.Metadata.Description,
 			Homepage:     analysis.Metadata.Homepage,
+		},
+		PackageMetadata: recipe.PackageMetadata{
+			Description: analysis.Metadata.Description,
+			Homepage:    analysis.Metadata.Homepage,
+			Licenses:    []string{"custom:vendor"},
 		},
 		Acquisition: recipe.Acquisition{
 			Kind:              recipe.AcquisitionLocalFile,
@@ -249,10 +255,18 @@ func analysisDocument(filename, sha256, pkgbuild string, analysis inspect.Analys
 		})
 	}
 	document := map[string]any{
-		"originalSourceFilename":   filename,
-		"sourceSha256":             sha256,
-		"sourceType":               sourceTypeName(analysis.Type),
-		"debian":                   debianMetadataJSON(analysis.Metadata),
+		"originalSourceFilename": filename,
+		"sourceSha256":           sha256,
+		"sourceType":             sourceTypeName(analysis.Type),
+		"debian":                 debianMetadataJSON(analysis.Metadata),
+		"packageMetadata": map[string]any{
+			"description":            analysis.Metadata.Description,
+			"homepage":               analysis.Metadata.Homepage,
+			"licenses":               []string{"custom:vendor"},
+			"provides":               []string{},
+			"conflicts":              []string{},
+			"additionalDependencies": []string{},
+		},
 		"dependencies":             dependencies,
 		"maintainerScripts":        scripts,
 		"scriptFindings":           findings,
@@ -360,6 +374,16 @@ func recipeFromDocument(rel Release) recipe.Release {
 		doc = map[string]any{}
 	}
 	debian, _ := mapValue(doc, "debian")
+	metadata, hasMetadata := mapValue(doc, "packageMetadata")
+	if !hasMetadata {
+		metadata = map[string]any{
+			"description": stringValue(debian, "description"),
+			"homepage":    stringValue(debian, "homepage"),
+			"licenses":    []string{"custom:vendor"},
+			"provides":    repo.SplitDebField(stringValue(debian, "provides")),
+			"conflicts":   repo.SplitDebField(stringValue(debian, "conflicts")),
+		}
+	}
 	acquisition, _ := mapValue(doc, "acquisition")
 	install, _ := mapValue(doc, "installMapping")
 	icon, _ := mapValue(install, "icon")
@@ -384,6 +408,14 @@ func recipeFromDocument(rel Release) recipe.Release {
 			Homepage:     stringValue(debian, "homepage"),
 			Provides:     stringValue(debian, "provides"),
 			Conflicts:    stringValue(debian, "conflicts"),
+		},
+		PackageMetadata: recipe.PackageMetadata{
+			Description:            stringValue(metadata, "description"),
+			Homepage:               stringValue(metadata, "homepage"),
+			Licenses:               stringSlice(metadata["licenses"]),
+			Provides:               stringSlice(metadata["provides"]),
+			Conflicts:              stringSlice(metadata["conflicts"]),
+			AdditionalDependencies: stringSlice(metadata["additionalDependencies"]),
 		},
 		Acquisition: recipe.Acquisition{
 			Kind:              recipe.AcquisitionKind(stringValue(acquisition, "kind")),

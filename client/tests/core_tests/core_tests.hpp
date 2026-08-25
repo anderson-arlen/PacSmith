@@ -12,17 +12,10 @@ private slots:
     void parsesDependencies();
     void parsesAlternativesAndVersions();
     void loadsVerifiedDependencyMappings();
-    void mapsChatGptDependencies();
+    void mapsKnownDependencies();
     void acknowledgesScriptContentSpecifically();
     void extractsScriptResponsibilitiesAndAptEvidence();
     void validatesLifecycleScriptsAndContentAcknowledgement();
-    void constrainsAiFindingResolutionFingerprints();
-    void appliesAiResolutionWithinTrustBoundaries();
-    void appliesAiAppRunRewriteForExtractedAppImage();
-    void appliesRequiredAiDependencyTreatment();
-    void requiresApprovalForUnclassifiedAiPayloadChanges();
-    void acknowledgesOmittedDefaultPayloadExclusions();
-    void rejectsUnevidencedAiSigningKeysAndUnsafeInformationRequests();
     void parsesAptSourceFormats();
     void comparesDebianVersions();
     void parsesAptRepositoryMetadata();
@@ -33,7 +26,15 @@ private slots:
     void validatesRepositorySigningKeyUrls();
     void tracksContentSpecificPayloadDecisions();
     void serializesProjectsAndOverrides();
-    void persistsAiSettingsOutsideProjectData();
+    void persistsHarnessProfilesAndIgnoresLegacyAiSettings();
+    void managesHarnessProfilesThroughSharedSettingsOperations();
+    void describesDomainMcpToolsAndPermissions();
+    void validatesGuiAndMcpDomainEditsConsistently();
+    void reportsStructuredReleaseReviewIssues();
+    void preservesConfiguredRemoteConnectionForMcp();
+    void buildsHarnessPromptsAndArgumentsSafely();
+    void validatesPortableAgentPluginBundle();
+    void installsPortableAgentSkillSafely();
     void persistsBackgroundUpdateSettings();
     void writesLoginAutostartDesktopEntry();
     void roundTripsBackgroundUpdateCheckActivity();
@@ -51,15 +52,12 @@ private slots:
     void attachesPreparedGitHubDebToExistingProject();
     void preservesAptTrackerAcrossDebUpdates();
     void preservesRepositoryFirstImportConfiguration();
-    void parsesAiModelCatalog();
-    void parsesChatGptCredentialsAndCatalog();
     void buildsExternalTerminalCommandsSafely();
     void buildsNonInteractivePacmanArgumentsSafely();
     void buildsRebuildableMakepkgArguments();
     void validatesInstallSessionProtocol();
     void encryptsCredentialsWithAge();
     void usesInjectedGithubTokenWhenAgeIsLocked();
-    void migratesScriptEvidenceForExistingProjects();
     void handlesProjectPaths();
     void detectsManualPkgbuildEdits();
     void roundTripsGuidedAndCustomPkgbuilds();
@@ -84,6 +82,7 @@ private slots:
     void detectsStandaloneElfWithoutExecutingIt();
     void rejectsAppImagesBeforeElfDetection();
     void acceptsStandardExternalAppImageRuntimeSymlinks();
+    void acceptsExecutableSymlinkAppRun();
     void flagsAppRunFilenameDispatchForReview();
     void selectsGitHubReleaseAssets();
     void sanitizesPackageNames_data();
@@ -93,4 +92,3 @@ private slots:
     void validatesArchivePaths();
     void preservesUserMappingOverrides();
 };
-

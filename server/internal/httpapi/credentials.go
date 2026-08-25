@@ -107,5 +107,9 @@ func rejectCredentialName(name string) error {
 	if secret.IsInternalName(name) {
 		return secret.ErrInvalidName
 	}
+	switch name {
+	case "openai.api_key", "xai.api_key", "chatgpt.session":
+		return secret.ErrInvalidName
+	}
 	return nil
 }

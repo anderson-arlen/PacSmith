@@ -361,9 +361,11 @@ bool CredentialStore::remove(const QString &provider, const CredentialSource sou
 std::optional<QString> CredentialStore::load(const QString &provider, const CredentialSource source,
                                              QString *error) const {
     if (source == CredentialSource::Environment) {
-        const auto variable = provider == QStringLiteral("xai") ? "XAI_API_KEY"
-                            : provider == QStringLiteral("github") ? "PACSMITH_GITHUB_TOKEN"
-                                                                   : "OPENAI_API_KEY";
+        if (provider != QStringLiteral("github")) {
+            if (error != nullptr) *error = QStringLiteral("Only the GitHub token has an environment source");
+            return std::nullopt;
+        }
+        const auto variable = "PACSMITH_GITHUB_TOKEN";
         const auto value = qEnvironmentVariable(variable);
         if (value.isEmpty() && error != nullptr) *error = QStringLiteral("%1 is not set").arg(QString::fromLatin1(variable));
         return value.isEmpty() ? std::nullopt : std::optional<QString>{value};

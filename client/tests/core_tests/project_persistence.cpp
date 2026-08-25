@@ -1,7 +1,5 @@
 #include "core_tests.hpp"
 
-#include "core/ai_service.hpp"
-#include "core/ai_model_catalog_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/apt_repository.hpp"
@@ -9,7 +7,6 @@
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
 #include "core/credential_store.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/github_update_service.hpp"
@@ -221,6 +218,12 @@ void CoreTests::serializesProjectsAndOverrides() {
     project.lifecycleScript.contents = QStringLiteral("post_install() { /usr/bin/true; }\n");
     project.lifecycleScript.validationPassed = true;
     project.lifecycleScript.acknowledge();
+    project.packageMetadata.description = QStringLiteral("Vendor application");
+    project.packageMetadata.homepage = QStringLiteral("https://vendor.example/app");
+    project.packageMetadata.licenses = {QStringLiteral("GPL-3.0-only WITH sqlitestudio-OpenSSL-exception")};
+    project.packageMetadata.provides = {QStringLiteral("vendor-app")};
+    project.packageMetadata.conflicts = {QStringLiteral("old-vendor-app")};
+    project.packageMetadata.additionalDependencies = {QStringLiteral("libnotify")};
     project.fieldProvenance.insert(
         QStringLiteral("update.url"),
         {pacsmith::ValueOrigin::Ai, QStringLiteral("openai"), QStringLiteral("test-model"),
@@ -234,6 +237,7 @@ void CoreTests::serializesProjectsAndOverrides() {
     const auto json = QJsonDocument(project.toJson()).toJson();
     const auto restored = pacsmith::PackageRelease::fromJson(QJsonDocument::fromJson(json).object());
     QCOMPARE(restored.id, project.id);
+    QCOMPARE(restored.packageMetadata.toJson(), project.packageMetadata.toJson());
     QCOMPARE(restored.sourceType, pacsmith::SourcePackageType::Archive);
     QCOMPARE(restored.acquisition.kind, pacsmith::AcquisitionKind::GitHubRelease);
     QCOMPARE(restored.acquisition.canonicalIdentity, project.acquisition.canonicalIdentity);
@@ -279,91 +283,92 @@ void CoreTests::serializesProjectsAndOverrides() {
     QCOMPARE(restored.buildStatus, pacsmith::BuildStatus::Canceled);
 }
 
-void CoreTests::persistsAiSettingsOutsideProjectData() {
+void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     pacsmith::AppSettingsStore store(temporary.path() + QStringLiteral("/pacsmith-config"));
-    pacsmith::AiSettings settings;
-    settings.provider = pacsmith::AiProviderKind::Xai;
-    settings.model = QStringLiteral("grok-test");
-    settings.reasoningEffort = pacsmith::AiReasoningEffort::High;
-    settings.executionMode = pacsmith::AiExecutionMode::Fast;
-    settings.automaticallyResolveReviewItems = true;
-    settings.credentialSources.insert(QStringLiteral("xai"), pacsmith::CredentialSource::Age);
+    pacsmith::AppSettings settings;
     settings.credentialSources.insert(QStringLiteral("github"), pacsmith::CredentialSource::Age);
     settings.githubTokenConfigured = true;
+    settings.harnessProfiles = {
+        {QStringLiteral("Terminal harness"), QStringLiteral("/usr/bin/harness"),
+         {QStringLiteral("--prompt"), QStringLiteral("{prompt}")}, true},
+        {QStringLiteral("Clipboard harness"), QStringLiteral("second-harness"), {}, false}};
     QString error;
     QVERIFY2(store.save(settings, &error), qPrintable(error));
     const auto restored = store.load(&error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(restored.provider, pacsmith::AiProviderKind::Xai);
-    QCOMPARE(restored.model, QStringLiteral("grok-test"));
-    QCOMPARE(restored.reasoningEffort, pacsmith::AiReasoningEffort::High);
-    QCOMPARE(restored.executionMode, pacsmith::AiExecutionMode::Fast);
-    const auto requestOptions = pacsmith::aiRequestOptions(restored);
-    QCOMPARE(requestOptions.value(QStringLiteral("reasoning")).toObject()
-                 .value(QStringLiteral("effort")).toString(),
-             QStringLiteral("high"));
-    QCOMPARE(requestOptions.value(QStringLiteral("service_tier")).toString(),
-             QStringLiteral("priority"));
-    QCOMPARE(requestOptions.value(QStringLiteral("max_output_tokens")).toInt(), 16384);
-
-    auto chatGptSettings = restored;
-    chatGptSettings.provider = pacsmith::AiProviderKind::ChatGpt;
-    const auto chatGptRequestOptions = pacsmith::aiRequestOptions(chatGptSettings);
-    QVERIFY2(!chatGptRequestOptions.contains(QStringLiteral("max_output_tokens")),
-             "ChatGPT's subscription transport rejects the public Responses API max_output_tokens field");
-    QCOMPARE(chatGptRequestOptions.value(QStringLiteral("service_tier")).toString(),
-             QStringLiteral("priority"));
-
-    const auto chatGptInput = pacsmith::aiRequestInput(
-        pacsmith::AiProviderKind::ChatGpt, QStringLiteral("package evidence"));
-    QVERIFY(chatGptInput.isArray());
-    const auto messages = chatGptInput.toArray();
-    QCOMPARE(messages.size(), 1);
-    const auto message = messages.first().toObject();
-    QCOMPARE(message.value(QStringLiteral("role")).toString(), QStringLiteral("user"));
-    const auto content = message.value(QStringLiteral("content")).toArray();
-    QCOMPARE(content.size(), 1);
-    QCOMPARE(content.first().toObject().value(QStringLiteral("type")).toString(),
-             QStringLiteral("input_text"));
-    QCOMPARE(content.first().toObject().value(QStringLiteral("text")).toString(),
-             QStringLiteral("package evidence"));
-    QCOMPARE(pacsmith::aiRequestInput(pacsmith::AiProviderKind::OpenAi,
-                                     QStringLiteral("package evidence")).toString(),
-             QStringLiteral("package evidence"));
-
-    QVERIFY(restored.automaticallyResolveReviewItems);
-    QCOMPARE(restored.credentialSources.value(QStringLiteral("xai")),
-             pacsmith::CredentialSource::Age);
+    QCOMPARE(restored.harnessProfiles.size(), 2);
+    QCOMPARE(restored.defaultHarness()->name, QStringLiteral("Terminal harness"));
+    QCOMPARE(restored.defaultHarness()->arguments,
+             QStringList({QStringLiteral("--prompt"), QStringLiteral("{prompt}")}));
     QCOMPARE(restored.credentialSources.value(QStringLiteral("github")),
              pacsmith::CredentialSource::Age);
     QVERIFY(restored.githubTokenConfigured);
     QVERIFY(pacsmith::githubTokenUsesAge(restored));
     QVERIFY(store.ageSecretsPath().startsWith(temporary.path()));
-    QCOMPARE(pacsmith::aiProviderFromName(QStringLiteral("codex")),
-             pacsmith::AiProviderKind::None);
-    QCOMPARE(pacsmith::aiProviderFromName(QStringLiteral("chatgpt")),
-             pacsmith::AiProviderKind::ChatGpt);
 
     QTemporaryDir legacyDir;
     QVERIFY(legacyDir.isValid());
     QFile legacy(QDir(legacyDir.path()).filePath(QStringLiteral("settings.json")));
     QVERIFY(legacy.open(QIODevice::WriteOnly | QIODevice::Truncate));
     QVERIFY(legacy.write(QByteArrayLiteral(
-                R"({"formatVersion":4,"credentialSources":{"github":"age"}})")) > 0);
+                R"({"formatVersion":4,"provider":"openai","model":"obsolete","automaticallyResolveReviewItems":true,"credentialSources":{"github":"age"}})")) > 0);
     legacy.close();
     pacsmith::AppSettingsStore legacyStore(legacyDir.path());
     const auto migrated = legacyStore.load();
     QVERIFY(migrated.githubTokenConfigured);
     QVERIFY(pacsmith::githubTokenUsesAge(migrated));
+    QVERIFY(migrated.harnessProfiles.isEmpty());
+}
+
+void CoreTests::managesHarnessProfilesThroughSharedSettingsOperations() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    pacsmith::AppSettingsStore store(temporary.path());
+    QString error;
+    QCOMPARE(store.settingsPath(), QDir(temporary.path()).filePath(QStringLiteral("settings.json")));
+
+    const pacsmith::HarnessProfile first{
+        QStringLiteral("Terminal agent"), QStringLiteral("agent-cli"),
+        {QStringLiteral("--prompt"), QStringLiteral("{prompt}"),
+         QStringLiteral("literal;$(not-a-shell)")}, true};
+    QVERIFY2(store.upsertHarnessProfile(first, &error), qPrintable(error));
+    auto settings = store.load(&error);
+    QCOMPARE(settings.harnessProfiles.size(), 1);
+    QCOMPARE(settings.harnessProfiles.first().arguments, first.arguments);
+    QVERIFY(settings.harnessProfiles.first().isDefault);
+
+    const pacsmith::HarnessProfile second{
+        QStringLiteral("Desktop agent"), QStringLiteral("desktop-agent"), {}, false};
+    QVERIFY2(store.upsertHarnessProfile(second, &error), qPrintable(error));
+    QVERIFY2(store.setDefaultHarnessProfile(QStringLiteral("Desktop agent"), &error),
+             qPrintable(error));
+    settings = store.load(&error);
+    QCOMPARE(settings.harnessProfiles.size(), 2);
+    QCOMPARE(settings.defaultHarness()->name, QStringLiteral("Desktop agent"));
+
+    const pacsmith::HarnessProfile revised{
+        QStringLiteral("Terminal agent"), QStringLiteral("new-agent-cli"),
+        {QStringLiteral("--new")}, false};
+    QVERIFY2(store.upsertHarnessProfile(revised, &error), qPrintable(error));
+    settings = store.load(&error);
+    QCOMPARE(settings.harnessProfiles.first().executable, QStringLiteral("new-agent-cli"));
+    QCOMPARE(settings.defaultHarness()->name, QStringLiteral("Desktop agent"));
+
+    QVERIFY2(store.removeHarnessProfile(QStringLiteral("Desktop agent"), &error), qPrintable(error));
+    settings = store.load(&error);
+    QCOMPARE(settings.harnessProfiles.size(), 1);
+    QVERIFY(settings.harnessProfiles.first().isDefault);
+    QVERIFY(!store.upsertHarnessProfile({}, &error));
+    QVERIFY(error.contains(QStringLiteral("required")));
 }
 
 void CoreTests::persistsBackgroundUpdateSettings() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     pacsmith::AppSettingsStore store(temporary.path());
-    pacsmith::AiSettings settings;
+    pacsmith::AppSettings settings;
     settings.updates.enabled = true;
     settings.updates.daily = false;
     settings.updates.weekDay = 5;
@@ -1253,4 +1258,3 @@ void CoreTests::allowsDeletingProjectThatDoesNotOwnInstalledPackage() {
     QVERIFY2(store.deleteProject(project, &error), qPrintable(error));
     QVERIFY(!std::filesystem::exists(store.projectPath(project.id)));
 }
-

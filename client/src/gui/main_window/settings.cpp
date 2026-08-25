@@ -3,20 +3,6 @@
 namespace pacsmith::gui {
 namespace {
 
-QString aiCredentialName(const AiProviderKind kind) {
-    switch (kind) {
-    case AiProviderKind::ChatGpt:
-        return QStringLiteral("chatgpt.session");
-    case AiProviderKind::OpenAi:
-        return QStringLiteral("openai.api_key");
-    case AiProviderKind::Xai:
-        return QStringLiteral("xai.api_key");
-    case AiProviderKind::None:
-        break;
-    }
-    return {};
-}
-
 QString secretBackendLabel(const QString &backend) {
     if (backend == QStringLiteral("secret-service")) return QStringLiteral("Desktop Secret Service");
     if (backend == QStringLiteral("file")) return QStringLiteral("Protected file on the library host");
@@ -163,6 +149,7 @@ void setListeningStatus(QLabel *label, const bool enabled, const QStringList &bo
 } // namespace
 
 void MainWindow::showSettings() {
+    reloadClientSettings();
     QString loadError;
     auto library = library_.librarySettings(&loadError);
     if (library) applyLibrarySettings(*library);
@@ -171,12 +158,21 @@ void MainWindow::showSettings() {
     }
     QString repoLoadError;
     auto repo = library_.repoSettings(&repoLoadError);
+    QString credentialLoadError;
+    if (const auto credential = library_.credentialStatus(QStringLiteral("github.token"),
+                                                           &credentialLoadError)) {
+        appSettings_.githubTokenConfigured = credential->configured;
+    }
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("PacSmith Settings"));
     dialog.setMinimumSize(760, 640);
     dialog.resize(900, 760);
     auto *rootLayout = new QVBoxLayout(&dialog);
+    auto *settingsSyncNotice = new QLabel(&dialog);
+    settingsSyncNotice->setWordWrap(true);
+    settingsSyncNotice->setVisible(false);
+    rootLayout->addWidget(settingsSyncNotice);
     auto *settingsTabs = new QTabWidget(&dialog);
 
     auto *generalPage = new QWidget(settingsTabs);
@@ -190,11 +186,13 @@ void MainWindow::showSettings() {
                                            "These options are not library settings; they only affect "
                                            "this GUI.")));
     auto *keepInTray = new QCheckBox(QStringLiteral("Keep PacSmith running in the tray"), sessionGroup);
-    keepInTray->setChecked(aiSettings_.updates.keepInTray || aiSettings_.updates.startMinimized);
+    keepInTray->setChecked(appSettings_.updates.keepInTray || appSettings_.updates.startMinimized);
     auto *startAtLogin = new QCheckBox(QStringLiteral("Start PacSmith at login"), sessionGroup);
-    startAtLogin->setChecked(aiSettings_.updates.startAtLogin);
+    startAtLogin->setChecked(appSettings_.updates.startAtLogin);
     auto *startMinimized = new QCheckBox(QStringLiteral("Start minimized to the tray"), sessionGroup);
-    startMinimized->setChecked(aiSettings_.updates.startMinimized);
+    startMinimized->setChecked(appSettings_.updates.startMinimized);
+    bool applyingClientFields = false;
+    bool sessionDirty = false;
     sessionLayout->addWidget(keepInTray);
     sessionLayout->addWidget(startAtLogin);
     sessionLayout->addWidget(startMinimized);
@@ -218,7 +216,7 @@ void MainWindow::showSettings() {
     auto *secretsGroup = new QGroupBox(QStringLiteral("Library secrets"), generalPage);
     auto *secretsForm = new QFormLayout(secretsGroup);
     secretsForm->addRow(settingsSectionHelp(secretsGroup,
-                                            QStringLiteral("GitHub tokens and AI credentials are stored by pacsmithd."),
+                                            QStringLiteral("GitHub tokens are stored by pacsmithd."),
                                             QStringLiteral("The daemon chose its secret backend on first start. This "
                                                            "client never reads stored secret values back.")));
     auto *backendLabel = new QLabel(localAdmin ? secretBackendLabel(info ? info->secretBackend : QString{})
@@ -232,7 +230,7 @@ void MainWindow::showSettings() {
     auto *githubForm = new QFormLayout(githubGroup);
     auto *githubToken = new QLineEdit(githubGroup);
     githubToken->setEchoMode(QLineEdit::Password);
-    githubToken->setPlaceholderText(aiSettings_.githubTokenConfigured
+    githubToken->setPlaceholderText(appSettings_.githubTokenConfigured
                                         ? QStringLiteral("Configured on the library daemon; leave blank to keep it")
                                         : QStringLiteral("Optional personal access token"));
     githubForm->addRow(settingsSectionHelp(githubGroup,
@@ -246,58 +244,163 @@ void MainWindow::showSettings() {
     generalLayout->addStretch(1);
     settingsTabs->addTab(generalPage, QStringLiteral("General"));
 
-    auto *aiPage = new QWidget(settingsTabs);
-    auto *aiLayout = new QVBoxLayout(aiPage);
-    auto *aiGroup = new QGroupBox(QStringLiteral("AI Advisor"), aiPage);
-    auto *aiGroupLayout = new QVBoxLayout(aiGroup);
-    auto *aiSectionHelp =
-        settingsSectionHelp(aiGroup, QStringLiteral("AI is optional. Local inspection always runs first."),
-                            QStringLiteral("Provider, model, and credentials belong to the library "
-                                           "daemon so every client uses the same advisor."));
-    aiGroupLayout->addWidget(aiSectionHelp);
-    auto *form = new QFormLayout;
-    auto *provider = new QComboBox(aiPage);
-    provider->addItems({QStringLiteral("None"), QStringLiteral("ChatGPT subscription"), QStringLiteral("OpenAI API"),
-                        QStringLiteral("xAI / Grok API")});
-    provider->setCurrentIndex(static_cast<int>(aiSettings_.provider));
-    auto *model = new QComboBox(aiPage);
-    model->setEditable(true);
-    model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    model->setMinimumContentsLength(36);
-    model->lineEdit()->setPlaceholderText(QStringLiteral("Provider model ID"));
-    model->setEditText(aiSettings_.model);
-    auto *reasoningEffort = new QComboBox(aiPage);
-    auto *executionMode = new QComboBox(aiPage);
-    executionMode->addItem(QStringLiteral("Standard"), static_cast<int>(AiExecutionMode::Standard));
-    executionMode->addItem(QStringLiteral("Fast (priority)"), static_cast<int>(AiExecutionMode::Fast));
-    executionMode->setCurrentIndex(executionMode->findData(static_cast<int>(aiSettings_.executionMode)));
-    auto *automatic = new QCheckBox(QStringLiteral("Automatically resolve items flagged for review with AI"), aiPage);
-    automatic->setChecked(aiSettings_.automaticallyResolveReviewItems);
-    auto *apiKey = new QLineEdit(aiPage);
-    apiKey->setEchoMode(QLineEdit::Password);
-    apiKey->setPlaceholderText(QStringLiteral("Leave blank to keep an existing stored key"));
-    auto *chatGptSignIn = new QPushButton(QStringLiteral("Sign in with ChatGPT…"), aiPage);
-    auto *loadModels = new QPushButton(QStringLiteral("Load Available Models"), aiPage);
-    form->addRow(QStringLiteral("Provider"), provider);
-    form->addRow(QStringLiteral("API key"), apiKey);
-    form->addRow(QString{}, chatGptSignIn);
-    form->addRow(QStringLiteral("Model"), model);
-    form->addRow(QString{}, loadModels);
-    form->addRow(QStringLiteral("Reasoning effort"), reasoningEffort);
-    form->addRow(QStringLiteral("Execution speed"), executionMode);
-    form->addRow(QString{}, automatic);
-    aiGroupLayout->addLayout(form);
-    aiLayout->addWidget(aiGroup);
-    auto *aiStatusPanel = settingsStatusFrame(aiPage);
-    auto *aiStatusLayout = new QVBoxLayout(aiStatusPanel);
-    aiStatusLayout->setContentsMargins(12, 8, 12, 9);
-    auto *aiCredentialStatus = new QLabel(aiStatusPanel);
-    aiCredentialStatus->setWordWrap(true);
-    aiCredentialStatus->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse);
-    aiStatusLayout->addWidget(new QLabel(QStringLiteral("●  STATUS"), aiStatusPanel));
-    aiStatusLayout->addWidget(aiCredentialStatus);
-    aiLayout->addWidget(aiStatusPanel);
-    settingsTabs->addTab(aiPage, QStringLiteral("AI Advisor"));
+    auto *harnessPage = new QWidget(settingsTabs);
+    auto *harnessLayout = new QVBoxLayout(harnessPage);
+    auto *harnessGroup = new QGroupBox(QStringLiteral("External AI harnesses"), harnessPage);
+    auto *harnessGroupLayout = new QVBoxLayout(harnessGroup);
+    harnessGroupLayout->addWidget(settingsSectionHelp(
+        harnessGroup, QStringLiteral("PacSmith launches your AI harness; it does not provide an AI model or chat."),
+        QStringLiteral("`pacsmith plugin path` reports the portable Agent Plugin containing both "
+                       "the Skill and MCP declaration. Install and approve it through the harness's "
+                       "own plugin controls. `pacsmith skill install` remains available for harnesses "
+                       "that only discover shared Agent Skills. Arguments are passed directly "
+                       "without a shell. Put {prompt} in an argument to receive PacSmith context.")));
+    auto *harnessForm = new QFormLayout;
+    auto *harnessSelector = new QComboBox(harnessGroup);
+    auto *harnessName = new QLineEdit(harnessGroup);
+    auto *harnessExecutable = new QLineEdit(harnessGroup);
+    harnessExecutable->setPlaceholderText(QStringLiteral("Executable name or absolute path"));
+    auto *harnessArguments = new QPlainTextEdit(harnessGroup);
+    harnessArguments->setPlaceholderText(QStringLiteral("One argument per line, for example:\n--prompt\n{prompt}"));
+    harnessArguments->setMaximumHeight(150);
+    auto *defaultHarness = new QCheckBox(QStringLiteral("Use this profile by default"), harnessGroup);
+    auto *profileButtons = new QWidget(harnessGroup);
+    auto *profileButtonsLayout = new QHBoxLayout(profileButtons);
+    profileButtonsLayout->setContentsMargins(0, 0, 0, 0);
+    auto *addHarness = new QPushButton(QStringLiteral("Add profile"), profileButtons);
+    auto *removeHarness = new QPushButton(QStringLiteral("Remove profile"), profileButtons);
+    profileButtonsLayout->addWidget(addHarness);
+    profileButtonsLayout->addWidget(removeHarness);
+    profileButtonsLayout->addStretch();
+    harnessForm->addRow(QStringLiteral("Profile"), harnessSelector);
+    harnessForm->addRow(QStringLiteral("Name"), harnessName);
+    harnessForm->addRow(QStringLiteral("Executable"), harnessExecutable);
+    harnessForm->addRow(QStringLiteral("Arguments"), harnessArguments);
+    harnessForm->addRow(QString{}, defaultHarness);
+    harnessForm->addRow(QString{}, profileButtons);
+    harnessGroupLayout->addLayout(harnessForm);
+    harnessLayout->addWidget(harnessGroup);
+    auto *harnessNotice = new QLabel(
+        QStringLiteral("If {prompt} is omitted, PacSmith copies the contextual prompt to the clipboard before launching."),
+        harnessPage);
+    harnessNotice->setWordWrap(true);
+    harnessLayout->addWidget(harnessNotice);
+    auto *externalHarnessNotice = new QLabel(harnessPage);
+    externalHarnessNotice->setWordWrap(true);
+    externalHarnessNotice->setVisible(false);
+    auto *reloadExternalHarnesses = new QPushButton(QStringLiteral("Reload external changes"), harnessPage);
+    reloadExternalHarnesses->setVisible(false);
+    harnessLayout->addWidget(externalHarnessNotice);
+    harnessLayout->addWidget(reloadExternalHarnesses, 0, Qt::AlignLeft);
+    harnessLayout->addStretch();
+    settingsTabs->addTab(harnessPage, QStringLiteral("AI Harnesses"));
+
+    QList<HarnessProfile> harnessProfiles = appSettings_.harnessProfiles;
+    for (const auto &profile : harnessProfiles) harnessSelector->addItem(profile.name);
+    int activeHarness = harnessProfiles.isEmpty() ? -1 : 0;
+    bool applyingHarnessFields = false;
+    bool harnessDirty = false;
+    auto setHarnessFieldsEnabled = [&] {
+        const bool enabled = activeHarness >= 0 && activeHarness < harnessProfiles.size();
+        harnessName->setEnabled(enabled);
+        harnessExecutable->setEnabled(enabled);
+        harnessArguments->setEnabled(enabled);
+        defaultHarness->setEnabled(enabled);
+        removeHarness->setEnabled(enabled);
+    };
+    auto loadHarness = [&] {
+        const QScopedValueRollback applying(applyingHarnessFields, true);
+        if (activeHarness < 0 || activeHarness >= harnessProfiles.size()) {
+            harnessName->clear();
+            harnessExecutable->clear();
+            harnessArguments->clear();
+            defaultHarness->setChecked(false);
+            setHarnessFieldsEnabled();
+            return;
+        }
+        const auto &profile = harnessProfiles.at(activeHarness);
+        harnessName->setText(profile.name);
+        harnessExecutable->setText(profile.executable);
+        harnessArguments->setPlainText(profile.arguments.join(QLatin1Char('\n')));
+        defaultHarness->setChecked(profile.isDefault);
+        setHarnessFieldsEnabled();
+    };
+    auto commitHarness = [&] {
+        if (activeHarness < 0 || activeHarness >= harnessProfiles.size()) return;
+        auto &profile = harnessProfiles[activeHarness];
+        profile.name = harnessName->text().trimmed();
+        profile.executable = harnessExecutable->text().trimmed();
+        profile.arguments = harnessArguments->toPlainText().isEmpty()
+                                ? QStringList{}
+                                : harnessArguments->toPlainText().split(QLatin1Char('\n'));
+        profile.isDefault = defaultHarness->isChecked();
+        harnessSelector->setItemText(activeHarness,
+                                     profile.name.isEmpty() ? QStringLiteral("Unnamed profile") : profile.name);
+    };
+    auto replaceHarnessProfiles = [&] {
+        const auto selectedName = activeHarness >= 0 && activeHarness < harnessProfiles.size()
+            ? harnessProfiles.at(activeHarness).name : QString{};
+        const QScopedValueRollback applying(applyingHarnessFields, true);
+        harnessProfiles = appSettings_.harnessProfiles;
+        harnessSelector->clear();
+        int selected = -1;
+        for (qsizetype index = 0; index < harnessProfiles.size(); ++index) {
+            const auto &profile = harnessProfiles.at(index);
+            harnessSelector->addItem(profile.name);
+            if (profile.name.compare(selectedName, Qt::CaseInsensitive) == 0) {
+                selected = static_cast<int>(index);
+            }
+            if (selected < 0 && profile.isDefault) selected = static_cast<int>(index);
+        }
+        activeHarness = selected >= 0 ? selected : harnessProfiles.isEmpty() ? -1 : 0;
+        harnessSelector->setCurrentIndex(activeHarness);
+        loadHarness();
+        harnessDirty = false;
+        reloadExternalHarnesses->setVisible(false);
+    };
+    QObject::connect(harnessSelector, &QComboBox::currentIndexChanged, &dialog, [&](const int index) {
+        if (applyingHarnessFields) return;
+        commitHarness();
+        activeHarness = index;
+        loadHarness();
+    });
+    QObject::connect(addHarness, &QPushButton::clicked, &dialog, [&] {
+        harnessDirty = true;
+        commitHarness();
+        HarnessProfile profile;
+        profile.name = QStringLiteral("New harness");
+        profile.isDefault = harnessProfiles.isEmpty();
+        harnessProfiles.append(profile);
+        harnessSelector->addItem(profile.name);
+        harnessSelector->setCurrentIndex(static_cast<int>(harnessProfiles.size()) - 1);
+    });
+    QObject::connect(removeHarness, &QPushButton::clicked, &dialog, [&] {
+        harnessDirty = true;
+        if (activeHarness < 0 || activeHarness >= harnessProfiles.size()) return;
+        harnessProfiles.removeAt(activeHarness);
+        harnessSelector->removeItem(activeHarness);
+        activeHarness = harnessSelector->currentIndex();
+        loadHarness();
+    });
+    QObject::connect(defaultHarness, &QCheckBox::toggled, &dialog, [&](const bool checked) {
+        if (!applyingHarnessFields) harnessDirty = true;
+        if (!checked || activeHarness < 0 || activeHarness >= harnessProfiles.size()) return;
+        for (auto &profile : harnessProfiles) profile.isDefault = false;
+        harnessProfiles[activeHarness].isDefault = true;
+    });
+    QObject::connect(harnessName, &QLineEdit::textEdited, &dialog,
+                     [&](const QString &) { if (!applyingHarnessFields) harnessDirty = true; });
+    QObject::connect(harnessExecutable, &QLineEdit::textEdited, &dialog,
+                     [&](const QString &) { if (!applyingHarnessFields) harnessDirty = true; });
+    QObject::connect(harnessArguments, &QPlainTextEdit::textChanged, &dialog,
+                     [&] { if (!applyingHarnessFields) harnessDirty = true; });
+    QObject::connect(reloadExternalHarnesses, &QPushButton::clicked, &dialog, [&] {
+        replaceHarnessProfiles();
+        externalHarnessNotice->setText(QStringLiteral("✓ External harness profiles loaded."));
+        externalHarnessNotice->setVisible(true);
+    });
+    if (activeHarness >= 0) harnessSelector->setCurrentIndex(activeHarness);
+    loadHarness();
 
     auto *updatesPage = new QWidget(settingsTabs);
     auto *updatesLayout = new QVBoxLayout(updatesPage);
@@ -308,16 +411,16 @@ void MainWindow::showSettings() {
                             QStringLiteral("Each project release still owns its own update source. This "
                                            "schedule is shared by every client of this library.")));
     auto *backgroundEnabled = new QCheckBox(QStringLiteral("Check for updates periodically"), scheduleGroup);
-    backgroundEnabled->setChecked(aiSettings_.updates.enabled);
+    backgroundEnabled->setChecked(appSettings_.updates.enabled);
     auto *schedule = new QComboBox(scheduleGroup);
     schedule->addItems({QStringLiteral("Every day"), QStringLiteral("Selected weekday")});
-    schedule->setCurrentIndex(aiSettings_.updates.daily ? 0 : 1);
+    schedule->setCurrentIndex(appSettings_.updates.daily ? 0 : 1);
     auto *weekday = new QComboBox(scheduleGroup);
     weekday->addItems({QStringLiteral("Monday"), QStringLiteral("Tuesday"), QStringLiteral("Wednesday"),
                        QStringLiteral("Thursday"), QStringLiteral("Friday"), QStringLiteral("Saturday"),
                        QStringLiteral("Sunday")});
-    weekday->setCurrentIndex(std::clamp(aiSettings_.updates.weekDay, 1, 7) - 1);
-    auto *checkTime = new QTimeEdit(aiSettings_.updates.localTime, scheduleGroup);
+    weekday->setCurrentIndex(std::clamp(appSettings_.updates.weekDay, 1, 7) - 1);
+    auto *checkTime = new QTimeEdit(appSettings_.updates.localTime, scheduleGroup);
     checkTime->setDisplayFormat(QStringLiteral("HH:mm"));
     updatesForm->addRow(QString{}, backgroundEnabled);
     updatesForm->addRow(QStringLiteral("Frequency"), schedule);
@@ -329,7 +432,7 @@ void MainWindow::showSettings() {
     auto *automaticPrepare = new QCheckBox(QStringLiteral("Download and prepare newly discovered "
                                                           "vendor artifacts automatically"),
                                            behaviorGroup);
-    automaticPrepare->setChecked(aiSettings_.updates.automaticallyPrepare);
+    automaticPrepare->setChecked(appSettings_.updates.automaticallyPrepare);
     behaviorForm->addRow(QString{}, automaticPrepare);
     updatesLayout->addWidget(behaviorGroup);
     auto *checkNow = new QPushButton(QStringLiteral("Check Now"), updatesPage);
@@ -353,11 +456,30 @@ void MainWindow::showSettings() {
     auto *retainedPackages = new QSpinBox(cleanupPage);
     retainedPackages->setRange(-1, 50);
     retainedPackages->setSpecialValueText(QStringLiteral("Unlimited"));
-    retainedPackages->setValue(aiSettings_.updates.retainedPackageVersions);
+    retainedPackages->setValue(appSettings_.updates.retainedPackageVersions);
     auto *retainedReleases = new QSpinBox(cleanupPage);
     retainedReleases->setRange(-1, 50);
     retainedReleases->setSpecialValueText(QStringLiteral("Unlimited"));
-    retainedReleases->setValue(aiSettings_.updates.retainedCompleteReleases);
+    retainedReleases->setValue(appSettings_.updates.retainedCompleteReleases);
+    bool applyingLibraryFields = false;
+    bool libraryFieldsDirty = false;
+    const auto markLibraryDirty = [&] {
+        if (!applyingLibraryFields) libraryFieldsDirty = true;
+    };
+    QObject::connect(backgroundEnabled, &QCheckBox::toggled, &dialog,
+                     [&](bool) { markLibraryDirty(); });
+    QObject::connect(schedule, &QComboBox::currentIndexChanged, &dialog,
+                     [&](int) { markLibraryDirty(); });
+    QObject::connect(weekday, &QComboBox::currentIndexChanged, &dialog,
+                     [&](int) { markLibraryDirty(); });
+    QObject::connect(checkTime, &QTimeEdit::timeChanged, &dialog,
+                     [&](const QTime &) { markLibraryDirty(); });
+    QObject::connect(automaticPrepare, &QCheckBox::toggled, &dialog,
+                     [&](bool) { markLibraryDirty(); });
+    QObject::connect(retainedPackages, &QSpinBox::valueChanged, &dialog,
+                     [&](int) { markLibraryDirty(); });
+    QObject::connect(retainedReleases, &QSpinBox::valueChanged, &dialog,
+                     [&](int) { markLibraryDirty(); });
     cleanupForm->addRow(QStringLiteral("Old package artifacts"), retainedPackages);
     cleanupForm->addRow(QStringLiteral("Old complete releases"), retainedReleases);
     cleanupLayout->addWidget(cleanupGroup);
@@ -589,7 +711,10 @@ void MainWindow::showSettings() {
     QObject::connect(repoTrustMode, &QComboBox::currentIndexChanged, &dialog,
                      [updateRepoCertVisibility](int) { updateRepoCertVisibility(); });
 
-    auto applyRepoUi = [=](const RepoSettings &settings) {
+    bool applyingRepoFields = false;
+    bool repoFieldsDirty = false;
+    auto applyRepoUi = [=, &applyingRepoFields](const RepoSettings &settings) {
+        const QScopedValueRollback applying(applyingRepoFields, true);
         const auto keepRootCertified = repoTrustMode->currentData().toString() == QStringLiteral("root-certified") &&
                                        settings.trustMode != QStringLiteral("root-certified");
         repoEnabled->setChecked(settings.enabled);
@@ -697,6 +822,25 @@ void MainWindow::showSettings() {
     if (repo) applyRepoUi(*repo);
     else applyRepoUi(RepoSettings{});
     wireExclusiveListenHosts(repoListenInterfaces);
+    const auto markRepoDirty = [&] {
+        if (!applyingRepoFields) repoFieldsDirty = true;
+    };
+    QObject::connect(repoEnabled, &QCheckBox::toggled, &dialog,
+                     [&](bool) { markRepoDirty(); });
+    QObject::connect(repoListenPort, &QSpinBox::valueChanged, &dialog,
+                     [&](int) { markRepoDirty(); });
+    QObject::connect(repoListenInterfaces, &QListWidget::itemChanged, &dialog,
+                     [&](QListWidgetItem *) { markRepoDirty(); });
+    QObject::connect(repoAdvertisedUrl, &QLineEdit::textEdited, &dialog,
+                     [&](const QString &) { markRepoDirty(); });
+    QObject::connect(repoSoakDays, &QSpinBox::valueChanged, &dialog,
+                     [&](int) { markRepoDirty(); });
+    QObject::connect(repoPrefixEnabled, &QCheckBox::toggled, &dialog,
+                     [&](bool) { markRepoDirty(); });
+    QObject::connect(repoPrefixEdit, &QLineEdit::textEdited, &dialog,
+                     [&](const QString &) { markRepoDirty(); });
+    QObject::connect(repoTrustMode, &QComboBox::currentIndexChanged, &dialog,
+                     [&](int) { markRepoDirty(); });
 
     auto collectRepoSettings = [&, repoEnabled, repoListenPort, repoListenInterfaces, repoAdvertisedUrl, repoSoakDays,
                                 repoPrefixEnabled, repoPrefixEdit, repoTrustMode]() {
@@ -727,6 +871,7 @@ void MainWindow::showSettings() {
         }
         repo = saved;
         applyRepoUi(*saved);
+        repoFieldsDirty = false;
         return true;
     };
     auto readPublicKeyFile = [&dialog](const QString &title) -> std::optional<QString> {
@@ -1077,13 +1222,42 @@ void MainWindow::showSettings() {
         }
         startMinimized->setEnabled(trayOk && keepInTray->isChecked() && startAtLogin->isChecked());
     };
-    QObject::connect(keepInTray, &QCheckBox::toggled, &dialog, [&](bool) { refreshSessionControls(); });
-    QObject::connect(startAtLogin, &QCheckBox::toggled, &dialog, [&](bool) { refreshSessionControls(); });
+    QObject::connect(keepInTray, &QCheckBox::toggled, &dialog, [&](bool) {
+        if (!applyingClientFields) sessionDirty = true;
+        refreshSessionControls();
+    });
+    QObject::connect(startAtLogin, &QCheckBox::toggled, &dialog, [&](bool) {
+        if (!applyingClientFields) sessionDirty = true;
+        refreshSessionControls();
+    });
     QObject::connect(startMinimized, &QCheckBox::toggled, &dialog, [&](const bool checked) {
+        if (!applyingClientFields) sessionDirty = true;
         if (checked) keepInTray->setChecked(true);
         refreshSessionControls();
     });
     refreshSessionControls();
+
+    QObject::connect(this, &MainWindow::clientSettingsReloaded, &dialog, [&] {
+        if (!sessionDirty) {
+            const QScopedValueRollback applying(applyingClientFields, true);
+            keepInTray->setChecked(appSettings_.updates.keepInTray ||
+                                   appSettings_.updates.startMinimized);
+            startAtLogin->setChecked(appSettings_.updates.startAtLogin);
+            startMinimized->setChecked(appSettings_.updates.startMinimized);
+            refreshSessionControls();
+        }
+        if (!harnessDirty) {
+            replaceHarnessProfiles();
+            externalHarnessNotice->setText(
+                QStringLiteral("✓ Harness profiles updated by another PacSmith client."));
+            externalHarnessNotice->setVisible(true);
+            return;
+        }
+        externalHarnessNotice->setText(
+            QStringLiteral("⚠ Harness profiles changed externally. Reload them or save your current edits."));
+        externalHarnessNotice->setVisible(true);
+        reloadExternalHarnesses->setVisible(true);
+    });
 
     auto refreshScheduleControls = [&] {
         const bool periodic = backgroundEnabled->isChecked();
@@ -1108,209 +1282,83 @@ void MainWindow::showSettings() {
     });
     refreshScheduleControls();
 
-    QHash<int, QString> modelSelections;
-    modelSelections.insert(provider->currentIndex(), aiSettings_.model);
-    int previousProvider = provider->currentIndex();
-    std::optional<ChatGptCredentials> chatGptSession;
-    QString chatGptSerialized = sessionCredential(QStringLiteral("chatgpt.session"));
-    if (!chatGptSerialized.isEmpty()) {
-        chatGptSession = ChatGptCredentials::fromSerialized(chatGptSerialized, nullptr);
-    }
-    bool modelsLoading = false;
-
-    AiReasoningEffort desiredReasoningEffort = aiSettings_.reasoningEffort;
-    auto refreshReasoningEfforts = [&] {
-        const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
-        const auto supported = supportedReasoningEfforts(kind, model->currentText());
-        reasoningEffort->blockSignals(true);
-        reasoningEffort->clear();
-        reasoningEffort->addItem(reasoningEffortLabel(AiReasoningEffort::ProviderDefault),
-                                 static_cast<int>(AiReasoningEffort::ProviderDefault));
-        for (const auto effort : supported) {
-            reasoningEffort->addItem(reasoningEffortLabel(effort), static_cast<int>(effort));
-        }
-        const auto desiredIndex = reasoningEffort->findData(static_cast<int>(desiredReasoningEffort));
-        reasoningEffort->setCurrentIndex(desiredIndex >= 0 ? desiredIndex : 0);
-        reasoningEffort->blockSignals(false);
-    };
-
-    auto setCredentialStatus = [&](const QString &text) { aiCredentialStatus->setText(text); };
-
-    auto updateControls = [&] {
-        const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
-        const bool api = kind == AiProviderKind::OpenAi || kind == AiProviderKind::Xai;
-        const bool subscription = kind == AiProviderKind::ChatGpt;
-        const bool operationRunning = modelsLoading || chatGptLoginService_.isRunning();
-        form->setRowVisible(apiKey, api);
-        form->setRowVisible(chatGptSignIn, subscription);
-        const bool chatgptReady = chatGptSession.has_value() || (library && library->chatgptConfigured);
-        const bool apiReady = api && (!apiKey->text().isEmpty() ||
-                                      (kind == AiProviderKind::OpenAi && library && library->openaiConfigured) ||
-                                      (kind == AiProviderKind::Xai && library && library->xaiConfigured));
-        const bool credentialReady = kind == AiProviderKind::None || (subscription ? chatgptReady : apiReady);
-        apiKey->setEnabled(api && !operationRunning);
-        chatGptSignIn->setEnabled(subscription && !operationRunning);
-        chatGptSignIn->setText(chatgptReady ? QStringLiteral("Sign out of ChatGPT…")
-                                            : QStringLiteral("Sign in with ChatGPT…"));
-        model->setEnabled(kind != AiProviderKind::None && credentialReady && !operationRunning);
-        loadModels->setEnabled((api || subscription) && credentialReady && !operationRunning);
-        reasoningEffort->setEnabled(credentialReady && reasoningEffort->count() > 1 && !operationRunning);
-        executionMode->setEnabled(kind != AiProviderKind::None && credentialReady && !operationRunning);
-        automatic->setEnabled(!operationRunning);
-        provider->setEnabled(!operationRunning);
-        if (kind == AiProviderKind::None) {
-            setCredentialStatus(QStringLiteral("AI is optional. Credentials are stored on the "
-                                               "library daemon, which makes the provider calls."));
-        } else if (subscription && chatgptReady) {
-            setCredentialStatus(QStringLiteral("✓ ChatGPT session is stored on the library daemon."));
-        } else if (subscription) {
-            setCredentialStatus(QStringLiteral("Sign in with ChatGPT. The session is "
-                                               "stored on the library daemon."));
-        } else if (api && credentialReady) {
-            setCredentialStatus(QStringLiteral("✓ Provider credential is stored on the library daemon."));
-        } else {
-            setCredentialStatus(QStringLiteral("Enter an API key. It is stored on the library daemon "
-                                               "and cannot be read back later."));
-        }
-    };
-
-    QObject::connect(model, &QComboBox::currentTextChanged, &dialog, [&](const QString &) {
-        modelSelections.insert(provider->currentIndex(), model->currentText().trimmed());
-        refreshReasoningEfforts();
-        updateControls();
-    });
-    QObject::connect(reasoningEffort, &QComboBox::currentIndexChanged, &dialog, [&](const int index) {
-        if (index >= 0) {
-            desiredReasoningEffort = static_cast<AiReasoningEffort>(reasoningEffort->itemData(index).toInt());
-        }
-    });
-    QObject::connect(provider, &QComboBox::currentIndexChanged, &dialog, [&](const int index) {
-        modelSelections.insert(previousProvider, model->currentText().trimmed());
-        previousProvider = index;
-        model->clear();
-        model->setEditText(modelSelections.value(index));
-        refreshReasoningEfforts();
-        updateControls();
-    });
-    QObject::connect(apiKey, &QLineEdit::textChanged, &dialog, [&](const QString &) { updateControls(); });
-    QObject::connect(chatGptSignIn, &QPushButton::clicked, &dialog, [&, this] {
-        const bool signedIn = chatGptSession.has_value() || (library && library->chatgptConfigured);
-        if (signedIn) {
-            if (QMessageBox::question(&dialog, QStringLiteral("Sign out of ChatGPT"),
-                                      QStringLiteral("Remove PacSmith's saved ChatGPT session from the "
-                                                     "library daemon?")) != QMessageBox::Yes) {
-                return;
-            }
-            QString error;
-            if (!library_.deleteCredential(QStringLiteral("chatgpt.session"), &error)) {
-                QMessageBox::critical(&dialog, QStringLiteral("Could not sign out"), error);
-                return;
-            }
-            rememberSessionCredential(QStringLiteral("chatgpt.session"), {});
-            chatGptSession.reset();
-            chatGptSerialized.clear();
-            if (library) library->chatgptConfigured = false;
-            updateControls();
-            return;
-        }
-        setCredentialStatus(QStringLiteral("Starting secure ChatGPT browser sign-in…"));
-        chatGptLoginService_.start();
-    });
-    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::authorizationUrlReady, &dialog, [&](const QUrl &url) {
-        if (!QDesktopServices::openUrl(url)) {
-            setCredentialStatus(QStringLiteral("Open this OpenAI sign-in URL in your browser: %1").arg(url.toString()));
-        }
-    });
-    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::progressChanged, &dialog,
-                     [&](const QString &message) {
-                         updateControls();
-                         setCredentialStatus(message);
-                     });
-    QObject::connect(&chatGptLoginService_, &ChatGptLoginService::failed, &dialog, [&](const QString &message) {
-        updateControls();
-        setCredentialStatus(QStringLiteral("⚠ %1").arg(message));
-    });
-    QObject::connect(
-        &chatGptLoginService_, &ChatGptLoginService::succeeded, &dialog, [&, this](const QString &serialized) {
-            QString error;
-            if (!library_.setCredential(QStringLiteral("chatgpt.session"), serialized, &error)) {
-                setCredentialStatus(
-                    QStringLiteral("⚠ Signed in, but the daemon could not store the session: %1").arg(error));
-                return;
-            }
-            rememberSessionCredential(QStringLiteral("chatgpt.session"), serialized);
-            chatGptSerialized = serialized;
-            chatGptSession = ChatGptCredentials::fromSerialized(serialized, &error);
-            if (library) library->chatgptConfigured = true;
-            updateControls();
-            loadModels->click();
-        });
-    auto applyModels = [&](const QStringList &models) {
-        const auto desired = model->currentText().trimmed();
-        model->clear();
-        model->addItems(models);
-        if (!desired.isEmpty()) {
-            const auto index = model->findText(desired);
-            if (index >= 0) model->setCurrentIndex(index);
-            else model->setEditText(desired);
-        } else if (!models.isEmpty()) {
-            model->setCurrentIndex(0);
-        }
-        updateControls();
-        setCredentialStatus(QStringLiteral("✓ Loaded %1 model(s)").arg(models.size()));
-    };
-    QObject::connect(loadModels, &QPushButton::clicked, &dialog, [&, this] {
-        const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
-        if (kind == AiProviderKind::OpenAi || kind == AiProviderKind::Xai) {
-            if (!apiKey->text().isEmpty()) {
-                QString error;
-                if (!library_.setCredential(aiCredentialName(kind), apiKey->text(), &error)) {
-                    setCredentialStatus(QStringLiteral("⚠ Could not store the API key: %1").arg(error));
-                    return;
-                }
-                rememberSessionCredential(aiCredentialName(kind), apiKey->text());
-                if (library) {
-                    if (kind == AiProviderKind::OpenAi) library->openaiConfigured = true;
-                    else library->xaiConfigured = true;
-                }
-            }
-        }
-        modelsLoading = true;
-        updateControls();
-        setCredentialStatus(QStringLiteral("Loading available models from the library daemon…"));
+    auto *serverSettingsRefresh = new QTimer(&dialog);
+    serverSettingsRefresh->setInterval(1000);
+    QObject::connect(serverSettingsRefresh, &QTimer::timeout, &dialog, [&] {
+        bool updated = false;
+        bool conflicted = false;
         QString error;
-        const auto models = library_.listAiModels(aiProviderName(kind), &error);
-        modelsLoading = false;
-        if (!models) {
-            updateControls();
-            setCredentialStatus(QStringLiteral("⚠ %1").arg(error));
-            return;
+        const auto latestLibrary = library_.librarySettings(&error);
+        if (latestLibrary && latestLibrary->revision != librarySettingsRevision_) {
+            if (libraryFieldsDirty) {
+                conflicted = true;
+            } else {
+                const QScopedValueRollback applying(applyingLibraryFields, true);
+                applyLibrarySettings(*latestLibrary);
+                backgroundEnabled->setChecked(latestLibrary->updatesEnabled);
+                schedule->setCurrentIndex(latestLibrary->updatesDaily ? 0 : 1);
+                weekday->setCurrentIndex(std::clamp(latestLibrary->weekDay, 1, 7) - 1);
+                checkTime->setTime(latestLibrary->localTime);
+                automaticPrepare->setChecked(latestLibrary->automaticallyPrepare);
+                retainedPackages->setValue(latestLibrary->retainedPackageVersions);
+                retainedReleases->setValue(latestLibrary->retainedCompleteReleases);
+                refreshScheduleControls();
+                updated = true;
+            }
         }
-        applyModels(*models);
+        error.clear();
+        const auto latestRepo = library_.repoSettings(&error);
+        if (latestRepo && (!repo || latestRepo->revision != repo->revision)) {
+            if (repoFieldsDirty) {
+                conflicted = true;
+            } else {
+                repo = latestRepo;
+                applyRepoUi(*latestRepo);
+                updated = true;
+            }
+        }
+        error.clear();
+        const auto githubCredential =
+            library_.credentialStatus(QStringLiteral("github.token"), &error);
+        if (githubCredential &&
+            githubCredential->configured != appSettings_.githubTokenConfigured) {
+            appSettings_.githubTokenConfigured = githubCredential->configured;
+            githubToken->setPlaceholderText(
+                githubCredential->configured
+                    ? QStringLiteral("Configured on the library daemon; leave blank to keep it")
+                    : QStringLiteral("Optional personal access token"));
+            updated = true;
+        }
+        if (conflicted) {
+            settingsSyncNotice->setText(
+                QStringLiteral("⚠ Library settings changed through another client while this dialog has unsaved edits. Cancel and reopen before making further changes here."));
+            settingsSyncNotice->setVisible(true);
+        } else if (updated) {
+            settingsSyncNotice->setText(
+                QStringLiteral("✓ Settings updated by another PacSmith client."));
+            settingsSyncNotice->setVisible(true);
+        }
     });
-    QObject::connect(&dialog, &QDialog::finished, &chatGptLoginService_, &ChatGptLoginService::cancel);
-    refreshReasoningEfforts();
-    updateControls();
+    serverSettingsRefresh->start();
 
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&, this] {
         if (!applyListenSettings()) return;
-        const auto kind = static_cast<AiProviderKind>(provider->currentIndex());
-        if (kind == AiProviderKind::ChatGpt && !(chatGptSession || (library && library->chatgptConfigured))) {
-            QMessageBox::warning(&dialog, QStringLiteral("ChatGPT sign-in required"),
-                                 QStringLiteral("Sign in to ChatGPT before selecting "
-                                                "the subscription provider."));
-            return;
-        }
-        if ((kind == AiProviderKind::OpenAi || kind == AiProviderKind::Xai) && !apiKey->text().isEmpty()) {
-            const auto name = aiCredentialName(kind);
-            QString error;
-            if (!library_.setCredential(name, apiKey->text(), &error)) {
-                QMessageBox::critical(&dialog, QStringLiteral("Could not store API key"), error);
+        commitHarness();
+        for (const auto &profile : harnessProfiles) {
+            if (profile.name.isEmpty() || profile.executable.isEmpty()) {
+                QMessageBox::warning(&dialog, QStringLiteral("Incomplete harness profile"),
+                                     QStringLiteral("Every external harness profile needs a name and executable."));
                 return;
             }
-            rememberSessionCredential(name, apiKey->text());
         }
+        bool foundDefault = false;
+        for (auto &profile : harnessProfiles) {
+            if (!profile.isDefault) continue;
+            if (foundDefault) profile.isDefault = false;
+            else foundDefault = true;
+        }
+        if (!foundDefault && !harnessProfiles.isEmpty()) harnessProfiles.first().isDefault = true;
         if (!githubToken->text().isEmpty()) {
             QString error;
             if (!library_.setCredential(QStringLiteral("github.token"), githubToken->text(), &error)) {
@@ -1318,20 +1366,11 @@ void MainWindow::showSettings() {
                 return;
             }
             rememberSessionCredential(QStringLiteral("github.token"), githubToken->text());
-            aiSettings_.githubTokenConfigured = true;
+            appSettings_.githubTokenConfigured = true;
         }
 
         LibrarySettings next;
         next.revision = librarySettingsRevision_;
-        next.provider = kind;
-        next.model = kind == AiProviderKind::None ? QString{} : model->currentText().trimmed();
-        next.reasoningEffort = kind == AiProviderKind::None
-                                   ? AiReasoningEffort::ProviderDefault
-                                   : static_cast<AiReasoningEffort>(reasoningEffort->currentData().toInt());
-        next.executionMode = kind == AiProviderKind::None
-                                 ? AiExecutionMode::Standard
-                                 : static_cast<AiExecutionMode>(executionMode->currentData().toInt());
-        next.automaticallyResolve = automatic->isChecked();
         next.updatesEnabled = backgroundEnabled->isChecked();
         next.updatesDaily = schedule->currentIndex() == 0;
         next.weekDay = weekday->currentIndex() + 1;
@@ -1351,20 +1390,23 @@ void MainWindow::showSettings() {
 
         if (!saveCollectedRepo(collectRepoSettings())) return;
 
-        aiSettings_.updates.startAtLogin = startAtLogin->isChecked();
-        aiSettings_.updates.startMinimized = startMinimized->isChecked();
-        aiSettings_.updates.keepInTray = keepInTray->isChecked();
-        if (!settingsStore_.save(aiSettings_, &error) ||
-            !BackgroundUpdateManager::apply(aiSettings_.updates, QCoreApplication::applicationFilePath(), &error)) {
+        appSettings_.updates.startAtLogin = startAtLogin->isChecked();
+        appSettings_.updates.startMinimized = startMinimized->isChecked();
+        appSettings_.updates.keepInTray = keepInTray->isChecked();
+        appSettings_.harnessProfiles = harnessProfiles;
+        if (!settingsStore_.save(appSettings_, &error) ||
+            !BackgroundUpdateManager::apply(appSettings_.updates, QCoreApplication::applicationFilePath(), &error)) {
             QMessageBox::critical(&dialog, QStringLiteral("Could not save this machine's session settings"), error);
             return;
         }
-        const bool runInTray = aiSettings_.updates.keepInTray && QSystemTrayIcon::isSystemTrayAvailable();
+        const bool runInTray = appSettings_.updates.keepInTray && QSystemTrayIcon::isSystemTrayAvailable();
         setKeepRunningInTray(runInTray);
         QApplication::setQuitOnLastWindowClosed(!runInTray);
         static_cast<void>(GuiInstanceServer::requestTray());
         dialog.accept();
     });
+    reloadClientSettings();
+    if (!harnessDirty) replaceHarnessProfiles();
     dialog.exec();
 }
 

@@ -19,7 +19,7 @@ var (
 	hereBinary   = regexp.MustCompile(`\$(?:HERE|APPDIR)/\$\{?BINARY_NAME`)
 )
 
-func analyzeAppImage(path string) (Analysis, error) {
+func analyzeAppImage(path, originalFilename string) (Analysis, error) {
 	unsquashfs, err := exec.LookPath("unsquashfs")
 	if err != nil {
 		return Analysis{}, fmt.Errorf("Type 2 AppImage inspection requires /usr/bin/unsquashfs from Arch's squashfs-tools package")
@@ -52,7 +52,7 @@ func analyzeAppImage(path string) (Analysis, error) {
 
 	var result Analysis
 	result.Type = SourceAppImage
-	inferNameVersion(path, &result.Metadata)
+	inferNameVersion(originalFilename, &result.Metadata)
 	result.Install.ArchiveLayout = LayoutOptBundle
 	result.Install.OptDirectory = result.Metadata.Package
 	result.Install.AppImageOffset = offset
@@ -102,6 +102,10 @@ func analyzeAppImage(path string) (Analysis, error) {
 				return fmt.Errorf("Unsafe AppImage symlink: %s -> %s", payload.Path, targetText)
 			}
 			payload.SymlinkTarget = targetText
+			if payload.Path == "AppRun" && executableAppRunSymlink(directory, full) {
+				payload.Executable = true
+				hasAppRun = true
+			}
 		case mode.IsRegular():
 			payload.Type = "file"
 			payload.Size = info.Size()
@@ -270,6 +274,24 @@ func analyzeAppImage(path string) (Analysis, error) {
 			result.Install.DesktopEntries[i].Contents, command, result.Install.Icon.IconName)
 	}
 	return result, nil
+}
+
+func executableAppRunSymlink(root, appRunPath string) bool {
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(appRunPath)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	info, err := os.Stat(resolved)
+	return err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0
 }
 
 func appImageSquashfsOffset(path string) (int64, error) {

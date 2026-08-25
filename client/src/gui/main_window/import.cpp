@@ -452,31 +452,12 @@ void MainWindow::importPackage(const QString &path) {
                     12000);
                 return;
             }
-            if (aiSettings_.provider == AiProviderKind::None) {
-                showReleaseWorkbenchAtFirstAttention(releaseId);
-                QMessageBox::information(
-                    this, QStringLiteral("Package needs review"),
-                    QStringLiteral("PacSmith found items that need an Arch-specific decision and opened the first section "
-                                   "that needs your attention. Resolve the highlighted items, then continue to PKGBUILD and Build.\n\n"
-                                   "You can also configure an AI provider with the Settings button to resolve supported items automatically."));
-            } else if (aiSettings_.automaticallyResolveReviewItems) {
-                startAiResolution();
-            } else {
-                const auto answer = QMessageBox::question(
-                    this, QStringLiteral("Resolve review items with AI?"),
-                    QStringLiteral("Local deterministic analysis is complete. Send the bounded package evidence bundle "
-                                   "to the configured %1 provider now?\n\n"
-                                   "When the review finishes, PacSmith will open the first remaining step, or Build if the package is ready.")
-                        .arg(aiProviderName(aiSettings_.provider)));
-                if (answer == QMessageBox::Yes) {
-                    startAiResolution();
-                } else {
-                    showReleaseWorkbenchAtFirstAttention(releaseId);
-                    statusBar()->showMessage(
-                        QStringLiteral("AI review skipped. Resolve the highlighted items, then continue to Build."),
-                        12000);
-                }
-            }
+            showReleaseWorkbenchAtFirstAttention(releaseId);
+            QMessageBox::information(
+                this, QStringLiteral("Package needs review"),
+                QStringLiteral("PacSmith found items that need an Arch-specific decision and opened the first section "
+                               "that needs your attention. Resolve the highlighted items, then continue to PKGBUILD and Build.\n\n"
+                               "Use Ask AI to launch your configured external harness with this project and release context."));
         });
     });
     connect(worker, &ImportWorker::completed, thread, &QThread::quit);
@@ -548,14 +529,7 @@ void MainWindow::beginGitHubImport(const QUrl &url) {
             downloadGitHubAsset(probe, result);
             return;
         }
-        const auto rule = chooseGitHubAssetRule(
-            this, result.availableAssets, false,
-            [this, probe](const QStringList &assets, const QString &preferred,
-                          QLineEdit *editor, QLabel *status, QPushButton *button,
-                          QWidget *dialog) {
-                startGitHubChooserAi(probe, assets, preferred, editor, status, button,
-                                     dialog);
-            });
+        const auto rule = chooseGitHubAssetRule(this, result.availableAssets, false);
         if (!rule) return;
         continueGitHubImport(owner, repository, rule->expression,
                              rule->includePrereleases, requestedTag);
@@ -602,135 +576,6 @@ void MainWindow::continueGitHubImport(const QString &owner, const QString &repos
         token.fill(QChar::Null);
     });
     token.fill(QChar::Null);
-}
-
-void MainWindow::startGitHubChooserAi(const PackageRelease &probe,
-                                      const QStringList &assets,
-                                      const QString &preferredAsset,
-                                      QLineEdit *editor, QLabel *status,
-                                      QPushButton *button, QWidget *dialog) {
-    if (editor == nullptr || status == nullptr || button == nullptr || dialog == nullptr) return;
-    if (aiSettings_.provider == AiProviderKind::None || aiSettings_.model.trimmed().isEmpty()) {
-        QMessageBox::information(
-            dialog, QStringLiteral("Configure AI"),
-            QStringLiteral("Choose an AI provider and model with the Settings button, then use Generate with AI again."));
-        showSettings();
-        return;
-    }
-
-    QString error;
-    const auto job = library_.startGitHubAssetAi(probe.update.githubOwner,
-                                                 probe.update.githubRepository, assets,
-                                                 preferredAsset, &error);
-    if (!job || job->id.isEmpty()) {
-        QMessageBox::critical(dialog, QStringLiteral("AI review could not start"), error);
-        return;
-    }
-
-    auto *progress = new AiProgressDialog(aiSettings_, dialog);
-    progress->setWindowTitle(QStringLiteral("Generating GitHub Asset Rule"));
-    button->setEnabled(false);
-    progress->show();
-    progress->setStatus(QStringLiteral("Library daemon is running the AI review…"));
-    progress->appendActivity(
-        QStringLiteral("The provider call runs on pacsmithd; only asset names are sent."));
-
-    const auto jobId = job->id;
-    auto *canceled = new bool(false);
-    auto *logAfter = new qint64(0);
-    auto *timer = new QTimer(progress);
-    connect(progress, &QDialog::rejected, progress, [this, jobId, canceled, button] {
-        *canceled = true;
-        QString cancelError;
-        static_cast<void>(library_.cancelJob(jobId, &cancelError));
-        button->setEnabled(true);
-    });
-    connect(timer, &QTimer::timeout, progress,
-            [this, jobId, canceled, logAfter, timer, progress, editor, status, button, dialog,
-             assets, preferredAsset] {
-        QString pollError;
-        const auto current = library_.getJob(jobId, &pollError);
-        if (!current) return;
-        qint64 next = *logAfter;
-        const auto chunk = library_.jobLog(jobId, *logAfter, &next, nullptr);
-        *logAfter = next;
-        if (!chunk.isEmpty()) {
-            for (const auto &line : chunk.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
-                progress->appendActivity(line);
-                progress->setStatus(line);
-            }
-        }
-        if (current->status != QStringLiteral("succeeded") &&
-            current->status != QStringLiteral("failed") &&
-            current->status != QStringLiteral("interrupted")) {
-            return;
-        }
-        timer->stop();
-        button->setEnabled(true);
-        if (*canceled || current->status == QStringLiteral("interrupted")) {
-            progress->close();
-            progress->deleteLater();
-            return;
-        }
-        auto resolution = aiResolutionFromJson(current->result);
-        if (!resolution.success && resolution.error.isEmpty()) {
-            resolution.error = current->error.isEmpty()
-                                   ? QStringLiteral("AI review failed")
-                                   : current->error;
-        }
-        if (!resolution.success) {
-            progress->showFailure(resolution.error, resolution.errorDetails);
-            return;
-        }
-        progress->close();
-        progress->deleteLater();
-        const auto rule = std::find_if(
-            resolution.changes.cbegin(), resolution.changes.cend(),
-            [](const auto &change) {
-                return change.field == QStringLiteral("update.githubAssetRegex");
-            });
-        if (rule == resolution.changes.cend() || resolution.changes.size() != 1) {
-            QMessageBox::warning(
-                dialog, QStringLiteral("AI returned an invalid asset rule"),
-                QStringLiteral("Expected exactly one update.githubAssetRegex change; nothing was applied."));
-            return;
-        }
-        const auto text = rule->value.trimmed();
-        const QRegularExpression expression(text);
-        QStringList matches;
-        if (expression.isValid() && !text.isEmpty() && text.size() <= 512) {
-            for (const auto &asset : assets) {
-                const auto match = expression.match(asset);
-                if (match.hasMatch() && match.capturedLength() == asset.size()) {
-                    matches.append(asset);
-                }
-            }
-        }
-        const bool preferredMatched = preferredAsset.isEmpty() ||
-            (matches.size() == 1 && matches.first() == preferredAsset);
-        if (!expression.isValid() || text.isEmpty() || text.size() > 512 ||
-            matches.size() != 1 || !preferredMatched) {
-            QMessageBox::warning(
-                dialog, QStringLiteral("AI asset rule rejected"),
-                QStringLiteral("The generated expression must full-match exactly one available asset%1. It matched %2 asset(s) and was not applied.\n\n/%3/")
-                    .arg(preferredAsset.isEmpty()
-                             ? QString{}
-                             : QStringLiteral("—the selected artifact"))
-                    .arg(matches.size())
-                    .arg(text));
-            return;
-        }
-        editor->setText(text);
-        editor->setFocus();
-        status->setText(
-            QStringLiteral("AI selected %1. Review the persistent update rule before continuing.\n%2")
-                .arg(matches.first(), rule->rationale));
-    });
-    connect(progress, &QObject::destroyed, progress, [canceled, logAfter] {
-        delete canceled;
-        delete logAfter;
-    });
-    timer->start(100);
 }
 
 void MainWindow::downloadGitHubAsset(const PackageRelease &probe,

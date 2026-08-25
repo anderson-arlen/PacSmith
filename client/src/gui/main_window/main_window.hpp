@@ -1,9 +1,7 @@
 #pragma once
 
 #include "core/apt_update_service.hpp"
-#include "core/ai_service.hpp"
 #include "core/app_settings.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/credential_store.hpp"
 #include "core/deb_download_service.hpp"
 #include "core/github_update_service.hpp"
@@ -27,6 +25,7 @@ class QDragEnterEvent;
 class QDropEvent;
 class QFormLayout;
 class QFrame;
+class QFileSystemWatcher;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -47,7 +46,6 @@ class QWidget;
 
 namespace pacsmith::gui {
 
-class AiProgressDialog;
 class CommandProgressDialog;
 
 class MainWindow final : public QMainWindow {
@@ -62,6 +60,9 @@ public:
     void reloadVisibleProjects(bool refreshOpenProject = true);
     void noteBackgroundCheckStarted();
 
+signals:
+    void clientSettingsReloaded();
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
@@ -74,6 +75,7 @@ private:
         SourceScripts,
         SourceContents,
         ConfigPkgbuild,
+        ConfigMetadata,
         ConfigLayout,
         ConfigDependencies,
         ConfigScripts,
@@ -101,6 +103,7 @@ private:
     QWidget *createSourceOverviewPage();
     QWidget *createSourceMetadataPage();
     QWidget *createInstallLayoutPage();
+    QWidget *createPackageMetadataPage();
     QWidget *createInstallPlanPage();
     QWidget *createDependenciesPage();
     QWidget *createVendorScriptsPage();
@@ -179,8 +182,6 @@ private:
     void populateDependencies();
     void loadRepositoryPackageCatalog();
     void scheduleRepositoryPackageValidation(const QStringList &packages);
-    void validateAndApplyAiResolution(const AiResolution &resolution);
-    void finishAiResolution(const AiResolution &resolution);
     void populateScripts();
     void updateSelectedScript();
     void acknowledgeSelectedScript();
@@ -220,6 +221,10 @@ private:
     void clearSelectedPayloadDecision();
     void loadSelectedPayloadPreview(const QString &path);
     void populatePkgbuild();
+    void populatePackageMetadata();
+    void savePackageMetadata();
+    void addAdditionalDependency();
+    void removeAdditionalDependency();
     void populateUpdates();
     void populateRepository();
     void populateBuild();
@@ -272,26 +277,16 @@ private:
                               const QString &requestedTag = {});
     void downloadGitHubAsset(const PackageRelease &probe,
                              const UpdateCheckResult &result);
-    void startGitHubChooserAi(const PackageRelease &probe, const QStringList &assets,
-                              const QString &preferredAsset, QLineEdit *editor,
-                              QLabel *status, QPushButton *button, QWidget *dialog);
     [[nodiscard]] QString selectedDashboardReleaseId() const;
     void showSettings();
     void showConnectionDialog();
     void refreshConnectionStatus();
     void applyLibrarySettings(const LibrarySettings &settings);
+    void reloadClientSettings();
     [[nodiscard]] QString sessionCredential(const QString &name) const;
     void rememberSessionCredential(const QString &name, const QString &value);
     void startReanalysis();
-    void startAiResolution();
-    void startGithubRegexAi();
-    void applyGithubRegexAi(const AiResolution &resolution);
-    void applyAiResolution(const AiResolution &resolution);
-    [[nodiscard]] bool aiInProgress() const;
-    void beginAiJob(const JobStatus &job);
-    void pollAiJob();
-    void finishAiJob();
-    void cancelRemoteAi();
+    void askExternalHarness();
     bool unlockAgeCredentials();
     void importSigningKey();
     void downloadSigningKey();
@@ -303,8 +298,10 @@ private:
 
     LibraryClient library_;
     AppSettingsStore &settingsStore_;
-    AiSettings aiSettings_;
+    AppSettings appSettings_;
     qint64 librarySettingsRevision_{1};
+    QFileSystemWatcher *clientSettingsWatcher_{nullptr};
+    QTimer *clientSettingsReloadTimer_{nullptr};
     QHash<QString, QString> sessionCredentials_;
     CredentialStore &credentialStore_;
     std::optional<Project> project_;
@@ -326,10 +323,6 @@ private:
     AptUpdateService *aptUpdateService_{nullptr};
     RpmUpdateService *rpmUpdateService_{nullptr};
     GitHubUpdateService *githubUpdateService_{nullptr};
-    ChatGptLoginService chatGptLoginService_;
-    QString aiJobId_;
-    qint64 aiLogAfter_{0};
-    QTimer *aiPollTimer_{nullptr};
     bool keepRunningInTray_{false};
     bool populating_{false};
     bool switchingConfigurationMode_{false};
@@ -348,13 +341,7 @@ private:
     int preparationSpinnerFrame_{0};
     bool updateCheckStatusActive_{false};
     QElapsedTimer lastPreparationPublish_;
-    AiProgressDialog *aiProgress_{nullptr};
     CommandProgressDialog *commandProgress_{nullptr};
-    bool aiProgressCanceled_{false};
-    bool githubRegexAiPending_{false};
-    QString githubRegexAiReleaseId_;
-    QStringList githubRegexAiAssets_;
-    QString githubRegexAiPreferredAsset_;
     QStringList repositoryPackageNames_;
     QSet<QString> repositoryPackages_;
     QHash<QString, bool> repositoryDependencyAvailability_;
@@ -428,7 +415,16 @@ private:
     QLineEdit *installBinaryDestination_{nullptr};
     QLineEdit *installCommonPrefix_{nullptr};
     QCheckBox *installStripPrefix_{nullptr};
+    QLineEdit *packageDisplayName_{nullptr};
+    QLineEdit *packageArchName_{nullptr};
+    QLineEdit *packageVendorName_{nullptr};
+    QLineEdit *packageDescription_{nullptr};
+    QLineEdit *packageHomepage_{nullptr};
+    QLineEdit *packageLicenses_{nullptr};
+    QLineEdit *packageProvides_{nullptr};
+    QLineEdit *packageConflicts_{nullptr};
     QTableWidget *dependenciesTable_{nullptr};
+    QListWidget *additionalDependencies_{nullptr};
     QListWidget *scriptsList_{nullptr};
     QPlainTextEdit *scriptView_{nullptr};
     QLabel *scriptsActionNotice_{nullptr};
@@ -443,7 +439,7 @@ private:
     QPushButton *acknowledgeLifecycleButton_{nullptr};
     QPushButton *discardLifecycleButton_{nullptr};
     bool lifecycleEditing_{false};
-    QPushButton *resolveWithAiButton_{nullptr};
+    QPushButton *askAiButton_{nullptr};
     QPushButton *reanalyzeButton_{nullptr};
     QTreeWidget *payloadTree_{nullptr};
     QLabel *payloadIntroduction_{nullptr};
@@ -496,7 +492,6 @@ private:
     QLineEdit *githubOwner_{nullptr};
     QLineEdit *githubRepository_{nullptr};
     QLineEdit *githubAssetRegex_{nullptr};
-    QPushButton *githubRegexAiButton_{nullptr};
     QCheckBox *githubPrereleases_{nullptr};
     QListWidget *updateCandidates_{nullptr};
     QLabel *updateNotice_{nullptr};

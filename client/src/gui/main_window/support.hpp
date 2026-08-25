@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/ai_service.hpp"
 #include "core/background_updates.hpp"
 #include "core/model.hpp"
 #include "core/library_client.hpp"
@@ -69,11 +68,6 @@ constexpr int sectionBaseLabelRole = Qt::UserRole + 1;
 
 enum class ProjectVisualState { NotInstalled, Current, UpdateAvailable, Attention, Preparing };
 
-struct AiDependencyCandidate {
-    int index{-1};
-    QString package;
-};
-
 struct GitHubRuleChoice {
     QString expression;
     bool includePrereleases{false};
@@ -92,9 +86,6 @@ struct RepositoryKeySeed {
     QString source;
 };
 
-using GitHubAiAssist = std::function<void(const QStringList &, const QString &,
-                                          QLineEdit *, QLabel *, QPushButton *, QWidget *)>;
-
 inline const QColor payloadReviewAmber(Qt::darkYellow);
 inline const QColor payloadUnsafeRed(0xe5, 0x53, 0x4b);
 
@@ -106,8 +97,6 @@ bool requiresRepositoryPackage(const DependencyMapping &dependency);
 bool repositoryPackageUnavailable(const DependencyMapping &dependency,
                                   const QHash<QString, bool> &availability);
 bool payloadRuleCovers(const PayloadRule &rule, const QString &path);
-QList<AiDependencyCandidate> requiredAiDependencyCandidates(
-    const PackageRelease &release, const AiResolution &resolution);
 QString repositoryArchitecture(bool apt);
 QList<RepositoryKeySeed> knownRepositoryKeys(const QHash<QString, Project> &projects,
                                              const LibraryClient &library);
@@ -117,14 +106,11 @@ QString suggestedAssetRegex(const QString &asset);
 bool isGitHubSidecarAsset(const QString &asset);
 int githubArtifactPreference(const QString &asset);
 std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
-    QWidget *parent, const QStringList &assets, bool includePrereleases,
-    const GitHubAiAssist &aiAssist);
+    QWidget *parent, const QStringList &assets, bool includePrereleases);
 QString formatLocalDateTime(const QDateTime &value);
 QWidget *emptyPageHost(QWidget *parent);
 QString sourcePackageTypeTitle(SourcePackageType type);
 QString acquisitionKindTitle(AcquisitionKind kind);
-QString reasoningEffortLabel(AiReasoningEffort effort);
-QList<AiReasoningEffort> supportedReasoningEfforts(AiProviderKind provider, const QString &model);
 void makeReadOnlyCodeEditor(QPlainTextEdit *editor);
 void configureIdentityVariablesEditor(QPlainTextEdit *editor);
 QTreeWidgetItem *ensureInstallPlanNode(QTreeWidget *tree, QHash<QString, QTreeWidgetItem *> *nodes,
@@ -137,7 +123,6 @@ void showDetailedMessageDialog(QWidget *parent, const QString &title, const QStr
                                const QString &diagnosticDetails,
                                QStyle::StandardPixmap iconType,
                                bool showDetailsInitially = false);
-void showAiErrorDialog(QWidget *parent, const AiResolution &resolution);
 QString projectDirectory(const LibraryClient &library, const Project &project);
 QIcon projectIcon(const LibraryClient &library, const Project &project);
 QString retainedPackagePath(const LibraryClient &library, const PackageRelease &release);

@@ -14,18 +14,28 @@ func carryForwardRelease(previous, next map[string]any) {
 		return
 	}
 	carryDependencies(previous, next)
+	if metadata, ok := mapValue(previous, "packageMetadata"); ok {
+		next["packageMetadata"] = cloneObject(metadata)
+	}
 	carryMaintainerScripts(previous, next)
 	carryScriptFindings(previous, next)
 	carryPayloadRules(previous, next)
 	carryLifecycle(previous, next)
 	carryInstallMapping(previous, next)
 	if boolValue(previous, "pkgbuildManuallyModified") {
-		if custom := stringValue(previous, "customPkgbuild"); custom != "" {
-			next["previousManualPkgbuild"] = custom
-		} else if generated := stringValue(previous, "generatedPkgbuild"); generated != "" {
-			next["previousManualPkgbuild"] = generated
+		custom := stringValue(previous, "customPkgbuild")
+		if custom == "" {
+			custom = stringValue(previous, "generatedPkgbuild")
+		}
+		if custom != "" {
+			next["customPkgbuild"] = custom
+			next["pkgbuildManuallyModified"] = true
+		}
+		if files, ok := mapValue(previous, "customFiles"); ok {
+			next["customFiles"] = cloneObject(files)
 		}
 	}
+	delete(next, "previousManualPkgbuild")
 }
 
 func inheritUpdateConfiguration(previous, next map[string]any) {

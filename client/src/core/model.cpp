@@ -92,6 +92,16 @@ QStringList stringsFromJson(const QJsonValue &value) {
     return result;
 }
 
+QStringList splitMetadataField(const QString &value) {
+    QStringList result;
+    for (const auto &part : value.split(QRegularExpression(QStringLiteral("[,\\n]")),
+                                       Qt::SkipEmptyParts)) {
+        const auto item = part.trimmed();
+        if (!item.isEmpty() && !result.contains(item)) result.append(item);
+    }
+    return result;
+}
+
 } // namespace
 
 QJsonObject FieldProvenance::toJson() const {
@@ -147,6 +157,28 @@ DebianMetadata DebianMetadata::fromJson(const QJsonObject &object) {
     result.conflicts = object.value(QStringLiteral("conflicts")).toString();
     result.provides = object.value(QStringLiteral("provides")).toString();
     result.rawFields = stringMapFromJson(object.value(QStringLiteral("rawFields")).toObject());
+    return result;
+}
+
+QJsonObject PackageMetadata::toJson() const {
+    return {{QStringLiteral("description"), description},
+            {QStringLiteral("homepage"), homepage},
+            {QStringLiteral("licenses"), stringsToJson(licenses)},
+            {QStringLiteral("provides"), stringsToJson(provides)},
+            {QStringLiteral("conflicts"), stringsToJson(conflicts)},
+            {QStringLiteral("additionalDependencies"),
+             stringsToJson(additionalDependencies)}};
+}
+
+PackageMetadata PackageMetadata::fromJson(const QJsonObject &object) {
+    PackageMetadata result;
+    result.description = object.value(QStringLiteral("description")).toString();
+    result.homepage = object.value(QStringLiteral("homepage")).toString();
+    result.licenses = stringsFromJson(object.value(QStringLiteral("licenses")));
+    result.provides = stringsFromJson(object.value(QStringLiteral("provides")));
+    result.conflicts = stringsFromJson(object.value(QStringLiteral("conflicts")));
+    result.additionalDependencies =
+        stringsFromJson(object.value(QStringLiteral("additionalDependencies")));
     return result;
 }
 
@@ -891,6 +923,10 @@ BuildRecord BuildRecord::fromJson(const QJsonObject &object) {
 }
 
 QJsonObject PackageRelease::toJson() const {
+    QJsonObject customFilesObject;
+    for (auto iterator = customFiles.cbegin(); iterator != customFiles.cend(); ++iterator) {
+        customFilesObject.insert(iterator.key(), iterator.value());
+    }
     return {{QStringLiteral("formatVersion"), formatVersion},
             {QStringLiteral("revision"), revision},
             {QStringLiteral("id"), id},
@@ -910,6 +946,7 @@ QJsonObject PackageRelease::toJson() const {
             {QStringLiteral("archPkgrel"), archPkgrel},
             {QStringLiteral("archPkgrelOverride"), archPkgrelOverride},
             {QStringLiteral("debian"), debian.toJson()},
+            {QStringLiteral("packageMetadata"), packageMetadata.toJson()},
             {QStringLiteral("dependencies"), valueListToJson(dependencies)},
             {QStringLiteral("maintainerScripts"), valueListToJson(maintainerScripts)},
             {QStringLiteral("scriptFindings"), valueListToJson(scriptFindings)},
@@ -919,7 +956,7 @@ QJsonObject PackageRelease::toJson() const {
             {QStringLiteral("generatedPkgbuildSha256"), generatedPkgbuildSha256},
             {QStringLiteral("pkgbuildManuallyModified"), pkgbuildManuallyModified},
             {QStringLiteral("customPkgbuild"), customPkgbuild},
-            {QStringLiteral("previousManualPkgbuild"), previousManualPkgbuild},
+            {QStringLiteral("customFiles"), customFilesObject},
             {QStringLiteral("lifecycleScript"), lifecycleScript.toJson()},
             {QStringLiteral("fieldProvenance"), provenanceMapToJson(fieldProvenance)},
             {QStringLiteral("aiChanges"), valueListToJson(aiChanges)},
@@ -955,6 +992,16 @@ PackageRelease PackageRelease::fromJson(const QJsonObject &object) {
     result.archPkgrel = std::max(1, object.value(QStringLiteral("archPkgrel")).toInt(1));
     result.archPkgrelOverride = object.value(QStringLiteral("archPkgrelOverride")).toString();
     result.debian = DebianMetadata::fromJson(object.value(QStringLiteral("debian")).toObject());
+    if (object.contains(QStringLiteral("packageMetadata"))) {
+        result.packageMetadata = PackageMetadata::fromJson(
+            object.value(QStringLiteral("packageMetadata")).toObject());
+    } else {
+        result.packageMetadata.description = result.debian.description;
+        result.packageMetadata.homepage = result.debian.homepage;
+        result.packageMetadata.licenses = {QStringLiteral("custom:vendor")};
+        result.packageMetadata.provides = splitMetadataField(result.debian.provides);
+        result.packageMetadata.conflicts = splitMetadataField(result.debian.conflicts);
+    }
     result.dependencies = valueListFromJson<DependencyMapping>(object.value(QStringLiteral("dependencies")));
     result.maintainerScripts = valueListFromJson<MaintainerScript>(object.value(QStringLiteral("maintainerScripts")));
     result.scriptFindings = valueListFromJson<ScriptFinding>(object.value(QStringLiteral("scriptFindings")));
@@ -964,7 +1011,10 @@ PackageRelease PackageRelease::fromJson(const QJsonObject &object) {
     result.generatedPkgbuildSha256 = object.value(QStringLiteral("generatedPkgbuildSha256")).toString();
     result.pkgbuildManuallyModified = object.value(QStringLiteral("pkgbuildManuallyModified")).toBool();
     result.customPkgbuild = object.value(QStringLiteral("customPkgbuild")).toString();
-    result.previousManualPkgbuild = object.value(QStringLiteral("previousManualPkgbuild")).toString();
+    const auto customFiles = object.value(QStringLiteral("customFiles")).toObject();
+    for (auto iterator = customFiles.constBegin(); iterator != customFiles.constEnd(); ++iterator) {
+        if (iterator.value().isString()) result.customFiles.insert(iterator.key(), iterator.value().toString());
+    }
     result.lifecycleScript = ArchLifecycleScript::fromJson(object.value(QStringLiteral("lifecycleScript")).toObject());
     result.lifecycleScript.bindRequiredFindings(result.scriptFindings);
     result.fieldProvenance = provenanceMapFromJson(object.value(QStringLiteral("fieldProvenance")).toObject());

@@ -305,6 +305,61 @@ QWidget *MainWindow::createDependenciesPage() {
     dependenciesTable_->setItemDelegateForColumn(1, new PackageNameDelegate(dependenciesTable_));
     connect(dependenciesTable_, &QTableWidget::cellChanged, this, &MainWindow::dependencyEdited);
     layout->addWidget(dependenciesTable_, 1);
+
+    auto *additional = new QGroupBox(QStringLiteral("Additional Arch runtime dependencies"), page);
+    auto *additionalLayout = new QVBoxLayout(additional);
+    auto *additionalHelp = new QLabel(QStringLiteral(
+        "Add an official Arch package only when static inspection or upstream documentation shows that the installed application requires it and the vendor payload does not bundle it."),
+        additional);
+    additionalHelp->setWordWrap(true);
+    additionalLayout->addWidget(additionalHelp);
+    additionalDependencies_ = new QListWidget(additional);
+    additionalDependencies_->setSelectionMode(QAbstractItemView::SingleSelection);
+    additionalLayout->addWidget(additionalDependencies_);
+    auto *buttons = new QHBoxLayout;
+    auto *add = new QPushButton(QStringLiteral("Add dependency…"), additional);
+    auto *remove = new QPushButton(QStringLiteral("Remove selected"), additional);
+    buttons->addWidget(add);
+    buttons->addWidget(remove);
+    buttons->addStretch(1);
+    additionalLayout->addLayout(buttons);
+    connect(add, &QPushButton::clicked, this, &MainWindow::addAdditionalDependency);
+    connect(remove, &QPushButton::clicked, this, &MainWindow::removeAdditionalDependency);
+    layout->addWidget(additional);
+    return page;
+}
+
+QWidget *MainWindow::createPackageMetadataPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(pageIntroduction(
+        QStringLiteral("Maintain the metadata published in the generated Arch package."), page,
+        QStringLiteral("Description, homepage, and license describe this package. Provides/conflicts are optional compatibility relationships; do not infer them merely from a -bin suffix. These values are ordinary Guided controls and are also available to external agents through MCP.")));
+    auto *form = new QFormLayout;
+    packageDisplayName_ = new QLineEdit(page);
+    packageArchName_ = new QLineEdit(page);
+    packageVendorName_ = new QLineEdit(page);
+    packageDescription_ = new QLineEdit(page);
+    packageHomepage_ = new QLineEdit(page);
+    packageLicenses_ = new QLineEdit(page);
+    packageLicenses_->setPlaceholderText(QStringLiteral("SPDX expression, or custom:vendor"));
+    packageProvides_ = new QLineEdit(page);
+    packageProvides_->setPlaceholderText(QStringLiteral("Comma-separated package or virtual names"));
+    packageConflicts_ = new QLineEdit(page);
+    packageConflicts_->setPlaceholderText(QStringLiteral("Comma-separated package names"));
+    form->addRow(QStringLiteral("Display name"), packageDisplayName_);
+    form->addRow(QStringLiteral("Arch package name"), packageArchName_);
+    form->addRow(QStringLiteral("Vendor / maintainer"), packageVendorName_);
+    form->addRow(QStringLiteral("Description"), packageDescription_);
+    form->addRow(QStringLiteral("Homepage"), packageHomepage_);
+    form->addRow(QStringLiteral("License(s)"), packageLicenses_);
+    form->addRow(QStringLiteral("Provides"), packageProvides_);
+    form->addRow(QStringLiteral("Conflicts"), packageConflicts_);
+    layout->addLayout(form);
+    auto *save = new QPushButton(QStringLiteral("Save package metadata"), page);
+    connect(save, &QPushButton::clicked, this, &MainWindow::savePackageMetadata);
+    layout->addWidget(save, 0, Qt::AlignLeft);
+    layout->addStretch(1);
     return page;
 }
 
@@ -828,12 +883,6 @@ QWidget *MainWindow::createUpdatesPage() {
     githubAssetRegex_ = new QLineEdit(page);
     githubAssetRegex_->setPlaceholderText(
         QStringLiteral("Exactly one full asset name must match, e.g. app-.*-linux-amd64\\.tar\\.gz"));
-    auto *githubRegexRow = new QWidget(page);
-    auto *githubRegexLayout = new QHBoxLayout(githubRegexRow);
-    githubRegexLayout->setContentsMargins(0, 0, 0, 0);
-    githubRegexAiButton_ = new QPushButton(QStringLiteral("Generate with AI…"), githubRegexRow);
-    githubRegexLayout->addWidget(githubAssetRegex_, 1);
-    githubRegexLayout->addWidget(githubRegexAiButton_);
     githubPrereleases_ = new QCheckBox(
         QStringLiteral("Track prereleases even after a stable release exists"), page);
     githubPrereleases_->setToolTip(QStringLiteral(
@@ -855,7 +904,7 @@ QWidget *MainWindow::createUpdatesPage() {
     form->addRow(QStringLiteral("Pinned fingerprint"), aptSigningFingerprint_);
     form->addRow(QStringLiteral("GitHub owner"), githubOwner_);
     form->addRow(QStringLiteral("GitHub repository"), githubRepository_);
-    form->addRow(QStringLiteral("Asset-name regex"), githubRegexRow);
+    form->addRow(QStringLiteral("Asset-name regex"), githubAssetRegex_);
     form->addRow(QString{}, githubPrereleases_);
     updateNotice_ = new QLabel(page);
     updateNotice_->setWordWrap(true);
@@ -876,7 +925,6 @@ QWidget *MainWindow::createUpdatesPage() {
     layout->addWidget(updateCheckStatus_);
     connect(updateSaveButton_, &QPushButton::clicked, this, &MainWindow::saveUpdateConfiguration);
     connect(updateCheckButton_, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
-    connect(githubRegexAiButton_, &QPushButton::clicked, this, &MainWindow::startGithubRegexAi);
     connect(keyringBrowse, &QPushButton::clicked, this, &MainWindow::importSigningKey);
     connect(aptSigningKeyDownloadButton_, &QPushButton::clicked,
             this, &MainWindow::downloadSigningKey);
@@ -926,7 +974,7 @@ QWidget *MainWindow::createUpdatesPage() {
         aptSigningKeyUrl_->setText(isAcceptableRepositoryKeyUrl(sourceUrl)
                                        ? sourceUrl.toString() : QString{});
     });
-    const auto updateStrategyUi = [this, form, keyringRow, keyUrlRow, githubRegexRow](const int index) {
+    const auto updateStrategyUi = [this, form, keyringRow, keyUrlRow](const int index) {
         const bool hasRelease = updateEditorRelease() != nullptr;
         const bool apt = index == 2;
         const bool rpm = index == 3;
@@ -958,15 +1006,12 @@ QWidget *MainWindow::createUpdatesPage() {
         keyringRow->setEnabled(hasRelease && repository);
         form->setRowVisible(githubOwner_, github);
         form->setRowVisible(githubRepository_, github);
-        form->setRowVisible(githubRegexRow, github);
+        form->setRowVisible(githubAssetRegex_, github);
         form->setRowVisible(githubPrereleases_, github);
         githubOwner_->setEnabled(hasRelease && github);
         githubRepository_->setEnabled(hasRelease && github);
-        githubRegexRow->setEnabled(hasRelease && github);
+        githubAssetRegex_->setEnabled(hasRelease && github);
         githubPrereleases_->setEnabled(hasRelease && github);
-        githubRegexAiButton_->setEnabled(hasRelease && github &&
-                                         aiSettings_.provider != AiProviderKind::None &&
-                                         !aiInProgress());
         updateSaveButton_->setEnabled(hasRelease);
         syncUpdateCheckButtons();
         updateNotice_->setText(index == 0 ? QStringLiteral("Manual updates: PacSmith will not query the network.")

@@ -102,24 +102,35 @@ func archiveSuffix(diagnostic string) string {
 }
 
 func Analyze(path string) (Analysis, error) {
+	return AnalyzeArtifact(path, filepath.Base(path))
+}
+
+// AnalyzeArtifact inspects content at path while using originalFilename for
+// identity derived from names. Artifact storage is content-addressed, so path's
+// basename is commonly a SHA-256 digest rather than the vendor's filename.
+func AnalyzeArtifact(path, originalFilename string) (Analysis, error) {
 	sourceType, err := Detect(path)
 	if err != nil {
 		return Analysis{}, err
+	}
+	originalFilename = filepath.Base(strings.TrimSpace(originalFilename))
+	if originalFilename == "" || originalFilename == "." {
+		originalFilename = filepath.Base(path)
 	}
 	var analysis Analysis
 	switch sourceType {
 	case SourceDebian:
 		analysis, err = analyzeDEB(path)
 	case SourceAppImage:
-		analysis, err = analyzeAppImage(path)
+		analysis, err = analyzeAppImage(path, originalFilename)
 	case SourceELF:
-		analysis, err = analyzeELF(path)
+		analysis, err = analyzeELF(path, originalFilename)
 	case SourceRPM:
 		analysis, err = analyzeRPM(path)
 	case SourceArchPackage:
-		analysis, err = analyzeArchive(path, true)
+		analysis, err = analyzeArchive(path, originalFilename, true)
 	default:
-		analysis, err = analyzeArchive(path, false)
+		analysis, err = analyzeArchive(path, originalFilename, false)
 	}
 	if err != nil {
 		return Analysis{}, err

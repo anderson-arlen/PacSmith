@@ -974,6 +974,9 @@ void MainWindow::populateCurrentWorkbenchPage() {
     case EditorSection::ConfigLayout:
         populatePackage();
         break;
+    case EditorSection::ConfigMetadata:
+        populatePackageMetadata();
+        break;
     case EditorSection::ResultInstallPlan:
         populateInstallPlan();
         break;
@@ -1026,8 +1029,7 @@ void MainWindow::updateDeleteButton() {
     }
     const bool busy = buildInProgress() || installService_.isRunning() ||
                       aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
-                      githubUpdateService_->isRunning() ||
-                      aiInProgress() || debDownloadService_->isRunning() ||
+                      githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
                       importThread_ != nullptr;
     if (reanalyzeButton_ != nullptr) {
         reanalyzeButton_->setEnabled(currentRelease() != nullptr &&
@@ -1059,8 +1061,7 @@ void MainWindow::deleteCurrentProject() {
     }
     if (buildInProgress() || installService_.isRunning() ||
         aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
-        githubUpdateService_->isRunning() ||
-        aiInProgress() || debDownloadService_->isRunning() ||
+        githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
         importThread_ != nullptr) {
         QMessageBox::warning(this, QStringLiteral("Project is busy"),
                              QStringLiteral("Wait for the current operation to finish before deleting the project."));
@@ -1250,7 +1251,7 @@ void MainWindow::populateOverview() {
                       : !currentRelease()->lifecycleScript.validationPassed
                           ? QStringLiteral("⚠ Generated lifecycle script failed validation")
                       : currentRelease()->lifecycleScript.requiresAcknowledgement()
-                          ? QStringLiteral("⚠ AI-generated lifecycle script requires exact-content acknowledgement")
+                          ? QStringLiteral("⚠ Lifecycle script requires exact-content acknowledgement")
                           : QStringLiteral("✓ Generated lifecycle script acknowledged"),
                       QStringLiteral("✓ PKGBUILD present"),
                       currentRelease()->update.strategy == UpdateStrategy::Manual
@@ -1276,8 +1277,7 @@ void MainWindow::populateOverview() {
     overviewChecklist_->setText(QStringLiteral("<b>Selected release %1</b><br>%2")
                                     .arg(currentRelease()->debian.version.toHtmlEscaped(),
                                          lines.join(QStringLiteral("<br>"))));
-    resolveWithAiButton_->setEnabled(!aiInProgress() &&
-                                     currentRelease()->state != ReleaseState::Discovered);
+    askAiButton_->setEnabled(currentRelease()->state != ReleaseState::Discovered);
     updateDashboardActions();
     tableBlocker.unblock();
     if (selectedRow >= 0) emit releaseTable_->itemSelectionChanged();

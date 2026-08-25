@@ -1,7 +1,5 @@
 #include "core_tests.hpp"
 
-#include "core/ai_service.hpp"
-#include "core/ai_model_catalog_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/apt_repository.hpp"
@@ -9,7 +7,6 @@
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
 #include "core/credential_store.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/github_update_service.hpp"
@@ -269,7 +266,6 @@ void CoreTests::reanalyzesReleaseFromBlankPackageSetup() {
     release.lifecycleScript.contents = QStringLiteral("post_install() { /usr/bin/true; }\n");
     release.pkgbuildManuallyModified = true;
     release.generatedPkgbuild = QStringLiteral("# stale generated recipe\n");
-    release.previousManualPkgbuild = QStringLiteral("# user-owned recipe\n");
     release.update.strategy = pacsmith::UpdateStrategy::DirectUrl;
     release.update.url = QStringLiteral("https://vendor.example/releases/latest.tar");
     release.buildStatus = pacsmith::BuildStatus::Succeeded;
@@ -308,7 +304,6 @@ void CoreTests::reanalyzesReleaseFromBlankPackageSetup() {
     QVERIFY(reset->dependencies.isEmpty());
     QVERIFY(reset->lifecycleScript.contents.isEmpty());
     QVERIFY(!reset->pkgbuildManuallyModified);
-    QVERIFY(reset->previousManualPkgbuild.isEmpty());
     QCOMPARE(reset->update.url,
              QStringLiteral("https://vendor.example/releases/latest.tar"));
     QCOMPARE(reset->buildStatus, pacsmith::BuildStatus::NeverBuilt);
@@ -335,6 +330,9 @@ void CoreTests::generatesPkgbuild() {
     project.debian.architecture = QStringLiteral("amd64");
     project.debian.description = QStringLiteral("Vendor desktop application");
     project.debian.homepage = QStringLiteral("https://vendor.example");
+    project.packageMetadata.description = project.debian.description;
+    project.packageMetadata.homepage = project.debian.homepage;
+    project.packageMetadata.licenses = {QStringLiteral("MIT")};
     pacsmith::DependencyMapping mapped;
     mapped.archPackage = QStringLiteral("gtk3");
     mapped.status = pacsmith::MappingStatus::Resolved;
@@ -354,6 +352,7 @@ void CoreTests::generatesPkgbuild() {
     QVERIFY(vars.contains(QStringLiteral("_PACSMITH_ARCH='x86_64'")));
     QVERIFY(vars.contains(QStringLiteral("_PACSMITH_SOURCE='vendor app_1.2_amd64.deb'")));
     QVERIFY(vars.contains(QStringLiteral("_PACSMITH_INSTALL='vendor-app-bin.install'")));
+    QVERIFY(vars.contains(QStringLiteral("_PACSMITH_LICENSES=('MIT')")));
     QVERIFY(pkgbuild.contains(QStringLiteral("depends=('gtk3')")));
     QVERIFY(pkgbuild.contains(QStringLiteral("options=('!strip' '!debug')")));
     QVERIFY(pkgbuild.contains(QStringLiteral("source=(\"${_PACSMITH_SOURCE}\")")));
@@ -366,11 +365,15 @@ void CoreTests::generatesPkgbuild() {
     QVERIFY(pkgbuild.contains(QStringLiteral("provides+=(\"${_PACSMITH_COMPAT_PKGNAME}=${pkgver}\")")));
     QVERIFY(!pkgbuild.contains(QStringLiteral("postinst")));
 
-    project.debian.provides = QStringLiteral("vendor-app, extra-app");
-    project.debian.conflicts = QStringLiteral("old-vendor-app");
+    project.packageMetadata.provides = {QStringLiteral("vendor-app"),
+                                        QStringLiteral("extra-app")};
+    project.packageMetadata.conflicts = {QStringLiteral("old-vendor-app")};
+    project.packageMetadata.additionalDependencies = {QStringLiteral("libnotify")};
     const auto varsWithMeta = pacsmith::PkgbuildGenerator::identityVariables(project);
     QVERIFY(varsWithMeta.contains(QStringLiteral("_PACSMITH_PROVIDES=('vendor-app' 'extra-app')")));
     QVERIFY(varsWithMeta.contains(QStringLiteral("_PACSMITH_CONFLICTS=('old-vendor-app')")));
+    QVERIFY(pacsmith::PkgbuildGenerator::generate(project).contains(
+        QStringLiteral("depends=('gtk3' 'libnotify')")));
 
     project.lifecycleScript.validationPassed = false;
     const auto blockedLifecycle = pacsmith::PkgbuildGenerator::generate(project);
@@ -649,18 +652,19 @@ void CoreTests::writesPacsmithIdentityVariablesAcrossUpdates() {
     QVERIFY2(imported.has_value(), qPrintable(error));
     const auto *updated = imported->project.release(imported->releaseId);
     QVERIFY(updated != nullptr);
-    QVERIFY(!updated->pkgbuildManuallyModified);
-    QVERIFY(updated->previousManualPkgbuild.contains(QStringLiteral("${_PACSMITH_SOURCE}")));
+    QVERIFY(updated->pkgbuildManuallyModified);
+    QCOMPARE(updated->customPkgbuild, custom);
+    QCOMPARE(store.readPkgbuild(*updated, &error).value_or(QString{}), custom);
+    const auto *historical = imported->project.release(first->releaseId);
+    QVERIFY(historical != nullptr);
+    QCOMPARE(store.readPkgbuild(*historical, &error).value_or(QString{}), custom);
     QFile nextVars(QString::fromUtf8(store.identityVariablesPath(*updated).string().c_str()));
     QVERIFY(nextVars.open(QIODevice::ReadOnly));
     const auto nextIdentity = QString::fromUtf8(nextVars.readAll());
     QVERIFY(nextIdentity.contains("_PACSMITH_SOURCE='vendorctl-2.0.0-linux-x86_64'"));
     QVERIFY(!nextIdentity.contains("vendorctl-1.0.0-linux-x86_64"));
 
-    auto copied = imported->project;
-    auto *copiedRelease = copied.release(imported->releaseId);
-    QVERIFY2(store.saveCustomPkgbuild(copied, *copiedRelease, custom, &error), qPrintable(error));
-    const auto plan = pacsmith::PkgbuildInstallPlan::parse(custom, *copiedRelease);
+    const auto plan = pacsmith::PkgbuildInstallPlan::parse(custom, *updated);
     QVERIFY2(plan.warnings.isEmpty(), qPrintable(plan.warnings.join(QLatin1Char('\n'))));
     QVERIFY(std::any_of(plan.entries.cbegin(), plan.entries.cend(), [](const auto &entry) {
         return entry.path == QStringLiteral("/usr/bin/vendorctl") && !entry.excluded;
@@ -702,4 +706,3 @@ void CoreTests::synchronizesIntegrationIconSource() {
     QVERIFY(std::filesystem::exists(alias));
     QCOMPARE(pacsmith::sha256File(alias, &error), pacsmith::sha256Hex(icon));
 }
-

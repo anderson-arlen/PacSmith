@@ -1,11 +1,15 @@
 #include "gui/main_window/common.hpp"
+#include "core/harness_launcher.hpp"
+
+#include <QClipboard>
+#include <QGuiApplication>
 
 namespace pacsmith::gui {
 
 void MainWindow::startReanalysis() {
     if (!project_ || currentRelease() == nullptr || importThread_ != nullptr ||
         buildInProgress() || installService_.isRunning() ||
-        debDownloadService_->isRunning() || aiInProgress()) {
+        debDownloadService_->isRunning()) {
         return;
     }
     const auto projectId = project_->id;
@@ -24,7 +28,7 @@ void MainWindow::startReanalysis() {
         QMessageBox::NoButton, this);
     confirmation.setInformativeText(QStringLiteral(
         "PacSmith will verify and reread the stored artifact, then discard this release's dependency overrides, "
-        "AI decisions, script and payload acknowledgements, lifecycle script, command mappings, desktop entries, "
+        "script and payload acknowledgements, lifecycle script, command mappings, desktop entries, "
         "icon selection, and manual PKGBUILD edits.\n\n"
         "The source artifact, update configuration, installed-package record, prior build history, and package "
         "artifacts are retained. This setup reset cannot be undone."));
@@ -51,7 +55,7 @@ void MainWindow::startReanalysis() {
         library_.projectsRoot(), projectId, releaseId);
     importThread_ = thread;
     projectList_->setEnabled(false);
-    resolveWithAiButton_->setEnabled(false);
+    askAiButton_->setEnabled(false);
     reanalyzeButton_->setEnabled(false);
     updateDeleteButton();
     worker->moveToThread(thread);
@@ -113,582 +117,64 @@ void MainWindow::startReanalysis() {
         }
         if (importThread_ == thread) importThread_ = nullptr;
         projectList_->setEnabled(true);
+        askAiButton_->setEnabled(currentRelease() != nullptr &&
+                                 currentRelease()->state != ReleaseState::Discovered);
         updateDeleteButton();
         thread->deleteLater();
     });
     thread->start();
 }
 
-void MainWindow::startAiResolution() {
-    if (!project_ || currentRelease() == nullptr || aiInProgress()) return;
-    if (aiSettings_.provider == AiProviderKind::None) {
-        QMessageBox::information(this, QStringLiteral("Configure AI"),
-                                 QStringLiteral("Choose an AI provider with the Settings button first."));
-        showSettings();
-        return;
-    }
-    if (aiSettings_.model.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("AI model required"),
-                             QStringLiteral("Set a provider model ID with the Settings button."));
-        return;
-    }
-    aiProgressCanceled_ = false;
-    aiProgress_ = new AiProgressDialog(aiSettings_, this);
-    auto *progressDialog = aiProgress_;
-    aiProgress_->show();
-    connect(aiProgress_, &QDialog::rejected, this, [this, progressDialog] {
-        if (aiProgress_ != progressDialog) return;
-        if (aiInProgress()) {
-            aiProgressCanceled_ = true;
-            cancelRemoteAi();
-            return;
-        }
-        progressDialog->deleteLater();
-        aiProgress_ = nullptr;
-        projectList_->setEnabled(true);
-        updateDeleteButton();
-    });
-    projectList_->setEnabled(false);
-    resolveWithAiButton_->setEnabled(false);
-    QString error;
-    const auto job = library_.startAiReview(currentRelease()->id, &error);
-    if (!job || job->id.isEmpty()) {
-        if (aiProgress_ != nullptr) {
-            aiProgress_->showFailure(error.isEmpty()
-                                         ? QStringLiteral("AI review could not start.")
-                                         : error,
-                                     {});
-        } else {
-            QMessageBox::critical(this, QStringLiteral("AI review could not start"), error);
-        }
-        projectList_->setEnabled(true);
-        updateDeleteButton();
-        return;
-    }
-    beginAiJob(*job);
-    updateDeleteButton();
-}
-
-void MainWindow::startGithubRegexAi() {
-    auto *tracker = updateEditorRelease();
-    if (!project_ || tracker == nullptr || aiInProgress()) return;
-    if (aiSettings_.provider == AiProviderKind::None || aiSettings_.model.trimmed().isEmpty()) {
-        QMessageBox::information(
-            this, QStringLiteral("Configure AI"),
-            QStringLiteral("Choose an AI provider and model with the Settings button before generating a GitHub asset rule."));
-        showSettings();
-        return;
-    }
-    const auto owner = githubOwner_->text().trimmed();
-    const auto repository = githubRepository_->text().trimmed();
-    if (owner.isEmpty() || repository.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("GitHub repository required"),
-                             QStringLiteral("Enter the GitHub owner and repository first."));
-        return;
-    }
-    PackageRelease probe = *tracker;
-    probe.update.strategy = UpdateStrategy::GitHubRelease;
-    probe.update.githubOwner = owner;
-    probe.update.githubRepository = repository;
-    probe.update.githubAssetRegex = QStringLiteral(".*");
-    probe.update.githubIncludePrereleases = githubPrereleases_->isChecked();
-    probe.update.githubEtag.clear();
-
-    QString githubToken = sessionCredential(QStringLiteral("github.token"));
-
-    auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
-    auto *progress = new QProgressDialog(QStringLiteral("Loading the latest GitHub release assets…"),
-                                         QStringLiteral("Cancel"), 0, 0, this);
-    progress->setWindowTitle(QStringLiteral("Generate GitHub Asset Rule"));
-    progress->setWindowModality(Qt::WindowModal);
-    progress->show();
-    connect(progress, &QProgressDialog::canceled, service, &GitHubUpdateService::cancel);
-    connect(service, &GitHubUpdateService::progressChanged, progress,
-            &QProgressDialog::setLabelText);
-    connect(service, &GitHubUpdateService::finished, this,
-            [this, service, progress, probe](const UpdateCheckResult &result) mutable {
-        progress->close();
-        progress->deleteLater();
-        service->deleteLater();
-        QStringList assets;
-        for (const auto &asset : result.availableAssets) {
-            if (isGitHubSidecarAsset(asset)) continue;
-            if (!assets.contains(asset)) assets.append(asset);
-        }
-        if (assets.isEmpty()) {
-            QMessageBox::critical(
-                this, QStringLiteral("No supported GitHub assets"),
-                result.message.isEmpty()
-                    ? QStringLiteral("The latest release has no supported prebuilt Linux assets for PacSmith to evaluate.")
-                    : result.message);
-            return;
-        }
-        QStringList choices{QStringLiteral("Let AI choose the best supported artifact")};
-        choices.append(assets);
-        bool accepted = false;
-        const auto choice = QInputDialog::getItem(
-            this, QStringLiteral("Preferred GitHub artifact"),
-            QStringLiteral("Optionally select the artifact family PacSmith should track:"),
-            choices, 0, false, &accepted);
-        if (!accepted) return;
-        const auto preferred = choice == choices.first() ? QString{} : choice;
-
-        githubRegexAiPending_ = true;
-        githubRegexAiReleaseId_ = probe.id;
-        githubRegexAiAssets_ = assets;
-        githubRegexAiPreferredAsset_ = preferred;
-        aiProgressCanceled_ = false;
-        aiProgress_ = new AiProgressDialog(aiSettings_, this);
-        auto *progressDialog = aiProgress_;
-        aiProgress_->setWindowTitle(QStringLiteral("Generating GitHub Asset Rule"));
-        aiProgress_->show();
-        connect(aiProgress_, &QDialog::rejected, this, [this, progressDialog] {
-            if (aiProgress_ != progressDialog) return;
-            if (aiInProgress()) {
-                aiProgressCanceled_ = true;
-                cancelRemoteAi();
-                return;
-            }
-            progressDialog->deleteLater();
-            aiProgress_ = nullptr;
-            projectList_->setEnabled(true);
-            updateDeleteButton();
-        });
-        projectList_->setEnabled(false);
-        githubRegexAiButton_->setEnabled(false);
-        QString error;
-        const auto job = library_.startGitHubAssetAi(probe.update.githubOwner,
-                                                     probe.update.githubRepository, assets,
-                                                     preferred, &error);
-        if (!job || job->id.isEmpty()) {
-            githubRegexAiPending_ = false;
-            githubRegexAiReleaseId_.clear();
-            githubRegexAiAssets_.clear();
-            githubRegexAiPreferredAsset_.clear();
-            if (aiProgress_ != nullptr) {
-                aiProgress_->showFailure(error.isEmpty()
-                                             ? QStringLiteral("GitHub asset review could not start.")
-                                             : error,
-                                         {});
-            }
-            projectList_->setEnabled(true);
-            updateDeleteButton();
-            return;
-        }
-        beginAiJob(*job);
-        updateDeleteButton();
-    });
-    onServiceThread(*service, [service, probe, githubToken]() mutable {
-        service->start(probe, githubToken);
-        githubToken.fill(QChar::Null);
-    });
-    githubToken.fill(QChar::Null);
-}
-
-void MainWindow::applyGithubRegexAi(const AiResolution &resolution) {
-    const auto releaseId = std::exchange(githubRegexAiReleaseId_, QString{});
-    const auto assets = std::exchange(githubRegexAiAssets_, QStringList{});
-    const auto preferred = std::exchange(githubRegexAiPreferredAsset_, QString{});
-    githubRegexAiPending_ = false;
-    const auto *tracker = updateEditorRelease();
-    if (tracker == nullptr || tracker->id != releaseId) {
-        QMessageBox::warning(this, QStringLiteral("Active release changed"),
-                             QStringLiteral("The generated rule was not applied because the active update release changed."));
-        populateUpdates();
-        return;
-    }
-    const auto rule = std::find_if(resolution.changes.cbegin(), resolution.changes.cend(),
-                                   [](const auto &change) {
-                                       return change.field == QStringLiteral("update.githubAssetRegex");
-                                   });
-    if (rule == resolution.changes.cend() || resolution.changes.size() != 1) {
-        QMessageBox::warning(this, QStringLiteral("AI returned an invalid asset rule"),
-                             QStringLiteral("Expected exactly one update.githubAssetRegex change; nothing was applied."));
-        populateUpdates();
-        return;
-    }
-    const auto text = rule->value.trimmed();
-    const QRegularExpression expression(text);
-    QStringList matches;
-    if (expression.isValid() && !text.isEmpty() && text.size() <= 512) {
-        for (const auto &asset : assets) {
-            const auto match = expression.match(asset);
-            if (match.hasMatch() && match.capturedLength() == asset.size()) matches.append(asset);
-        }
-    }
-    const bool preferredMatched = preferred.isEmpty() ||
-                                  (matches.size() == 1 && matches.first() == preferred);
-    if (!expression.isValid() || text.isEmpty() || text.size() > 512 ||
-        matches.size() != 1 || !preferredMatched) {
-        QMessageBox::warning(
-            this, QStringLiteral("AI asset rule rejected"),
-            QStringLiteral("PacSmith requires a valid expression of at most 512 characters that full-matches exactly one available asset%1. The proposed expression matched %2 asset(s) and was not applied.\n\n/%3/")
-                .arg(preferred.isEmpty() ? QString{} : QStringLiteral("—the selected preferred artifact"))
-                .arg(matches.size())
-                .arg(text));
-        populateUpdates();
-        return;
-    }
-    githubAssetRegex_->setText(text);
-    githubAssetRegex_->setFocus();
-    updateNotice_->setText(
-        QStringLiteral("AI selected %1. Review the expression, then choose Save Update Configuration; it has not been persisted yet.\n%2")
-            .arg(matches.first(), rule->rationale));
-    statusBar()->showMessage(QStringLiteral("Generated GitHub asset rule applied to the editor; save to persist it"), 10000);
-    githubRegexAiButton_->setEnabled(true);
-}
-
-void MainWindow::validateAndApplyAiResolution(const AiResolution &resolution) {
-    if (!project_ || currentRelease() == nullptr) {
-        finishAiResolution(resolution);
-        return;
-    }
-    const auto candidates = requiredAiDependencyCandidates(*currentRelease(), resolution);
-    if (candidates.isEmpty()) {
-        finishAiResolution(resolution);
-        return;
-    }
-    if (aiProgress_ != nullptr) {
-        aiProgress_->setStatus(QStringLiteral("Verifying proposed Arch packages…"));
-        aiProgress_->appendActivity(
-            QStringLiteral("Checking %1 required package mapping(s) against configured pacman repositories.")
-                .arg(candidates.size()));
-    }
-    auto *watcher = new QFutureWatcher<QJsonArray>(this);
-    connect(watcher, &QFutureWatcher<QJsonArray>::finished, this,
-            [this, watcher, resolution] {
-        const auto results = watcher->result();
-        watcher->deleteLater();
-        if (std::exchange(aiProgressCanceled_, false)) {
-            if (aiProgress_ != nullptr) {
-                aiProgress_->hide();
-                aiProgress_->deleteLater();
-                aiProgress_ = nullptr;
-            }
-            projectList_->setEnabled(true);
-            updateDeleteButton();
-            return;
-        }
-        QSet<int> unavailableIndexes;
-        QStringList unavailablePackages;
-        for (const auto &value : results) {
-            const auto result = value.toObject();
-            if (result.value(QStringLiteral("available")).toBool()) continue;
-            unavailableIndexes.insert(result.value(QStringLiteral("dependencyIndex")).toInt(-1));
-            unavailablePackages.append(result.value(QStringLiteral("argument")).toString());
-        }
-        unavailableIndexes.remove(-1);
-        unavailablePackages.removeDuplicates();
-        if (unavailableIndexes.isEmpty()) {
-            finishAiResolution(resolution);
-            return;
-        }
-        AiResolution safeResolution = resolution;
-        safeResolution.changes.erase(
-            std::remove_if(safeResolution.changes.begin(), safeResolution.changes.end(),
-                           [&unavailableIndexes](const AiFieldChange &change) {
-                static const QRegularExpression dependencyPattern(
-                    QStringLiteral(R"(^dependency\.(\d+)\.(?:archPackage|treatment)$)"));
-                const auto match = dependencyPattern.match(change.field);
-                return match.hasMatch() && unavailableIndexes.contains(match.captured(1).toInt());
-            }),
-            safeResolution.changes.end());
-        for (const auto index : unavailableIndexes) {
-            safeResolution.changes.append(
-                {QStringLiteral("dependency.%1.treatment").arg(index),
-                 QStringLiteral("unresolved"),
-                 QStringLiteral("PacSmith could not find the AI-proposed package in any configured pacman repository; the mapping was cleared without sending another AI request.")});
-        }
-        safeResolution.rationale += QStringLiteral(
-            " PacSmith deterministically cleared mappings that were unavailable after repository validation; AI review is single-request.");
-        if (aiProgress_ != nullptr) {
-            aiProgress_->appendActivity(
-                QStringLiteral("Rejected unavailable repository mapping(s): %1. Leaving those dependencies unresolved; no follow-up AI request was sent.")
-                    .arg(unavailablePackages.join(QStringLiteral(", "))));
-        }
-        finishAiResolution(safeResolution);
-    });
-    watcher->setFuture(QtConcurrent::run([candidates] {
-        QJsonArray results;
-        for (const auto &candidate : candidates) {
-            auto result = SystemInformationBroker::execute(
-                {QStringLiteral("pacsmith-repository-validation-%1").arg(candidate.index),
-                 QStringLiteral("repository-package"), candidate.package,
-                 QStringLiteral("Verify that the proposed required Arch dependency can be installed from a configured pacman repository")});
-            result.insert(QStringLiteral("dependencyIndex"), candidate.index);
-            result.insert(QStringLiteral("source"), QStringLiteral("pacsmith-automatic-repository-validation"));
-            results.append(result);
-        }
-        return results;
-    }));
-}
-
-void MainWindow::finishAiResolution(const AiResolution &resolution) {
-    if (aiProgress_ != nullptr) aiProgress_->releaseModality();
-    projectList_->setEnabled(true);
-    updateDeleteButton();
-    applyAiResolution(resolution);
-}
-
-bool MainWindow::aiInProgress() const {
-    return !aiJobId_.isEmpty();
-}
-
-void MainWindow::beginAiJob(const JobStatus &job) {
-    aiJobId_ = job.id;
-    aiLogAfter_ = 0;
-    if (aiPollTimer_ == nullptr) {
-        aiPollTimer_ = new QTimer(this);
-        connect(aiPollTimer_, &QTimer::timeout, this, &MainWindow::pollAiJob);
-    }
-    aiPollTimer_->start(100);
-    if (aiProgress_ != nullptr) {
-        aiProgress_->setStatus(QStringLiteral("Library daemon is running the AI review…"));
-        aiProgress_->appendActivity(
-            QStringLiteral("The provider call runs on pacsmithd; package binaries are not sent."));
-    }
-}
-
-void MainWindow::cancelRemoteAi() {
-    if (aiJobId_.isEmpty()) return;
-    QString error;
-    static_cast<void>(library_.cancelJob(aiJobId_, &error));
-}
-
-void MainWindow::pollAiJob() {
-    if (aiJobId_.isEmpty()) return;
-    QString error;
-    const auto job = library_.getJob(aiJobId_, &error);
-    if (!job) return;
-    qint64 next = aiLogAfter_;
-    const auto chunk = library_.jobLog(aiJobId_, aiLogAfter_, &next, nullptr);
-    if (!chunk.isEmpty() && aiProgress_ != nullptr) {
-        for (const auto &line : chunk.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
-            aiProgress_->appendActivity(line);
-            aiProgress_->setStatus(line);
-        }
-    }
-    aiLogAfter_ = next;
-    if (job->status == QStringLiteral("succeeded") || job->status == QStringLiteral("failed") ||
-        job->status == QStringLiteral("interrupted")) {
-        if (aiPollTimer_ != nullptr) aiPollTimer_->stop();
-        finishAiJob();
-    }
-}
-
-void MainWindow::finishAiJob() {
-    const auto jobId = aiJobId_;
-    aiJobId_.clear();
-    QString error;
-    const auto job = library_.getJob(jobId, &error);
-    const auto canceled = std::exchange(aiProgressCanceled_, false) ||
-                          (job && job->status == QStringLiteral("interrupted"));
-    if (canceled) {
-        githubRegexAiPending_ = false;
-        githubRegexAiReleaseId_.clear();
-        githubRegexAiAssets_.clear();
-        githubRegexAiPreferredAsset_.clear();
-        if (aiProgress_ != nullptr) {
-            aiProgress_->hide();
-            aiProgress_->deleteLater();
-            aiProgress_ = nullptr;
-        }
-        projectList_->setEnabled(true);
-        resolveWithAiButton_->setEnabled(
-            project_ && currentRelease() != nullptr &&
-            currentRelease()->state != ReleaseState::Discovered);
-        populateUpdates();
-        updateDeleteButton();
-        return;
-    }
-    AiResolution resolution;
-    if (job) resolution = aiResolutionFromJson(job->result);
-    if (resolution.provider.isEmpty()) resolution.provider = aiProviderName(aiSettings_.provider);
-    if (resolution.model.isEmpty()) resolution.model = aiSettings_.model;
-    if (!resolution.success && resolution.error.isEmpty() && job) {
-        resolution.error = job->error.isEmpty()
-                               ? QStringLiteral("AI review failed")
-                               : job->error;
-    }
-    if (!resolution.success) {
-        githubRegexAiPending_ = false;
-        githubRegexAiReleaseId_.clear();
-        githubRegexAiAssets_.clear();
-        githubRegexAiPreferredAsset_.clear();
-        projectList_->setEnabled(true);
-        resolveWithAiButton_->setEnabled(
-            project_ && currentRelease() != nullptr &&
-            currentRelease()->state != ReleaseState::Discovered);
-        updateDeleteButton();
-        if (aiProgress_ != nullptr) {
-            aiProgress_->showFailure(resolution.error, resolution.errorDetails);
-        } else {
-            showAiErrorDialog(this, resolution);
-        }
-        populateUpdates();
-        return;
-    }
-    if (githubRegexAiPending_) {
-        if (aiProgress_ != nullptr) {
-            aiProgress_->hide();
-            aiProgress_->deleteLater();
-            aiProgress_ = nullptr;
-        }
-        projectList_->setEnabled(true);
-        updateDeleteButton();
-        applyGithubRegexAi(resolution);
-    } else {
-        if (aiProgress_ != nullptr) {
-            const auto json = QJsonDocument(job ? job->result : QJsonObject{}).toJson(QJsonDocument::Indented);
-            aiProgress_->setCompletedResponse(QString::fromUtf8(json));
-            aiProgress_->appendActivity(QStringLiteral("Provider response received; applying accepted recommendations."));
-        }
-        validateAndApplyAiResolution(resolution);
-    }
-}
-
-void MainWindow::applyAiResolution(const AiResolution &resolution) {
+void MainWindow::askExternalHarness() {
     if (!project_ || currentRelease() == nullptr) return;
+    const auto *profile = appSettings_.defaultHarness();
+    if (profile == nullptr) {
+        QMessageBox::information(
+            this, QStringLiteral("Configure an AI harness"),
+            QStringLiteral("Add a generic external harness launch profile in Settings → AI Harnesses first."));
+        return;
+    }
     const auto projectId = project_->id;
     const auto releaseId = currentRelease()->id;
-    QSet<QString> approved;
-    const auto conflicts = AiResolutionApplier::manualConflicts(*currentRelease(), resolution);
-    if (!conflicts.isEmpty()) {
-        const auto answer = QMessageBox::question(
-            this, QStringLiteral("Replace manually edited values?"),
-            QStringLiteral("AI proposed replacements for these user-owned fields:\n\n%1\n\nApply those replacements?")
-                .arg(conflicts.join(QLatin1Char('\n'))),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (answer == QMessageBox::Yes) approved = QSet<QString>(conflicts.cbegin(), conflicts.cend());
+    QString prompt;
+    if (currentSection() == EditorSection::ConfigDependencies && dependenciesTable_ != nullptr &&
+        dependenciesTable_->currentRow() >= 0 &&
+        dependenciesTable_->currentRow() < currentRelease()->dependencies.size()) {
+        prompt = HarnessLauncher::dependencyPrompt(
+            projectId, releaseId,
+            currentRelease()->dependencies.at(dependenciesTable_->currentRow()).rawExpression);
+    } else if (currentSection() == EditorSection::ConfigAppRun) {
+        prompt = HarnessLauncher::appImagePrompt(projectId, releaseId);
+    } else if (currentRelease()->pkgbuildManuallyModified &&
+               (currentSection() == EditorSection::ConfigPkgbuild ||
+                currentSection() == EditorSection::ResultPkgbuild)) {
+        prompt = HarnessLauncher::customPkgbuildPrompt(projectId, releaseId);
+    } else if (currentSection() == EditorSection::ResultBuild &&
+               currentRelease()->buildStatus == BuildStatus::Failed) {
+        prompt = HarnessLauncher::buildFailurePrompt(projectId, releaseId);
+    } else {
+        prompt = HarnessLauncher::projectPrompt(projectId, releaseId);
     }
-    const auto explicitApprovals =
-        AiResolutionApplier::explicitApprovalRequired(*currentRelease(), resolution);
-    for (const auto &field : explicitApprovals) {
-        const auto proposal = std::find_if(
-            resolution.changes.cbegin(), resolution.changes.cend(),
-            [&field](const auto &change) { return change.field == field; });
-        if (proposal == resolution.changes.cend()) continue;
-        auto path = field;
-        path.remove(0, QStringLiteral("payload.").size());
-        path.chop(QStringLiteral(".treatment").size());
-        auto treatment = proposal->value.trimmed().toLower();
-        if (treatment == QStringLiteral("include") ||
-            treatment == QStringLiteral("included")) {
-            treatment = QStringLiteral("keep");
-        }
-        const auto fingerprint = PayloadReview::fingerprint(*currentRelease(), path);
-        QMessageBox approval(
-            QMessageBox::Warning, QStringLiteral("Approve unclassified payload change?"),
-            QStringLiteral("The AI proposes to <b>%1</b> an existing payload path that PacSmith did not pre-classify as requiring a decision:<br><br><code>%2</code>")
-                .arg(treatment.toHtmlEscaped(), path.toHtmlEscaped()),
-            QMessageBox::NoButton, this);
-        approval.setTextFormat(Qt::RichText);
-        approval.setInformativeText(
-            QStringLiteral("<p>This is a packaging judgment, not an archive-safety failure. Approving binds the decision to the current file or directory contents; changed content in a later release must be reviewed again.</p><p><b>AI rationale:</b> %1</p>")
-                .arg(proposal->rationale.isEmpty()
-                         ? QStringLiteral("No rationale supplied")
-                         : proposal->rationale.toHtmlEscaped()));
-        approval.setDetailedText(
-            QStringLiteral("Field: %1\nTreatment: %2\nPayload fingerprint: %3")
-                .arg(field, treatment, fingerprint));
-        auto *approve = approval.addButton(QStringLiteral("Approve Exact Content"),
-                                           QMessageBox::AcceptRole);
-        approval.addButton(QStringLiteral("Keep Blocked"), QMessageBox::RejectRole);
-        approval.exec();
-        if (approval.clickedButton() == approve) approved.insert(field);
-    }
-    const auto applied = AiResolutionApplier::apply(*currentRelease(), resolution, approved);
-    if (currentRelease()->update.strategy == UpdateStrategy::Manual && !currentRelease()->update.url.isEmpty() &&
-        !currentRelease()->update.aptSuite.isEmpty()) {
-        currentRelease()->update.strategy = UpdateStrategy::AptRepository;
-    }
-    currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("ai-resolution"),
-                              QStringLiteral("Applied %1 change(s) from %2/%3")
-                                  .arg(resolution.changes.size()).arg(resolution.provider, resolution.model)});
-    if (!currentRelease()->lifecycleScript.contents.isEmpty()) {
-        QString error;
-        if (!library_.saveLifecycle(*project_, *currentRelease(), &error)) {
-            QMessageBox::critical(this, QStringLiteral("Could not save generated lifecycle script"), error);
-            return;
-        }
-        projectCache_.insert(project_->id, *project_);
-    }
-    refreshGeneratedPkgbuildAfterModelChange();
-
-    {
-        QSignalBlocker blocker(projectList_);
-        refreshProjectList(projectId);
-    }
-    if (!project_ || project_->id != projectId) loadProject(projectId);
-    if (!project_ || project_->release(releaseId) == nullptr) {
-        QMessageBox::critical(
-            this, QStringLiteral("AI review completed"),
-            QStringLiteral("The AI result was saved, but PacSmith could not reopen the reviewed release."));
+    const auto launched = HarnessLauncher::launch(*profile, prompt);
+    if (!launched.started) {
+        QMessageBox::critical(this, QStringLiteral("Could not launch AI harness"), launched.error);
         return;
     }
-    currentReleaseId_ = releaseId;
-
-    const auto attention = firstReviewSection(*currentRelease());
-    const auto remainingPayload = pendingPayloadReviews(*currentRelease());
-    const auto remainingPaths = pendingPayloadReviewPaths(*currentRelease());
-    const bool readyToBuild = !attention.has_value();
-    const auto stepName = sectionTitle(attention.value_or(EditorSection::ResultBuild));
-    const auto appliedSummary = applied.changed
-        ? QStringLiteral("PacSmith applied the accepted AI recommendations.")
-        : QStringLiteral("The AI review completed without an accepted configuration change.");
-    QString nextStep;
-    if (readyToBuild) {
-        nextStep = QStringLiteral("No review step remains. PacSmith opened Build; review the readiness checklist, then build the package.");
-    } else if (remainingPayload > 0) {
-        nextStep = QStringLiteral("PacSmith opened Contents. %1 payload path(s) still need an explicit keep or exclude:\n%2%3")
-                       .arg(remainingPayload)
-                       .arg(remainingPaths.join(QLatin1Char('\n')))
-                       .arg(remainingPayload > remainingPaths.size()
-                                ? QStringLiteral("\n…")
-                                : QString{});
-    } else {
-        nextStep = QStringLiteral("PacSmith opened %1, the first section that still needs your attention. "
-                                  "Resolve the highlighted items, then continue through PKGBUILD to Build.")
-                       .arg(stepName);
+    if (launched.promptNeedsClipboard) {
+        QGuiApplication::clipboard()->setText(prompt);
+        QMessageBox::information(
+            this, QStringLiteral("AI harness launched"),
+            QStringLiteral("The profile has no {prompt} placeholder, so the PacSmith context prompt was copied to the clipboard."));
     }
-    QString details;
-    if (!applied.errors.isEmpty()) {
-        details = QStringLiteral("Blocked %1 proposal(s); no blocked proposal was applied.\n\n%2")
-                      .arg(applied.errors.size())
-                      .arg(applied.errors.join(QStringLiteral("\n\n----------------------------------------\n\n")));
-    }
-    if (aiProgress_ != nullptr) {
-        aiProgress_->showCompletion(QStringLiteral("%1\n\n%2").arg(appliedSummary, nextStep), details);
-    } else if (!applied.errors.isEmpty()) {
-        showDetailedMessageDialog(
-            this, QStringLiteral("AI review complete with blocked proposals"),
-            QStringLiteral("%1\n\nPacSmith blocked %2 proposal(s); no blocked proposal was applied.\n\n%3")
-                .arg(appliedSummary).arg(applied.errors.size()).arg(nextStep),
-            applied.errors.join(QStringLiteral("\n\n----------------------------------------\n\n")),
-            QStyle::SP_MessageBoxWarning, true);
-    } else {
-        QMessageBox::information(this, QStringLiteral("AI review complete"),
-                                 QStringLiteral("%1\n\n%2").arg(appliedSummary, nextStep));
-    }
-    statusBar()->showMessage(
-        readyToBuild
-            ? QStringLiteral("AI review complete — next: review readiness and build")
-            : QStringLiteral("AI review complete — next: resolve the highlighted items on %1").arg(stepName),
-        15000);
-    QTimer::singleShot(0, this, [this, projectId, releaseId] {
-        if (!project_ || project_->id != projectId || project_->release(releaseId) == nullptr) return;
-        currentReleaseId_ = releaseId;
-        showReleaseWorkbenchAtFirstAttention(releaseId);
-    });
 }
 
 void MainWindow::applyRetentionCleanup() {
-    if (!project_ || !aiSettings_.updates.automaticallyPrepare) return;
+    if (!project_ || !appSettings_.updates.automaticallyPrepare) return;
     QString error;
     const auto result = library_.cleanup(
         *project_,
-        {aiSettings_.updates.retainedPackageVersions,
-         aiSettings_.updates.retainedCompleteReleases, true},
+        {appSettings_.updates.retainedPackageVersions,
+         appSettings_.updates.retainedCompleteReleases, true},
         &error);
     if (result.removedReleases.isEmpty() && result.removedArtifacts.isEmpty()) return;
     const auto projectId = project_->id;
@@ -831,7 +317,7 @@ void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
             QStringLiteral("%1 %2 is available").arg(project_->displayName, result.detectedVersion),
             12000);
         if (discoveredState != ReleaseState::Discovered) return;
-        if (aiSettings_.updates.automaticallyPrepare) {
+        if (appSettings_.updates.automaticallyPrepare) {
             beginReleasePreparation(discoveredReleaseId, false);
             return;
         }

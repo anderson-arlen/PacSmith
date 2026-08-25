@@ -93,6 +93,9 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     release.sourceSha256 = sourceHash;
     release.vendorName = analysis->metadata.maintainer;
     release.debian = analysis->metadata;
+    release.packageMetadata.description = analysis->metadata.description;
+    release.packageMetadata.homepage = analysis->metadata.homepage;
+    release.packageMetadata.licenses = {QStringLiteral("custom:vendor")};
     release.dependencies = analysis->dependencies;
     release.maintainerScripts = analysis->maintainerScripts;
     release.scriptFindings = analysis->scriptFindings;
@@ -172,11 +175,6 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
         }
     }
     if (!writeImportedLifecycle(directory, release, error)) return std::nullopt;
-    if (!release.previousManualPkgbuild.isEmpty() &&
-        !writeBytes(directory / "files" / "previous-manual-PKGBUILD",
-                    release.previousManualPkgbuild.toUtf8(), error)) {
-        return std::nullopt;
-    }
     if (!materializeIntegrationIcon(
             *this, project, release, debPath,
             analysis->icon ? analysis->icon->sourcePath : QString{},
@@ -203,7 +201,9 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     if (progress) progress({ImportStage::GeneratingPkgbuild, 0});
     release.generatedPkgbuild = PkgbuildGenerator::generate(release);
     release.generatedPkgbuildSha256 = sha256Hex(release.generatedPkgbuild.toUtf8());
-    if (!writePkgbuildContents(release, release.generatedPkgbuild, error)) {
+    if (!writePkgbuildContents(release, release.pkgbuildManuallyModified
+                                           ? release.customPkgbuild
+                                           : release.generatedPkgbuild, error)) {
         return std::nullopt;
     }
     release.history.append({release.createdAt, QStringLiteral("created"),
@@ -386,6 +386,9 @@ std::optional<ImportResult> ProjectStore::importSource(
     release.sourceSha256 = sourceHash;
     release.vendorName = project.vendorName;
     release.debian = analysis->metadata;
+    release.packageMetadata.description = analysis->metadata.description;
+    release.packageMetadata.homepage = analysis->metadata.homepage;
+    release.packageMetadata.licenses = {QStringLiteral("custom:vendor")};
     release.dependencies = analysis->dependencies;
     release.maintainerScripts = analysis->maintainerScripts;
     release.scriptFindings = analysis->scriptFindings;
@@ -477,7 +480,9 @@ std::optional<ImportResult> ProjectStore::importSource(
     if (progress) progress({ImportStage::GeneratingPkgbuild, 0});
     release.generatedPkgbuild = PkgbuildGenerator::generate(release);
     release.generatedPkgbuildSha256 = sha256Hex(release.generatedPkgbuild.toUtf8());
-    if (!writePkgbuildContents(release, release.generatedPkgbuild, error)) {
+    if (!writePkgbuildContents(release, release.pkgbuildManuallyModified
+                                           ? release.customPkgbuild
+                                           : release.generatedPkgbuild, error)) {
         return std::nullopt;
     }
     release.history.append({release.createdAt, QStringLiteral("import"),
@@ -564,6 +569,7 @@ std::optional<ImportResult> ProjectStore::reanalyzeRelease(
     // into an accidental package downgrade.
     reset.archPkgrel = previous.archPkgrel;
     reset.debian = analysis->metadata;
+    reset.packageMetadata = previous.packageMetadata;
     reset.dependencies = analysis->dependencies;
     reset.maintainerScripts = analysis->maintainerScripts;
     reset.scriptFindings = analysis->scriptFindings;

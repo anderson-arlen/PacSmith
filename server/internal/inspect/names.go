@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	platformSuffix = regexp.MustCompile(`(?i)[_-](?:linux[_-])?(?:x86_64|amd64|aarch64|arm64)$`)
+	platformSuffix = regexp.MustCompile(`(?i)[_-](?:linux[_-])?(?:x86_64|x64|amd64|aarch64|arm64)$`)
 	simpleNameVer  = regexp.MustCompile(`(?i)^(.+?)[-_]v?([0-9][A-Za-z0-9.+~_-]*)$`)
 	invalidPkgChar = regexp.MustCompile(`[^a-z0-9@._+\-]+`)
 	repeatDash     = regexp.MustCompile(`-+`)

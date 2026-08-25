@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
@@ -10,6 +11,13 @@
 #include <utility>
 
 namespace pacsmith {
+
+const HarnessProfile *AppSettings::defaultHarness() const {
+    for (const auto &profile : harnessProfiles) {
+        if (profile.isDefault) return &profile;
+    }
+    return harnessProfiles.isEmpty() ? nullptr : &harnessProfiles.first();
+}
 
 AppSettingsStore::AppSettingsStore() : directory_(defaultConfigDirectory()) {}
 
@@ -21,8 +29,8 @@ QString AppSettingsStore::defaultConfigDirectory() {
     return QDir::home().filePath(QStringLiteral(".config/pacsmith"));
 }
 
-AiSettings AppSettingsStore::load(QString *error) const {
-    AiSettings result;
+AppSettings AppSettingsStore::load(QString *error) const {
+    AppSettings result;
     QFile file(QDir(directory_).filePath(QStringLiteral("settings.json")));
     if (!file.exists()) return result;
     if (!file.open(QIODevice::ReadOnly)) {
@@ -36,14 +44,6 @@ AiSettings AppSettingsStore::load(QString *error) const {
         return result;
     }
     const auto object = document.object();
-    result.provider = aiProviderFromName(object.value(QStringLiteral("provider")).toString());
-    result.model = object.value(QStringLiteral("model")).toString();
-    result.reasoningEffort = aiReasoningEffortFromName(
-        object.value(QStringLiteral("reasoningEffort")).toString());
-    result.executionMode = aiExecutionModeFromName(
-        object.value(QStringLiteral("executionMode")).toString());
-    result.automaticallyResolveReviewItems =
-        object.value(QStringLiteral("automaticallyResolveReviewItems")).toBool();
     const auto credentials = object.value(QStringLiteral("credentialSources")).toObject();
     for (auto iterator = credentials.constBegin(); iterator != credentials.constEnd(); ++iterator) {
         result.credentialSources.insert(iterator.key(), credentialSourceFromName(iterator.value().toString()));
@@ -52,25 +52,27 @@ AiSettings AppSettingsStore::load(QString *error) const {
     result.updates.enabled = updates.value(QStringLiteral("enabled")).toBool(false);
     result.updates.startAtLogin = updates.value(QStringLiteral("startAtLogin")).toBool(false);
     result.updates.startMinimized = updates.value(QStringLiteral("startMinimized")).toBool(false);
-    result.updates.keepInTray =
-        updates.value(QStringLiteral("keepInTray")).toBool(result.updates.startMinimized);
+    result.updates.keepInTray = updates.value(QStringLiteral("keepInTray")).toBool(result.updates.startMinimized);
     result.updates.daily = updates.value(QStringLiteral("daily")).toBool(true);
     result.updates.weekDay = std::clamp(updates.value(QStringLiteral("weekDay")).toInt(1), 1, 7);
-    const auto time = QTime::fromString(updates.value(QStringLiteral("localTime")).toString(),
-                                       QStringLiteral("HH:mm"));
+    const auto time = QTime::fromString(updates.value(QStringLiteral("localTime")).toString(), QStringLiteral("HH:mm"));
     if (time.isValid()) result.updates.localTime = time;
-    result.updates.automaticallyPrepare =
-        updates.value(QStringLiteral("automaticallyPrepare")).toBool(false);
-    result.updates.retainedPackageVersions =
-        std::max(-1, updates.value(QStringLiteral("retainedPackageVersions")).toInt(2));
-    result.updates.retainedCompleteReleases =
-        std::max(-1, updates.value(QStringLiteral("retainedCompleteReleases")).toInt(3));
-    if (object.contains(QStringLiteral("githubTokenConfigured"))) {
-        result.githubTokenConfigured = object.value(QStringLiteral("githubTokenConfigured")).toBool();
-    } else {
-        result.githubTokenConfigured =
-            result.credentialSources.value(QStringLiteral("github"), CredentialSource::Environment) ==
-            CredentialSource::Age;
+    result.updates.automaticallyPrepare = updates.value(QStringLiteral("automaticallyPrepare")).toBool(false);
+    result.updates.retainedPackageVersions = std::max(-1, updates.value(QStringLiteral("retainedPackageVersions")).toInt(2));
+    result.updates.retainedCompleteReleases = std::max(-1, updates.value(QStringLiteral("retainedCompleteReleases")).toInt(3));
+    result.githubTokenConfigured = object.value(QStringLiteral("githubTokenConfigured")).toBool(false) ||
+                                   (!object.contains(QStringLiteral("githubTokenConfigured")) &&
+                                    result.credentialSources.contains(QStringLiteral("github")));
+    for (const auto &value : object.value(QStringLiteral("harnessProfiles")).toArray()) {
+        const auto profileObject = value.toObject();
+        HarnessProfile profile;
+        profile.name = profileObject.value(QStringLiteral("name")).toString().trimmed();
+        profile.executable = profileObject.value(QStringLiteral("executable")).toString().trimmed();
+        for (const auto &argument : profileObject.value(QStringLiteral("arguments")).toArray()) {
+            profile.arguments.append(argument.toString());
+        }
+        profile.isDefault = profileObject.value(QStringLiteral("default")).toBool(false);
+        if (!profile.name.isEmpty() && !profile.executable.isEmpty()) result.harnessProfiles.append(profile);
     }
     const auto onboarding = object.value(QStringLiteral("onboarding")).toObject();
     result.debAssociationPrompted = onboarding.value(QStringLiteral("debAssociationPrompted")).toBool(false);
@@ -78,7 +80,7 @@ AiSettings AppSettingsStore::load(QString *error) const {
     return result;
 }
 
-bool AppSettingsStore::save(const AiSettings &settings, QString *error) const {
+bool AppSettingsStore::save(const AppSettings &settings, QString *error) const {
     if (!QDir{}.mkpath(directory_)) {
         if (error != nullptr) *error = QStringLiteral("Could not create PacSmith's configuration directory");
         return false;
@@ -90,8 +92,7 @@ bool AppSettingsStore::save(const AiSettings &settings, QString *error) const {
     const auto completeRetention = settings.updates.retainedPackageVersions < 0 ||
                                    settings.updates.retainedCompleteReleases < 0
         ? -1
-        : std::max(settings.updates.retainedCompleteReleases,
-                   settings.updates.retainedPackageVersions);
+        : std::max(settings.updates.retainedCompleteReleases, settings.updates.retainedPackageVersions);
     const QJsonObject updates{{QStringLiteral("enabled"), settings.updates.enabled},
                               {QStringLiteral("startAtLogin"), settings.updates.startAtLogin},
                               {QStringLiteral("startMinimized"), settings.updates.startMinimized},
@@ -102,22 +103,22 @@ bool AppSettingsStore::save(const AiSettings &settings, QString *error) const {
                               {QStringLiteral("automaticallyPrepare"), settings.updates.automaticallyPrepare},
                               {QStringLiteral("retainedPackageVersions"), settings.updates.retainedPackageVersions},
                               {QStringLiteral("retainedCompleteReleases"), completeRetention}};
-    const QJsonObject onboarding{{QStringLiteral("debAssociationPrompted"),
-                                  settings.debAssociationPrompted},
-                                 {QStringLiteral("selfTrackingPrompted"),
-                                  settings.selfTrackingPrompted}};
-    const QJsonObject object{{QStringLiteral("formatVersion"), 4},
-                             {QStringLiteral("provider"), aiProviderName(settings.provider)},
-                             {QStringLiteral("model"), settings.model},
-                             {QStringLiteral("reasoningEffort"),
-                              aiReasoningEffortName(settings.reasoningEffort)},
-                             {QStringLiteral("executionMode"),
-                              aiExecutionModeName(settings.executionMode)},
-                             {QStringLiteral("automaticallyResolveReviewItems"),
-                              settings.automaticallyResolveReviewItems},
+    QJsonArray profiles;
+    for (const auto &profile : settings.harnessProfiles) {
+        QJsonArray arguments;
+        for (const auto &argument : profile.arguments) arguments.append(argument);
+        profiles.append(QJsonObject{{QStringLiteral("name"), profile.name},
+                                    {QStringLiteral("executable"), profile.executable},
+                                    {QStringLiteral("arguments"), arguments},
+                                    {QStringLiteral("default"), profile.isDefault}});
+    }
+    const QJsonObject onboarding{{QStringLiteral("debAssociationPrompted"), settings.debAssociationPrompted},
+                                 {QStringLiteral("selfTrackingPrompted"), settings.selfTrackingPrompted}};
+    const QJsonObject object{{QStringLiteral("formatVersion"), 5},
                              {QStringLiteral("credentialSources"), credentials},
                              {QStringLiteral("githubTokenConfigured"), settings.githubTokenConfigured},
                              {QStringLiteral("updates"), updates},
+                             {QStringLiteral("harnessProfiles"), profiles},
                              {QStringLiteral("onboarding"), onboarding}};
     QSaveFile file(QDir(directory_).filePath(QStringLiteral("settings.json")));
     if (!file.open(QIODevice::WriteOnly)) {
@@ -132,25 +133,86 @@ bool AppSettingsStore::save(const AiSettings &settings, QString *error) const {
     return true;
 }
 
+bool AppSettingsStore::upsertHarnessProfile(const HarnessProfile &profile, QString *error) const {
+    HarnessProfile normalized = profile;
+    normalized.name = normalized.name.trimmed();
+    normalized.executable = normalized.executable.trimmed();
+    if (normalized.name.isEmpty() || normalized.executable.isEmpty()) {
+        if (error != nullptr) *error = QStringLiteral("Harness profile name and executable are required");
+        return false;
+    }
+    if (normalized.name.contains(QChar::Null) || normalized.executable.contains(QChar::Null) ||
+        std::any_of(normalized.arguments.cbegin(), normalized.arguments.cend(),
+                    [](const auto &argument) { return argument.contains(QChar::Null); })) {
+        if (error != nullptr) *error = QStringLiteral("Harness profile values cannot contain NUL characters");
+        return false;
+    }
+
+    auto settings = load(error);
+    if (error != nullptr && !error->isEmpty()) return false;
+    auto existing = std::find_if(settings.harnessProfiles.begin(), settings.harnessProfiles.end(),
+                                 [&](const auto &candidate) {
+                                     return candidate.name.compare(normalized.name, Qt::CaseInsensitive) == 0;
+                                 });
+    if (normalized.isDefault) {
+        for (auto &candidate : settings.harnessProfiles) candidate.isDefault = false;
+    } else if (existing != settings.harnessProfiles.end()) {
+        normalized.isDefault = existing->isDefault;
+    }
+    if (existing == settings.harnessProfiles.end()) settings.harnessProfiles.append(normalized);
+    else *existing = normalized;
+    const auto hasDefault = std::any_of(settings.harnessProfiles.cbegin(),
+                                        settings.harnessProfiles.cend(),
+                                        [](const auto &candidate) { return candidate.isDefault; });
+    if (!hasDefault && !settings.harnessProfiles.isEmpty()) {
+        settings.harnessProfiles.first().isDefault = true;
+    }
+    return save(settings, error);
+}
+
+bool AppSettingsStore::removeHarnessProfile(const QString &name, QString *error) const {
+    auto settings = load(error);
+    if (error != nullptr && !error->isEmpty()) return false;
+    const auto normalized = name.trimmed();
+    const auto removed = settings.harnessProfiles.removeIf([&](const auto &candidate) {
+        return candidate.name.compare(normalized, Qt::CaseInsensitive) == 0;
+    });
+    if (removed == 0) {
+        if (error != nullptr) *error = QStringLiteral("Harness profile not found");
+        return false;
+    }
+    const auto hasDefault = std::any_of(settings.harnessProfiles.cbegin(),
+                                        settings.harnessProfiles.cend(),
+                                        [](const auto &candidate) { return candidate.isDefault; });
+    if (!hasDefault && !settings.harnessProfiles.isEmpty()) {
+        settings.harnessProfiles.first().isDefault = true;
+    }
+    return save(settings, error);
+}
+
+bool AppSettingsStore::setDefaultHarnessProfile(const QString &name, QString *error) const {
+    auto settings = load(error);
+    if (error != nullptr && !error->isEmpty()) return false;
+    const auto normalized = name.trimmed();
+    auto selected = std::find_if(settings.harnessProfiles.begin(), settings.harnessProfiles.end(),
+                                 [&](const auto &candidate) {
+                                     return candidate.name.compare(normalized, Qt::CaseInsensitive) == 0;
+                                 });
+    if (selected == settings.harnessProfiles.end()) {
+        if (error != nullptr) *error = QStringLiteral("Harness profile not found");
+        return false;
+    }
+    for (auto &candidate : settings.harnessProfiles) candidate.isDefault = false;
+    selected->isDefault = true;
+    return save(settings, error);
+}
+
 QString AppSettingsStore::ageSecretsPath() const {
     return QDir(directory_).filePath(QStringLiteral("secrets.age"));
 }
 
-QString aiProviderName(const AiProviderKind provider) {
-    switch (provider) {
-    case AiProviderKind::ChatGpt: return QStringLiteral("chatgpt");
-    case AiProviderKind::OpenAi: return QStringLiteral("openai");
-    case AiProviderKind::Xai: return QStringLiteral("xai");
-    case AiProviderKind::None: return QStringLiteral("none");
-    }
-    return QStringLiteral("none");
-}
-
-AiProviderKind aiProviderFromName(const QString &name) {
-    if (name == QStringLiteral("chatgpt")) return AiProviderKind::ChatGpt;
-    if (name == QStringLiteral("openai")) return AiProviderKind::OpenAi;
-    if (name == QStringLiteral("xai")) return AiProviderKind::Xai;
-    return AiProviderKind::None;
+QString AppSettingsStore::settingsPath() const {
+    return QDir(directory_).filePath(QStringLiteral("settings.json"));
 }
 
 QString credentialSourceName(const CredentialSource source) {
@@ -168,40 +230,7 @@ CredentialSource credentialSourceFromName(const QString &name) {
     return CredentialSource::Environment;
 }
 
-QString aiReasoningEffortName(const AiReasoningEffort effort) {
-    switch (effort) {
-    case AiReasoningEffort::None: return QStringLiteral("none");
-    case AiReasoningEffort::Low: return QStringLiteral("low");
-    case AiReasoningEffort::Medium: return QStringLiteral("medium");
-    case AiReasoningEffort::High: return QStringLiteral("high");
-    case AiReasoningEffort::XHigh: return QStringLiteral("xhigh");
-    case AiReasoningEffort::Max: return QStringLiteral("max");
-    case AiReasoningEffort::ProviderDefault: return QString{};
-    }
-    return {};
-}
-
-AiReasoningEffort aiReasoningEffortFromName(const QString &name) {
-    if (name == QStringLiteral("none")) return AiReasoningEffort::None;
-    if (name == QStringLiteral("low")) return AiReasoningEffort::Low;
-    if (name == QStringLiteral("medium")) return AiReasoningEffort::Medium;
-    if (name == QStringLiteral("high")) return AiReasoningEffort::High;
-    if (name == QStringLiteral("xhigh")) return AiReasoningEffort::XHigh;
-    if (name == QStringLiteral("max")) return AiReasoningEffort::Max;
-    return AiReasoningEffort::ProviderDefault;
-}
-
-QString aiExecutionModeName(const AiExecutionMode mode) {
-    return mode == AiExecutionMode::Fast ? QStringLiteral("fast")
-                                         : QStringLiteral("standard");
-}
-
-AiExecutionMode aiExecutionModeFromName(const QString &name) {
-    return name == QStringLiteral("fast") ? AiExecutionMode::Fast
-                                          : AiExecutionMode::Standard;
-}
-
-bool githubTokenUsesAge(const AiSettings &settings) {
+bool githubTokenUsesAge(const AppSettings &settings) {
     return settings.githubTokenConfigured &&
            settings.credentialSources.value(QStringLiteral("github"), CredentialSource::Environment) ==
                CredentialSource::Age;

@@ -1,140 +1,87 @@
-# Client/server implementation plan
+# Client/server implementation status
 
-This is the concrete phased plan for the architecture in [ARCHITECTURE.md](ARCHITECTURE.md). It is based on the current C++ tree, not a greenfield wishlist.
+This document summarizes the implemented PacSmith client/server boundaries. The normative design is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Baseline (2026-08-20)
+## Programs
 
-Current layout:
+- `pacsmithd` is the Go library owner. It owns SQLite, content-addressed artifacts, inspection, release preparation, builds, update jobs, repository publication, PKI, and server secrets.
+- `pacsmith` is the C++/Qt CLI and shared HTTP client. It also hosts the stdio MCP server through `pacsmith mcp`.
+- `pacsmith-gui` is the human workbench and external-harness launcher.
 
-- `client/` — `pacsmith` / `pacsmith-gui` and the transitional C++ `pacsmith_core`.
-- `server/` — Go module `github.com/anderson-arlen/pacsmith/server`, binary `pacsmithd`.
-- Root CMake/Make still configure, test, and install both.
-- Library path: `$XDG_DATA_HOME/pacsmith/projects`.
-- Tests: `pacsmith-core-tests`, `pacsmith-import-test`. Recorded passing: **2/2**, ~5.6s, existing `build/` tree.
+All library clients use the same `LibraryClient` and HTTP API. Local clients use the configured Unix socket. Remote clients use the configured HTTPS/mTLS identity and server pin. MCP has no database or direct-daemon shortcut.
 
-Security-sensitive C++ that must survive the Go port:
+## External agent integration
 
-| Area | Where it lives now |
-| --- | --- |
-| Archive path/symlink policy | `client/src/core/path_safety.cpp` |
-| Type detection / AppImage / ELF | `client/src/core/source_analyzer.cpp` |
-| DEB parse, no script exec | `client/src/core/deb_analyzer.cpp` |
-| RPM header/payload, no `rpm` exec | `client/src/core/rpm_analyzer.cpp` |
-| Payload walk / bounded previews | `client/src/core/payload_inspector.cpp`, `payload_review.cpp` |
-| APT/RPM signature pinning | `client/src/core/repository_trust.cpp`, `apt_update_service.cpp`, `rpm_update_service.cpp` |
-| Lifecycle `.install` policy | `client/src/core/lifecycle_validator.cpp` |
-| `makepkg` not as root; fixed argv | `client/src/core/process_services.cpp` |
-| `pkexec pacman` only, client-side | `client/src/core/process_services.cpp` (`InstallService`) |
-| libalpm xdata / installed query | `client/src/core/managed_package.cpp`, `ProjectStore::queryInstalledVersion` |
-| Age/libsecret credentials | `client/src/core/credential_store.cpp` (superseded as daemon backend) |
+PacSmith does not contain an LLM client. Provider clients, subscription sign-in, API-key settings, model catalogs, one-shot review endpoints/jobs, and embedded AI review UI were removed.
 
-GUI/CLI coupling to replace in Phase 2+:
+`pacsmith mcp` implements newline-delimited JSON-RPC over stdio. Stdout is protocol-only and diagnostics go to stderr. The tool catalog exposes typed reads and ordinary domain operations rather than a generic release-document patch:
 
-- CLI: `client/src/cli/main.cpp` constructs `ProjectStore`, update services, `BuildService`, `InstallService`.
-- GUI: `client/src/gui/main_window/*`, `import_worker.cpp`, `application_session.cpp` load/save projects, run analyzers, spawn `pacsmith check --all`.
+- project and release discovery/details;
+- acquisition, artifact, inspection, dependency, payload, lifecycle, AppRun, launcher, desktop, update, recipe, build, and repository state;
+- artifact import, normal metadata and Guided edits, lifecycle files, Custom PKGBUILD/support files, builds, reanalysis, deletion, and publication operations.
 
-## Phase 1 — Server foundation (current)
+`get_release_issues` exposes the same structural review rules used to derive the GUI's release review state. It returns typed issue codes, categories, subjects, remediation text, build-blocking hints, and independent `review_complete`, `has_successful_build`, and `maintenance_complete` values. Build records now retain their exact artifact relationships; migration 8 associates legacy retained build artifacts with the most recent successful build so old releases no longer report `never-built` with empty build artifact lists.
 
-Deliver `pacsmithd` as a real process with shared API shape, without porting analyzers yet.
+Custom support-file operations are also exposed to people through `pacsmith custom-file`; they are not an agent-only capability.
 
-- Go module `github.com/anderson-arlen/pacsmith/server` in `server/`, `cmd/pacsmithd`.
-- XDG server paths; refuse any path under `pacsmith/projects`.
-- SQLite + migrations + sqlc; `server_state` initialization marker; `artifacts` metadata.
-- Content-addressed object store with stream ingest.
-- `net/http` router on a Unix socket.
-- `GET /api/v1/version`, `GET /api/v1/health`, artifact upload/download (proves streaming on the real API).
-- systemd user unit `pacsmithd.service` (simple, restart-on-failure, not socket-activated; linger for headless).
-- CMake/Make/CI build `pacsmithd` and run `go test`.
-- Tests: migrations, artifact CAS, crash/orphan, HTTP, Unix-socket contract, legacy tree fingerprint unchanged.
+The tool descriptions stand alone, while the Skill under `agent-plugin/skills/pacsmith/` supplies trust and packaging judgment. The source and installed package contain an Agent Plugins 1.0 bundle with a root `plugin.json` and an `mcp.json` stdio declaration for executable `pacsmith` with argument `mcp`; `pacsmith plugin path` prints that bundle directory. `pacsmith skill install` atomically installs or upgrades the standalone user copy at `~/.agents/skills/pacsmith`, and `pacsmith skill path` prints the active Skill directory. An unmanaged existing directory is preserved unless the user explicitly supplies `--force`.
 
-Out of scope here: C++ client cutover, TLS, PKI, full project schema, secrets, analyzers.
+`check_updates` runs the same deterministic update-check operation as the GUI/CLI for one project or all projects, records discovery evidence, and honors automatic-preparation settings without invoking a model. Generic harness profiles have typed list/upsert/remove/default tools backed by `AppSettingsStore`, the same persistence used by the GUI. An executable and each argument remain separate strings; MCP never constructs a shell command.
 
-## Phase 2 — C++ PacSmith client layer
+If the Skill loads without MCP, it requires a consent question before installation and treats missing MCP as a hard stop. It prohibits CLI project commands, direct HTTP/socket/D-Bus access, daemon management, database access, and filesystem scraping as fallbacks. After consent, the harness maps the portable plugin or `pacsmith mcp` command into its own configuration and approval UX. PacSmith emits no harness-specific configuration and uses neither ACP nor an online harness registry.
 
-- Shared C++ HTTP client (libcurl: Unix sockets now; mTLS in Phase 3).
-- Client XDG paths under `pacsmith/client/`.
-- Connection config: local socket vs remote URL (mutually exclusive).
-- GUI/CLI call logical operations, not `ProjectStore` for library I/O.
-- Local management requires `pacsmithd`; do not keep a second core implementation.
+## MCP permissions
 
-Until enough library APIs exist, Phase 2 may land the client library and a subset of CLI (`pacsmith server info` once Phase 3 exists; health/version immediately). The hard rule is: new library features go to the daemon, not back into `ProjectStore`.
+Tool annotations include all four MCP behavior hints. PacSmith additionally enforces mandatory form elicitation for:
 
-## Phase 3 — PKI and remote transport
+- deleting a project;
+- deleting a release;
+- resetting and reanalyzing a release's maintained setup;
+- enabling/disabling or renaming a project's published repository package;
+- promoting a repository package to stable;
+- changing global repository/listener/signing configuration or trust keys;
+- changing automatic update/preparation/retention policy;
+- changing desktop-session autostart;
+- changing the remote management listener or client enrollment/trust;
+- storing or deleting the server-side GitHub credential.
 
-- Server CA + Client CA on first genuine init; fail if missing on an initialized server.
-- Verification fingerprint from Server CA SPKI SHA-256.
-- SNI-bounded leaf certificates; IP-SAN for direct IP.
-- TLS listener, off by default; same HTTP router. Enable/interfaces/port persist on the daemon and are applied without `--listen`.
-- Registration CSR API, polling, local-only approve/revoke. Approval CLI/GUI only while listening.
-- C++ mTLS + pin Server CA; bootstrap exception only for enrollment.
-- Client connection mode: status-bar connection control, `pacsmith connect status|local|remote <host>[:port]`. Local enables `pacsmithd.service`; remote disables and stops it.
-- Rate limits and small-body limits on unauthenticated routes.
-- Same API contract tests on Unix and HTTPS/mTLS.
+These checks live in the central MCP permission policy. Missing client elicitation support, an elicitation error, cancellation, decline, disconnect, or a response without the explicit boolean confirmation all fail closed. Ordinary maintained-state edits do not require this extra round trip.
 
-CLI (same binary): `pacsmith connect …`, `pacsmith server info`, `pacsmith server listen [on|off]`, `pacsmith clients list|pending|approve|reject|revoke`. PKI/listen administration is local-Unix only.
+All mutating project/release calls require human-readable selectors from `list_projects`; opaque IDs are rejected for those tools. PacSmith resolves selectors internally. For sensitive operations, it also uses the verified display/package name and release version in its elicitation message.
 
-## Phase 4 — New library model
+Package installation and repository bootstrap/trust installation are not exposed through MCP. Bootstrap scripts can be read as inert text, but MCP never executes them. If system installation is added later, it must first exist as an ordinary human-facing PacSmith feature and use the same mandatory-confirmation boundary.
 
-Design schema from the domain section in ARCHITECTURE.md. Particular mappings from current types:
+## Guided and Custom recipes
 
-| Current | New |
-| --- | --- |
-| `Project` JSON | `projects` (no installed\* columns) |
-| `PackageRelease` JSON | `releases` + child tables / JSON for bounded nested docs |
-| `UpdateConfiguration` | `update_sources` + `update_check_state` |
-| `SourceAcquisition` | immutable columns on `releases` |
-| `DependencyMapping` | `dependency_mappings` |
-| `BuildRecord` / artifacts | `builds`, `artifacts`, `release_artifacts` |
-| `RepositorySigningKey` files | `trusted_keys` + artifact rows |
-| PKGBUILD / `.install` / patches | artifacts or `work/` plus metadata, never client paths |
-| `Project.installed*` | omitted; client libalpm only |
+Guided mode remains a finite model of behaviors PacSmith understands: Arch package description/homepage/license and compatibility metadata, inspected dependency treatments, evidence-backed additional runtime dependencies, payload decisions, supported layouts, launchers/wrappers, AppRun, desktop entries, lifecycle responsibilities/scripts, icons, and update sources. Arbitrary package-specific Bash or filesystem work requires Custom PKGBUILD.
 
-Carry-forward of install mappings across releases remains a server-side operation during import/prepare.
+When preparing a successor to a Custom release:
 
-## Phase 5 — Secret storage
+1. PacSmith copies the preceding applicable Custom PKGBUILD verbatim.
+2. PacSmith copies only explicit custom text support files.
+3. PacSmith regenerates release-owned identity and `pacsmith.vars` from the new verified artifact.
+4. PacSmith does not copy source objects, inspection state, signing-key artifacts, build output, logs, or other release-owned data.
 
-- `SecretStore` interface; Secret Service; `0700`/`0600` file fallback; env read-only.
-- Persist backend choice; no silent downgrade.
-- API: set/replace/delete/status; no get.
-- Store CA keys here.
-- Tests: backend persistence, failure when Secret Service disappears, no secret readback.
+The predecessor remains unchanged. The next update inherits the newest applicable edited Custom recipe. PacSmith never attempts to merge shell code.
 
-## Phase 6 — Core feature port
+Custom recipes should source `pacsmith.vars` and use `_PACSMITH_*` values for moving version, pkgrel, architecture, artifact filename, checksum, AppImage offset, and related identity. Static validation warns when a Custom recipe ignores these variables. Custom mode does not opt out of deterministic update discovery, verification, inspection, or building.
 
-Move library-side C++ into Go incrementally, with tests for the security properties above:
+## Compatibility
 
-1. Artifact ingest + type detection + path safety.
-2. DEB/RPM/archive/AppImage/ELF inspection.
-3. Update providers + daemon scheduler (replace GUI/`check --all` poller).
-4. Recipe generation, identity vars, lifecycle validation.
-5. Build jobs (`makepkg` unprivileged in `work/`).
-6. AI evidence bundle, provider HTTP, and catalog on `pacsmithd` (credentials from SecretStore). Clients enqueue jobs and keep `AiResolutionApplier`.
+Migration 7 resets legacy library AI settings, deletes retired provider credential metadata, and terminally fails queued/running legacy AI jobs with a clear message. Existing AI columns remain in SQLite so upgrades do not require a risky table rebuild; the public settings API neither returns nor accepts them.
 
-Do not drop checks to make the port smaller.
+The client settings loader ignores old provider/model fields. Generic harness profiles are stored in the client settings file as executable plus an argv array and default flag. No shell command string is persisted or evaluated.
 
-## Phase 7 — Client host integration
+`MainWindow` watches the client-settings directory because `QSaveFile` atomically replaces `settings.json`, which invalidates a file-only watch. Changes are debounced, reloaded into the active GUI, and reflected in an open Settings dialog. While that dialog is open it also refreshes revisioned library/repository settings and GitHub credential status through the configured API. Dialog-local dirty tracking prevents an MCP write from overwriting unsaved harness, session, library, or repository edits.
 
-Reconnect server release/package metadata with:
+Historical `ValueOrigin::Ai` and AI provenance records remain readable so old project documents can be decoded. The obsolete `previousManualPkgbuild` JSON field is safely ignored. New code does not create provider decisions or `previous-manual-PKGBUILD`; successor Custom releases use copy-forward instead.
 
-- libalpm installed version / xdata (`ManagedPackageRegistry` stays C++).
-- Streamed package download to a client temp path.
-- Existing `InstallService` argv (`pkexec pacman -U/--remove`).
-- Dashboard install-state display that is computed locally and not saved to the server.
+## Deterministic updates
 
-## Suggested first API surface beyond Phase 1
+Update discovery and automatic preparation never invoke an AI model. The pipeline remains acquire/verify, inspect, compare/carry known decisions, continue when current safety rules allow, and otherwise mark Needs Review. External agents participate only when a user starts an interactive conversation in their harness.
 
-Keep one contract suite reused on Unix and later TLS:
+## GUI harness launching
 
-- `/api/v1/version`, `/api/v1/health`
-- `/api/v1/artifacts` (already in Phase 1)
-- `/api/v1/projects`, `/api/v1/projects/{id}` with `revision`
-- `/api/v1/projects/{id}/releases`, editable-file get/put
-- `/api/v1/jobs/{id}`, `/api/v1/jobs/{id}/log?after=`
-- `/api/v1/releases/{id}/ai`, `/api/v1/ai/github-asset-rule`, `/api/v1/ai/models`
-- `/api/v1/credentials/{name}` status/set/delete
-- `/api/v1/registrations` (Phase 3)
-- `/api/v1/clients` (Phase 3, local-admin only)
+The GUI stores generic per-machine launch profiles with a name, executable, argv template, and default flag. `{prompt}` is substituted inside an existing argv element and passed directly to `QProcess`; no shell parses the prompt. If a profile has no placeholder, the GUI copies the context prompt to the clipboard before launching and tells the user.
 
-## Non-goals (do not do)
-
-Automatic legacy migration, Syncthing/S3/cloud sync, PostgreSQL, Kubernetes, OAuth/OIDC login accounts, browser UI, Cloudflare integration, a `pacsmith-server` binary, manual/enterprise CA, remote PKI admin, v1 RBAC, SQLite BLOBs for vendor files, cgo as the architecture, split local/remote implementations.
+Contextual Ask AI actions use stable project/release identifiers and brief focus information. The prompt directs the harness to inspect current state through MCP instead of duplicating large evidence blobs.

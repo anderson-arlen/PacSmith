@@ -17,12 +17,10 @@ import (
 )
 
 const (
-	KindImport        = "import"
-	KindBuild         = "build"
-	KindUpdateCheck   = "update_check"
-	KindReanalyze     = "reanalyze"
-	KindAi            = "ai"
-	KindAiGitHubAsset = "ai_github_asset"
+	KindImport      = "import"
+	KindBuild       = "build"
+	KindUpdateCheck = "update_check"
+	KindReanalyze   = "reanalyze"
 )
 
 var ErrNotFound = errors.New("job not found")

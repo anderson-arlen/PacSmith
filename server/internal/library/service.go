@@ -234,7 +234,7 @@ func (s *Service) Reanalyze(ctx context.Context, releaseID string) (ImportResult
 	if err != nil {
 		return ImportResult{}, err
 	}
-	analysis, err := inspect.Analyze(path)
+	analysis, err := inspect.AnalyzeArtifact(path, source.OriginalFilename)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("%w: %s", ErrInvalid, err.Error())
 	}
@@ -351,17 +351,9 @@ func (s *Service) GetRelease(ctx context.Context, id string) (Release, error) {
 	if err != nil {
 		return Release{}, err
 	}
-	records := make([]map[string]any, 0, len(builds))
-	for _, build := range builds {
-		records = append(records, map[string]any{
-			"id":         build.ID,
-			"status":     build.Status,
-			"log":        build.LogText,
-			"startedAt":  build.StartedAt.String,
-			"finishedAt": build.FinishedAt.String,
-		})
+	if err := s.attachBuildRecords(ctx, &release, builds); err != nil {
+		return Release{}, err
 	}
-	release.Document["builds"] = records
 	return release, nil
 }
 
@@ -397,7 +389,7 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 	if err != nil {
 		return ImportResult{}, err
 	}
-	analysis, err := inspect.Analyze(path)
+	analysis, err := inspect.AnalyzeArtifact(path, record.OriginalFilename)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("%w: %s", ErrInvalid, err.Error())
 	}
@@ -610,6 +602,11 @@ func (s *Service) File(ctx context.Context, releaseID, name string) (string, str
 	case "pacsmith.vars":
 		return identityVariablesFor(release), "text/plain", nil
 	default:
+		if files, ok := mapValue(release.Document, "customFiles"); ok {
+			if contents, exists := files[name].(string); exists {
+				return contents, "text/plain", nil
+			}
+		}
 		if lifecycle, ok := release.Document["lifecycleScript"].(map[string]any); ok {
 			fileName := stringValue(lifecycle, "fileName")
 			if fileName == name || (fileName == "" && strings.HasSuffix(name, ".install")) {
@@ -668,7 +665,18 @@ func (s *Service) PutFile(ctx context.Context, releaseID, name, contents string,
 		}
 		body["lifecycleScript"] = lifecycle
 	default:
-		return Release{}, fmt.Errorf("%w: file is not writable", ErrInvalid)
+		if !boolValue(body, "pkgbuildManuallyModified") {
+			return Release{}, fmt.Errorf("%w: support files belong to Custom PKGBUILD mode", ErrInvalid)
+		}
+		if err := validateCustomFileName(name); err != nil {
+			return Release{}, err
+		}
+		files, ok := mapValue(body, "customFiles")
+		if !ok {
+			files = map[string]any{}
+		}
+		files[name] = contents
+		body["customFiles"] = files
 	}
 	attachIdentityVariables(row, body)
 	raw, err := json.Marshal(body)
@@ -696,6 +704,61 @@ func (s *Service) PutFile(ctx context.Context, releaseID, name, contents string,
 		return Release{}, err
 	}
 	return releaseDocument(updated), nil
+}
+
+func (s *Service) DeleteFile(ctx context.Context, releaseID, name string, revision int64) (Release, error) {
+	if err := validateCustomFileName(name); err != nil {
+		return Release{}, err
+	}
+	row, err := s.DB.Queries.GetRelease(ctx, releaseID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Release{}, ErrNotFound
+	}
+	if err != nil {
+		return Release{}, err
+	}
+	if revision == 0 {
+		revision = row.Revision
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(row.BodyJson), &body); err != nil {
+		return Release{}, err
+	}
+	files, ok := mapValue(body, "customFiles")
+	if !ok {
+		return Release{}, fmt.Errorf("%w: unknown file", ErrNotFound)
+	}
+	if _, exists := files[name]; !exists {
+		return Release{}, fmt.Errorf("%w: unknown file", ErrNotFound)
+	}
+	delete(files, name)
+	body["customFiles"] = files
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return Release{}, err
+	}
+	updated, err := s.DB.Queries.UpdateRelease(ctx, sqlcdb.UpdateReleaseParams{
+		State: row.State, SourceType: row.SourceType, VendorVersion: row.VendorVersion,
+		OriginalFilename: row.OriginalFilename, SourceSha256: row.SourceSha256,
+		SourceArtifactID: row.SourceArtifactID, ArchPackageName: row.ArchPackageName,
+		ArchPkgrel: row.ArchPkgrel, BodyJson: string(raw), ModifiedAt: nowUTC(),
+		ID: row.ID, Revision: revision,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return Release{}, ErrConflict
+	}
+	if err != nil {
+		return Release{}, err
+	}
+	return releaseDocument(updated), nil
+}
+
+func validateCustomFileName(name string) error {
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." ||
+		name == "PKGBUILD" || name == "pacsmith.vars" || strings.ContainsAny(name, "\x00/\\") {
+		return fmt.Errorf("%w: invalid custom support filename", ErrInvalid)
+	}
+	return nil
 }
 
 type BuildResult struct {
@@ -764,6 +827,20 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 			}
 		}
 	}
+	if files, ok := mapValue(releaseDocument(row).Document, "customFiles"); ok {
+		for name, value := range files {
+			contents, valid := value.(string)
+			if !valid {
+				return BuildResult{}, fmt.Errorf("%w: custom support file is not text", ErrInvalid)
+			}
+			if err := validateCustomFileName(name); err != nil {
+				return BuildResult{}, err
+			}
+			if err := os.WriteFile(filepath.Join(work, name), []byte(contents), 0o600); err != nil {
+				return BuildResult{}, err
+			}
+		}
+	}
 
 	row, vars, pkgbuild, err = s.prepareBuildIdentity(ctx, row, pkgbuild, vars)
 	if err != nil {
@@ -787,7 +864,7 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 		logText += "\n" + err.Error()
 	}
 	now := nowUTC()
-	_, _ = s.DB.Queries.InsertBuild(ctx, sqlcdb.InsertBuildParams{
+	build, buildErr := s.DB.Queries.InsertBuild(ctx, sqlcdb.InsertBuildParams{
 		ID:         uuid.NewString(),
 		ReleaseID:  releaseID,
 		Status:     status,
@@ -795,8 +872,14 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 		StartedAt:  nullString(now),
 		FinishedAt: nullString(now),
 	})
+	if buildErr != nil {
+		return BuildResult{}, buildErr
+	}
 	result := BuildResult{Status: status, Log: logText}
 	if status != "succeeded" {
+		if summaryErr := s.recordBuildSummary(ctx, releaseID, status, logText, nil); summaryErr != nil {
+			return result, fmt.Errorf("makepkg failed; record build summary: %w", summaryErr)
+		}
 		return result, fmt.Errorf("makepkg failed")
 	}
 	entries, _ := filepath.Glob(filepath.Join(work, "*.pkg.tar.*"))
@@ -813,12 +896,29 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 		if putErr != nil {
 			continue
 		}
-		_ = s.DB.Queries.InsertReleaseArtifact(ctx, sqlcdb.InsertReleaseArtifactParams{
+		if err := s.DB.Queries.InsertReleaseArtifact(ctx, sqlcdb.InsertReleaseArtifactParams{
 			ReleaseID:  releaseID,
 			ArtifactID: record.ID,
 			Role:       "built_package",
-		})
+		}); err != nil {
+			return result, err
+		}
+		if err := s.DB.Queries.InsertBuildArtifact(ctx, sqlcdb.InsertBuildArtifactParams{
+			BuildID: build.ID, ArtifactID: record.ID,
+		}); err != nil {
+			return result, err
+		}
 		result.Artifacts = append(result.Artifacts, record.ID)
+	}
+	producedPackages := make([]string, 0, len(result.Artifacts))
+	for _, artifactID := range result.Artifacts {
+		record, getErr := s.Artifacts.Get(ctx, artifactID)
+		if getErr == nil {
+			producedPackages = append(producedPackages, record.OriginalFilename)
+		}
+	}
+	if err := s.recordBuildSummary(ctx, releaseID, status, logText, producedPackages); err != nil {
+		return result, err
 	}
 	if s.Repo != nil && len(result.Artifacts) > 0 {
 		if err := s.Repo.PublishBuild(ctx, row.ProjectID, releaseID, result.Artifacts); err != nil {
@@ -1001,15 +1101,13 @@ func (s *Service) prepareBuildIdentity(ctx context.Context, row sqlcdb.Release, 
 		if prep.PackageName != "" {
 			rel.ArchPackageName = prep.PackageName
 		}
-		existingProvides := repo.SplitDebField(rel.Debian.Provides)
-		existingConflicts := repo.SplitDebField(rel.Debian.Conflicts)
+		existingProvides := rel.PackageMetadata.Provides
 		if prep.Publish && prep.OriginalName != "" && prep.OriginalName != prep.PackageName {
 			if !containsToken(existingProvides, prep.OriginalName) {
 				rel.CompatPackageName = prep.OriginalName
 			}
 		}
-		rel.Provides = existingProvides
-		rel.Conflicts = existingConflicts
+		rel.PackageMetadata.Provides = existingProvides
 	}
 	vars = recipe.IdentityVariables(rel)
 	if !boolValue(releaseDocument(row).Document, "pkgbuildManuallyModified") {

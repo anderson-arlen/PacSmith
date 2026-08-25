@@ -15,6 +15,5 @@ var Capabilities = []string{
 	"library",
 	"jobs",
 	"pki",
-	"ai",
 	"repo",
 }

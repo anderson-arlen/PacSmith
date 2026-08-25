@@ -81,6 +81,27 @@ func (s *Server) putRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, encodeRelease(release))
 }
 
+func (s *Server) patchReleaseConfiguration(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Revision      int64          `json:"revision"`
+		Configuration map[string]any `json:"configuration"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Configuration == nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "configuration is required")
+		return
+	}
+	release, err := s.Library.PatchReleaseConfiguration(
+		r.Context(), r.PathValue("id"), body.Revision, body.Configuration)
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, encodeRelease(release))
+}
+
 func (s *Server) deleteRelease(w http.ResponseWriter, r *http.Request) {
 	if err := s.Library.DeleteRelease(r.Context(), r.PathValue("id")); err != nil {
 		writeRequestError(w, err)
@@ -116,6 +137,20 @@ func (s *Server) putReleaseFile(w http.ResponseWriter, r *http.Request) {
 	}
 	release, err := s.Library.PutFile(r.Context(), r.PathValue("id"), r.PathValue("name"),
 		body.Contents, body.Revision, body.PkgbuildManuallyModified)
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, encodeRelease(release))
+}
+
+func (s *Server) deleteReleaseFile(w http.ResponseWriter, r *http.Request) {
+	revision, err := strconv.ParseInt(r.URL.Query().Get("revision"), 10, 64)
+	if err != nil || revision < 1 {
+		writeError(w, http.StatusBadRequest, "bad_request", "revision is required")
+		return
+	}
+	release, err := s.Library.DeleteFile(r.Context(), r.PathValue("id"), r.PathValue("name"), revision)
 	if err != nil {
 		writeRequestError(w, err)
 		return

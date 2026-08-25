@@ -1,7 +1,5 @@
 #include "core_tests.hpp"
 
-#include "core/ai_service.hpp"
-#include "core/ai_model_catalog_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
 #include "core/apt_repository.hpp"
@@ -9,7 +7,6 @@
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
 #include "core/credential_store.hpp"
-#include "core/chatgpt_auth.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/github_update_service.hpp"
@@ -386,4 +383,3 @@ void CoreTests::selectsGitHubReleaseAssets() {
     QVERIFY(manifestFirst.matchingAssets.contains(QStringLiteral("tool-2.0.0.x86_64.rpm")));
     QVERIFY(manifestFirst.matchingAssets.contains(QStringLiteral("tool_2.0.0_amd64.deb")));
 }
-

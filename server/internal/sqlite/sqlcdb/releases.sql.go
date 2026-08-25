@@ -166,6 +166,21 @@ func (q *Queries) InsertBuild(ctx context.Context, arg InsertBuildParams) (Build
 	return i, err
 }
 
+const insertBuildArtifact = `-- name: InsertBuildArtifact :exec
+INSERT OR IGNORE INTO build_artifacts (build_id, artifact_id)
+VALUES (?, ?)
+`
+
+type InsertBuildArtifactParams struct {
+	BuildID    string `json:"build_id"`
+	ArtifactID string `json:"artifact_id"`
+}
+
+func (q *Queries) InsertBuildArtifact(ctx context.Context, arg InsertBuildArtifactParams) error {
+	_, err := q.db.ExecContext(ctx, insertBuildArtifact, arg.BuildID, arg.ArtifactID)
+	return err
+}
+
 const insertRelease = `-- name: InsertRelease :one
 INSERT INTO releases (
     id, project_id, revision, state, source_type, vendor_version, original_filename,
@@ -295,6 +310,38 @@ func (q *Queries) ListBuildsForRelease(ctx context.Context, releaseID string) ([
 			&i.StartedAt,
 			&i.FinishedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBuildArtifactsForBuild = `-- name: ListBuildArtifactsForBuild :many
+SELECT artifacts.id, artifacts.sha256, artifacts.size_bytes, artifacts.original_filename, artifacts.kind, artifacts.created_at
+FROM build_artifacts
+JOIN artifacts ON artifacts.id = build_artifacts.artifact_id
+WHERE build_artifacts.build_id = ?
+ORDER BY artifacts.created_at, artifacts.id
+`
+
+func (q *Queries) ListBuildArtifactsForBuild(ctx context.Context, buildID string) ([]Artifact, error) {
+	rows, err := q.db.QueryContext(ctx, listBuildArtifactsForBuild, buildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artifact
+	for rows.Next() {
+		var i Artifact
+		if err := rows.Scan(&i.ID, &i.Sha256, &i.SizeBytes, &i.OriginalFilename,
+			&i.Kind, &i.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

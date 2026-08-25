@@ -73,6 +73,7 @@ test: build
 
 install: check-user deps test
 	cmake --install "$(BUILD_DIR)"
+	"$(PREFIX)/bin/pacsmith" skill install
 	@if command -v update-desktop-database >/dev/null 2>&1; then \
 		update-desktop-database "$(PREFIX)/share/applications" || \
 			echo "warning: desktop application cache could not be refreshed." >&2; \
@@ -83,10 +84,12 @@ install: check-user deps test
 	fi
 	@echo "PacSmith installed for the current user under $(PREFIX)."
 	@echo "Run '$(PREFIX)/bin/pacsmith-gui' or add '$(PREFIX)/bin' to PATH."
+	@echo "Portable Agent Plugin: $$($(PREFIX)/bin/pacsmith plugin path)"
 	@echo "The library daemon is $(PREFIX)/bin/pacsmithd (systemd user unit pacsmithd.service)."
 	@if command -v systemctl >/dev/null 2>&1; then \
-		systemctl --user enable --now pacsmithd.service || \
-			echo "warning: could not enable pacsmithd.service; start it with 'systemctl --user enable --now pacsmithd.service'." >&2; \
+		systemctl --user enable pacsmithd.service && \
+		systemctl --user restart pacsmithd.service || \
+			echo "warning: could not enable and restart pacsmithd.service; run 'systemctl --user enable --now pacsmithd.service' later." >&2; \
 	fi
 
 uninstall: check-user
@@ -95,6 +98,10 @@ uninstall: check-user
 	if [ ! -f "$$manifest" ]; then \
 		echo "error: no install manifest at $$manifest; run 'make install' first (or set BUILD_DIR to the build that was installed)." >&2; \
 		exit 1; \
+	fi; \
+	if [ -x "$(PREFIX)/bin/pacsmith" ]; then \
+		"$(PREFIX)/bin/pacsmith" skill uninstall || \
+			echo "warning: the user Agent Skill was not removed; see the error above." >&2; \
 	fi; \
 	if command -v systemctl >/dev/null 2>&1; then \
 		systemctl --user disable --now pacsmithd.service pacsmith-update.timer pacsmith-tray.service >/dev/null 2>&1 || true; \

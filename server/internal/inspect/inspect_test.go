@@ -463,6 +463,50 @@ func TestELFNotExecuted(t *testing.T) {
 	}
 }
 
+func TestAnalyzeArtifactUsesOriginalFilenameForRawIdentity(t *testing.T) {
+	dir := t.TempDir()
+	storedPath := filepath.Join(dir, strings.Repeat("f", 64))
+	writeFile(t, storedPath, elfHeader(62), 0o755)
+
+	analysis, err := AnalyzeArtifact(storedPath, "chamber-v3.1.5-linux-amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Metadata.Package != "chamber" || analysis.Metadata.Version != "3.1.5" {
+		t.Fatalf("inferred identity %+v", analysis.Metadata)
+	}
+	if analysis.Install.BinarySourcePath != "chamber-v3.1.5-linux-amd64" {
+		t.Fatalf("binary source path %q", analysis.Install.BinarySourcePath)
+	}
+	if len(analysis.Install.Launchers) != 1 || analysis.Install.Launchers[0].CommandName != "chamber" {
+		t.Fatalf("launchers %+v", analysis.Install.Launchers)
+	}
+	if len(analysis.Payload) != 1 || analysis.Payload[0].Path != "chamber-v3.1.5-linux-amd64" {
+		t.Fatalf("payload %+v", analysis.Payload)
+	}
+}
+
+func TestInferNameVersionHandlesRawArtifactFilenames(t *testing.T) {
+	tests := []struct {
+		filename string
+		pkg      string
+		version  string
+	}{
+		{"Chirp-next-20260814-x86_64.appimage", "chirp-next", "20260814"},
+		{"UltiMaker-Cura-5.13.0-linux-X64.AppImage", "ultimaker-cura", "5.13.0"},
+		{"chamber-v3.1.5-linux-amd64", "chamber", "3.1.5"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.filename, func(t *testing.T) {
+			var metadata Metadata
+			inferNameVersion(tc.filename, &metadata)
+			if metadata.Package != tc.pkg || metadata.Version != tc.version {
+				t.Fatalf("inferred identity %+v, want package %q version %q", metadata, tc.pkg, tc.version)
+			}
+		})
+	}
+}
+
 func TestRejectsUnsafeArchivePaths(t *testing.T) {
 	dir := t.TempDir()
 	tests := []struct {
@@ -830,6 +874,85 @@ func TestAppImageRuntimeSymlinkWithoutExecutingAppRun(t *testing.T) {
 	if appRun == nil || !appRun.Executable || appRun.TextPreview != "#!/bin/sh\nexit 0\n" ||
 		appRun.ContentSHA256 == "" || appRun.ContentSHA256 != analysis.Install.AppRun.OriginalContentsSHA256 {
 		t.Fatalf("AppRun payload %+v sha %q", appRun, analysis.Install.AppRun.OriginalContentsSHA256)
+	}
+}
+
+func TestAppImageSymlinkAppRunTargetsExecutablePayload(t *testing.T) {
+	if _, err := exec.LookPath("mksquashfs"); err != nil {
+		t.Skip("squashfs-tools is required for AppImage inspection tests")
+	}
+	if _, err := exec.LookPath("unsquashfs"); err != nil {
+		t.Skip("squashfs-tools is required for AppImage inspection tests")
+	}
+
+	root := t.TempDir()
+	appDir := filepath.Join(root, "AppDir")
+	writeFile(t, filepath.Join(appDir, "Letos", "letos"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if err := os.Symlink("Letos/letos", filepath.Join(appDir, "AppRun")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(appDir, "letos.desktop"),
+		[]byte("[Desktop Entry]\nType=Application\nName=Letos\nExec=letos\nIcon=letos\n"), 0o644)
+
+	squashfs := filepath.Join(root, "payload.squashfs")
+	pack := exec.Command("mksquashfs", appDir, squashfs, "-noappend", "-processors", "1", "-quiet")
+	if out, err := pack.CombinedOutput(); err != nil {
+		t.Fatalf("mksquashfs: %v\n%s", err, out)
+	}
+	payload, err := os.ReadFile(squashfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 4096)
+	copy(header, []byte{0x7f, 'E', 'L', 'F'})
+	header[8] = 'A'
+	header[9] = 'I'
+	header[10] = 2
+	appImage := filepath.Join(root, "Letos-4.0.3-x86_64.AppImage")
+	writeFile(t, appImage, append(header, payload...), 0o644)
+
+	analysis, err := Analyze(appImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !analysis.Install.AppRun.Present || analysis.Install.AppRun.Script ||
+		analysis.Install.AppRun.ReviewReason != "Symlink AppRun; not a text script" {
+		t.Fatalf("AppRun %+v", analysis.Install.AppRun)
+	}
+	var appRun *PayloadEntry
+	for i := range analysis.Payload {
+		if analysis.Payload[i].Path == "AppRun" {
+			appRun = &analysis.Payload[i]
+		}
+	}
+	if appRun == nil || appRun.Type != "symlink" || appRun.SymlinkTarget != "Letos/letos" ||
+		!appRun.Executable {
+		t.Fatalf("AppRun payload %+v", appRun)
+	}
+	if len(analysis.Install.Launchers) != 1 ||
+		analysis.Install.Launchers[0].SourcePath != "AppRun" {
+		t.Fatalf("launchers %+v", analysis.Install.Launchers)
+	}
+}
+
+func TestExecutableAppRunSymlinkDoesNotEscapeAppDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "bin", "tool"), []byte("fixture"), 0o755)
+	if err := os.Symlink("bin/tool", filepath.Join(root, "AppRun")); err != nil {
+		t.Fatal(err)
+	}
+	if !executableAppRunSymlink(root, filepath.Join(root, "AppRun")) {
+		t.Fatal("safe executable AppRun symlink was rejected")
+	}
+	if err := os.Remove(filepath.Join(root, "AppRun")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/env", filepath.Join(root, "AppRun")); err != nil {
+		t.Fatal(err)
+	}
+	if executableAppRunSymlink(root, filepath.Join(root, "AppRun")) {
+		t.Fatal("AppRun symlink escaping the AppDir was accepted")
 	}
 }
 

@@ -3,18 +3,79 @@
 #include "gui/connection_dialog.hpp"
 
 #include <QFontMetrics>
+#include <QFileSystemWatcher>
 #include <QProgressBar>
 
 namespace pacsmith::gui {
+namespace {
+
+bool sameBackgroundSettings(const BackgroundUpdateSettings &left,
+                            const BackgroundUpdateSettings &right) {
+    return left.enabled == right.enabled && left.startAtLogin == right.startAtLogin &&
+           left.startMinimized == right.startMinimized && left.keepInTray == right.keepInTray &&
+           left.daily == right.daily && left.weekDay == right.weekDay &&
+           left.localTime == right.localTime &&
+           left.automaticallyPrepare == right.automaticallyPrepare &&
+           left.retainedPackageVersions == right.retainedPackageVersions &&
+           left.retainedCompleteReleases == right.retainedCompleteReleases;
+}
+
+bool sameHarnessProfiles(const QList<HarnessProfile> &left,
+                         const QList<HarnessProfile> &right) {
+    if (left.size() != right.size()) return false;
+    for (qsizetype index = 0; index < left.size(); ++index) {
+        const auto &a = left.at(index);
+        const auto &b = right.at(index);
+        if (a.name != b.name || a.executable != b.executable ||
+            a.arguments != b.arguments || a.isDefault != b.isDefault) return false;
+    }
+    return true;
+}
+
+bool sameAppSettings(const AppSettings &left, const AppSettings &right) {
+    return left.credentialSources == right.credentialSources &&
+           sameBackgroundSettings(left.updates, right.updates) &&
+           sameHarnessProfiles(left.harnessProfiles, right.harnessProfiles) &&
+           left.githubTokenConfigured == right.githubTokenConfigured &&
+           left.debAssociationPrompted == right.debAssociationPrompted &&
+           left.selfTrackingPrompted == right.selfTrackingPrompted;
+}
+
+void preserveLibrarySettings(const BackgroundUpdateSettings &current,
+                             BackgroundUpdateSettings &loaded) {
+    loaded.enabled = current.enabled;
+    loaded.daily = current.daily;
+    loaded.weekDay = current.weekDay;
+    loaded.localTime = current.localTime;
+    loaded.automaticallyPrepare = current.automaticallyPrepare;
+    loaded.retainedPackageVersions = current.retainedPackageVersions;
+    loaded.retainedCompleteReleases = current.retainedCompleteReleases;
+}
+
+} // namespace
 
 MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credentials,
                        QWidget *parent)
-    : QMainWindow(parent), settingsStore_(settingsStore), aiSettings_(settingsStore_.load()),
+    : QMainWindow(parent), settingsStore_(settingsStore), appSettings_(settingsStore_.load()),
       credentialStore_(credentials), buildService_(this),
-      installService_(this), signingKeyDownloadService_(this),
-      chatGptLoginService_(this) {
+      installService_(this), signingKeyDownloadService_(this) {
     setWindowTitle(QStringLiteral("PacSmith"));
     setAcceptDrops(true);
+    clientSettingsWatcher_ = new QFileSystemWatcher(this);
+    clientSettingsReloadTimer_ = new QTimer(this);
+    clientSettingsReloadTimer_->setSingleShot(true);
+    clientSettingsReloadTimer_->setInterval(75);
+    const auto settingsPath = settingsStore_.settingsPath();
+    const auto settingsDirectory = QFileInfo(settingsPath).absolutePath();
+    if (QDir().mkpath(settingsDirectory)) clientSettingsWatcher_->addPath(settingsDirectory);
+    if (QFileInfo::exists(settingsPath)) clientSettingsWatcher_->addPath(settingsPath);
+    const auto scheduleSettingsReload = [this] { clientSettingsReloadTimer_->start(); };
+    connect(clientSettingsWatcher_, &QFileSystemWatcher::directoryChanged,
+            this, scheduleSettingsReload);
+    connect(clientSettingsWatcher_, &QFileSystemWatcher::fileChanged,
+            this, scheduleSettingsReload);
+    connect(clientSettingsReloadTimer_, &QTimer::timeout,
+            this, &MainWindow::reloadClientSettings);
     qRegisterMetaType<UpdateCheckResult>();
     networkIoThread_.setObjectName(QStringLiteral("pacsmith-network-io"));
     debDownloadService_ = new DebDownloadService;
@@ -82,7 +143,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     newButton->setMenu(sidebarNewMenu);
     newButton->setToolTip(QStringLiteral("Create a project from a repository, GitHub release, package file, or direct download URL"));
     auto *settingsButton = new QPushButton(QStringLiteral("Settings"), leftPanel);
-    settingsButton->setToolTip(QStringLiteral("Configure library connection, AI providers, update checks, remote listening, and credentials"));
+    settingsButton->setToolTip(QStringLiteral("Configure external AI harnesses, update checks, remote listening, and credentials"));
     leftLayout->addLayout(packagesHeader);
     leftLayout->addWidget(projectList_, 1);
     auto *projectButtons = new QHBoxLayout;
@@ -185,8 +246,9 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     reanalyzeButton_->setToolTip(QStringLiteral(
         "Discard this release's package-setup decisions and rebuild them from the stored artifact"));
     workbenchHeader->addWidget(reanalyzeButton_, 0, Qt::AlignTop);
-    resolveWithAiButton_ = new QPushButton(QStringLiteral("Resolve Review Items with AI"), workbench);
-    workbenchHeader->addWidget(resolveWithAiButton_, 0, Qt::AlignTop);
+    askAiButton_ = new QPushButton(QStringLiteral("Ask AI…"), workbench);
+    askAiButton_->setToolTip(QStringLiteral("Launch your configured external AI harness with this PacSmith context"));
+    workbenchHeader->addWidget(askAiButton_, 0, Qt::AlignTop);
     stageTabs_ = new QTabWidget(workbench);
     auto *sourceHost = createStageHost(&sourceNav_, &sourceStack_);
     auto *modeSwitch = new QWidget(workbench);
@@ -247,6 +309,8 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
                          QStringLiteral("Contents"), createPayloadPage());
         addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigPkgbuild,
                          QStringLiteral("PKGBUILD"), createPkgbuildPage());
+        addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigMetadata,
+                         QStringLiteral("Package metadata"), createPackageMetadataPage());
         addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigLayout,
                          QStringLiteral("Install layout"), createInstallLayoutPage());
         addWorkbenchPage(1, configNav_, configStack_, EditorSection::ConfigDependencies,
@@ -282,7 +346,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     workbenchLayout->addWidget(stageTabs_, 1);
     connect(backButton, &QPushButton::clicked, this, &MainWindow::showProjectDashboard);
     connect(reanalyzeButton_, &QPushButton::clicked, this, &MainWindow::startReanalysis);
-    connect(resolveWithAiButton_, &QPushButton::clicked, this, &MainWindow::startAiResolution);
+    connect(askAiButton_, &QPushButton::clicked, this, &MainWindow::askExternalHarness);
     connect(stageTabs_, &QTabWidget::currentChanged, this, [this] {
         updateWorkbenchStageChrome();
         if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
@@ -1033,10 +1097,10 @@ void MainWindow::configureEditorProfile() {
     setSectionVisible(EditorSection::SourceScripts, hasScripts);
     setSectionVisible(EditorSection::SourceContents, !standalone);
     setSectionVisible(EditorSection::ConfigPkgbuild, custom);
+    setSectionVisible(EditorSection::ConfigMetadata, true);
     setSectionVisible(EditorSection::ConfigLayout,
                       !custom && (type == SourcePackageType::Archive || standalone));
-    setSectionVisible(EditorSection::ConfigDependencies,
-                      !custom && (packageContainer || !currentRelease()->dependencies.isEmpty()));
+    setSectionVisible(EditorSection::ConfigDependencies, !custom);
     setSectionVisible(EditorSection::ConfigScripts, !custom && (hasScripts || hasLifecycle));
     setSectionVisible(EditorSection::ConfigCommands,
                       !custom && (!currentRelease()->installMapping.launchers.isEmpty() ||
@@ -1096,9 +1160,30 @@ void MainWindow::setKeepRunningInTray(const bool enabled) {
     keepRunningInTray_ = enabled;
 }
 
+void MainWindow::reloadClientSettings() {
+    QString error;
+    auto loaded = settingsStore_.load(&error);
+    if (!error.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Could not reload client settings: %1").arg(error), 8000);
+        return;
+    }
+    preserveLibrarySettings(appSettings_.updates, loaded.updates);
+    const auto path = settingsStore_.settingsPath();
+    if (QFileInfo::exists(path) && !clientSettingsWatcher_->files().contains(path)) {
+        clientSettingsWatcher_->addPath(path);
+    }
+    if (sameAppSettings(appSettings_, loaded)) return;
+    appSettings_ = std::move(loaded);
+    const bool wantTray = appSettings_.updates.keepInTray && QSystemTrayIcon::isSystemTrayAvailable();
+    setKeepRunningInTray(wantTray);
+    QApplication::setQuitOnLastWindowClosed(!wantTray);
+    static_cast<void>(GuiInstanceServer::requestTray());
+    emit clientSettingsReloaded();
+}
+
 void MainWindow::applyLibrarySettings(const LibrarySettings &settings) {
     librarySettingsRevision_ = settings.revision;
-    settings.applyTo(aiSettings_);
+    settings.applyTo(appSettings_);
 }
 
 QString MainWindow::sessionCredential(const QString &name) const {
@@ -1150,7 +1235,6 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         hide();
         return;
     }
-    if (aiInProgress()) cancelRemoteAi();
     if (aptUpdateService_->isRunning()) cancelOnServiceThread(*aptUpdateService_);
     if (rpmUpdateService_->isRunning()) cancelOnServiceThread(*rpmUpdateService_);
     if (githubUpdateService_->isRunning()) cancelOnServiceThread(*githubUpdateService_);

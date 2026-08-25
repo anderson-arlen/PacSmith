@@ -7,9 +7,11 @@
 
 
 #include "core/pkgbuild_generator.hpp"
+#include "core/domain_validation.hpp"
 #include "core/pkgbuild_install_plan.hpp"
 #include "core/lifecycle_validator.hpp"
 #include "core/repository_trust.hpp"
+#include "core/system_package_query.hpp"
 #include "core/payload_inspector.hpp"
 #include "core/payload_review.hpp"
 #include "core/package_artifact.hpp"
@@ -17,7 +19,6 @@
 #include "core/github_update_service.hpp"
 #include "core/path_safety.hpp"
 #include "core/managed_package.hpp"
-#include "gui/ai_progress_dialog.hpp"
 #include "gui/age_unlock.hpp"
 #include "gui/command_progress_dialog.hpp"
 #include "gui/desktop_entry_highlighter.hpp"
@@ -89,6 +90,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollArea>
+#include <QScopedValueRollback>
 #include <QPixmap>
 #include <QPushButton>
 #include <QSizePolicy>

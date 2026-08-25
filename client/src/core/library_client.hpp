@@ -66,15 +66,6 @@ struct Registration {
 
 struct LibrarySettings {
     qint64 revision{1};
-    AiProviderKind provider{AiProviderKind::None};
-    QString model;
-    AiReasoningEffort reasoningEffort{AiReasoningEffort::ProviderDefault};
-    AiExecutionMode executionMode{AiExecutionMode::Standard};
-    bool automaticallyResolve{false};
-    bool githubTokenConfigured{false};
-    bool openaiConfigured{false};
-    bool xaiConfigured{false};
-    bool chatgptConfigured{false};
     bool updatesEnabled{false};
     bool updatesDaily{true};
     int weekDay{1};
@@ -83,7 +74,7 @@ struct LibrarySettings {
     int retainedPackageVersions{2};
     int retainedCompleteReleases{3};
 
-    void applyTo(AiSettings &settings) const;
+    void applyTo(AppSettings &settings) const;
 };
 
 struct RepoSettings {
@@ -168,15 +159,10 @@ public:
     [[nodiscard]] bool writeFile(const QString &releaseId, const QString &name,
                                  const QString &contents, qint64 revision,
                                  QString *error = nullptr) const;
+    [[nodiscard]] bool deleteFile(const QString &releaseId, const QString &name,
+                                  qint64 revision, QString *error = nullptr) const;
     [[nodiscard]] std::optional<JobStatus> startBuild(const QString &releaseId,
                                                       QString *error = nullptr) const;
-    [[nodiscard]] std::optional<JobStatus> startAiReview(const QString &releaseId,
-                                                         QString *error = nullptr) const;
-    [[nodiscard]] std::optional<JobStatus> startGitHubAssetAi(
-        const QString &owner, const QString &repository, const QStringList &assets,
-        const QString &preferredAsset, QString *error = nullptr) const;
-    [[nodiscard]] std::optional<QStringList> listAiModels(const QString &provider,
-                                                          QString *error = nullptr) const;
     [[nodiscard]] std::optional<JobStatus> getJob(const QString &jobId,
                                                   QString *error = nullptr) const;
     [[nodiscard]] std::optional<JobStatus> waitForJob(const QString &jobId,

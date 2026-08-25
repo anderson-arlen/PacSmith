@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-func analyzeArchive(path string, archPackage bool) (Analysis, error) {
-	result, err := walkArchiveStream(path, archPackage, func(fn func(walkedEntry, io.Reader) error) error {
-		if tarErr := walkTarFile(path, path, fn); tarErr == nil {
+func analyzeArchive(path, originalFilename string, archPackage bool) (Analysis, error) {
+	result, err := walkArchiveStream(originalFilename, archPackage, func(fn func(walkedEntry, io.Reader) error) error {
+		if tarErr := walkTarFile(path, originalFilename, fn); tarErr == nil {
 			return nil
 		} else {
 			if zipErr := walkZipFile(path, fn); zipErr == nil {

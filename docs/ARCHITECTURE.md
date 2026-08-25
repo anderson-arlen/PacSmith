@@ -8,7 +8,7 @@ PacSmith is a conversion workbench from vendor Linux artifacts into ordinary pac
 
 The client/server rewrite is in place for library ownership. `pacsmithd` stores projects, releases, artifacts, jobs, credentials, and PKI. The GUI and CLI speak HTTP to that daemon (Unix socket locally, HTTPS/mTLS remotely) and must not write `$XDG_DATA_HOME/pacsmith/projects`.
 
-AI provider HTTP (package review, GitHub asset-rule generation, model catalog, ChatGPT token refresh) runs on `pacsmithd`. ChatGPT browser PKCE login stays on the client; the resulting session is stored on the daemon. GitHub REST asset listing for the import chooser stays on the client; generating a regex from those names is a daemon job.
+PacSmith has no built-in LLM provider integration. An external harness owns conversation, model authentication, history, screenshots/files, and web access. PacSmith exposes its existing domain and API through a portable Agent Plugin containing `pacsmith mcp` and its Agent Skill.
 
 Still on the C++ client, by design: libalpm installed-package queries and `pkexec pacman`. Still not daemon-owned: scheduled upstream update polling (CLI/GUI `check` still uses in-process APT/RPM/GitHub helpers). Physical testing remains for the GUI, polkit install, linger plus the systemd user unit, Secret Service, and mTLS fingerprint enrollment UX.
 
@@ -27,7 +27,7 @@ The two trees are separate programs with separate toolchains. They share one HTT
 
 `pacsmithd` owns the PacSmith library.
 
-The GUI and CLI MUST NOT directly read or write library storage. Library operations always go through `pacsmithd`, including projects, releases, source and update configuration, upstream checks, dependency mappings, artifact ingestion, package inspection, preparation, builds, AI provider calls, editable build files, background polling, jobs, server-side credentials, client registration, and client authorization/revocation.
+The GUI, CLI, and MCP server MUST NOT directly read or write library storage. Persisted library operations always go through `pacsmithd`, including projects, releases, source and update configuration, update-check evidence, dependency mappings, artifact ingestion, package inspection, preparation, builds, editable build files, jobs, server-side credentials, client registration, and client authorization/revocation. The normal client-side update checker may contact the configured upstream source, but records discoveries and imports artifacts only through the authenticated PacSmith API.
 
 There is no in-process local shortcut that invokes a second implementation of library logic. Local and remote management are the same product: the same HTTP API, handlers, authorization/service layer, storage, and artifact-transfer path.
 
@@ -161,11 +161,11 @@ normally `~/.local/share/pacsmith/projects`, is **legacy data**. New code must n
 
 Pre-refactor client config (`$XDG_CONFIG_HOME/pacsmith/settings.json`, `secrets.age`) and state (`$XDG_STATE_HOME/pacsmith/update-state.json`) likewise remain outside the new ownership boundary. New client/server code uses the `client/` and `server/` subdirectories.
 
-Library-wide settings live on `pacsmithd` (`GET`/`PATCH /api/v1/settings`): AI provider and model, update-check schedule, automatic preparation, and retention. This-machine GUI session options (tray, start at login, MIME onboarding) stay in the new client config tree. Client connection mode (local Unix vs remote host:port) stays in `$XDG_CONFIG_HOME/pacsmith/client/connection.json` and is edited from the GUI connection control on the status bar, not from Settings. HTTPS listen enable/interfaces/port live on `GET`/`PATCH /api/v1/server` (local-admin only). Client enrollment (list/approve/reject/revoke) is local-Unix PKI administration; the GUI Settings Library tab shows registration approval only while the host is listening, and hides that tab entirely when this GUI is itself a remote client.
+Library-wide settings live on `pacsmithd` (`GET`/`PATCH /api/v1/settings`): update-check schedule, automatic preparation, and retention. This-machine GUI session options (tray, start at login, MIME onboarding, external-harness launch profiles) stay in the client config tree. Old AI columns remain inert only for database compatibility and are reset by migration. Client connection mode (local Unix vs remote host:port) stays in `$XDG_CONFIG_HOME/pacsmith/client/connection.json` and is edited from the GUI connection control on the status bar, not from Settings. HTTPS listen enable/interfaces/port live on `GET`/`PATCH /api/v1/server` (local-admin only). Client enrollment (list/approve/reject/revoke) is local-Unix PKI administration; the GUI Settings Library tab shows registration approval only while the host is listening, and hides that tab entirely when this GUI is itself a remote client.
 
 ## Jobs and background work
 
-Long-running library work (update checks, downloads, inspection, preparation, builds, AI reviews) uses a modest server-side job model. A command may return `202 Accepted` with a `job_id`. Clients poll over HTTP. Incremental logs use an offset/cursor. Prefer polling over WebSockets/SSE in v1. Do not log full prompts or provider request bodies; package scripts in evidence are untrusted.
+Long-running library work (update checks, downloads, inspection, preparation, and builds) uses a modest server-side job model. A command may return `202 Accepted` with a `job_id`. Clients poll over HTTP. Incremental logs use an offset/cursor. Prefer polling over WebSockets/SSE in v1. Package scripts in evidence are untrusted.
 
 On daemon restart: queued work may resume where sensible; actively running jobs generally become interrupted/failed; update polling is rescheduled. Do not magically resume an interrupted `makepkg` unless an operation is explicitly designed for it. Simultaneous clients must not race duplicate update checks.
 
@@ -200,7 +200,7 @@ Revocation lives in SQLite and takes effect immediately even if the X.509 certif
 
 ## Secrets
 
-Library credentials belong to the server because `pacsmithd` performs the work that needs them (AI keys, GitHub tokens, ChatGPT/session material, CA keys, and similar).
+Library credentials belong to the server because `pacsmithd` performs the work that needs them (GitHub tokens, CA keys, repository signing keys, and similar). PacSmith stores no AI-provider API keys or subscription sessions.
 
 The daemon must restart and do background work without an encryption passphrase. The pre-refactor age-passphrase store is not the daemon secret backend.
 
@@ -215,8 +215,6 @@ The selected backend is persisted. If Secret Service later becomes unavailable, 
 Clients may set, replace, delete, and query **status** of named credentials (`configured`, `backend`). There is no API that returns stored secret values.
 
 The remote client’s mTLS private key stays on the client under the new client data/config hierarchy with owner-only permissions.
-
-Interactive ChatGPT OAuth (PKCE, loopback `localhost:1455`) remains a **client** UX step. The resulting token bundle is stored on the server through the credential API, not kept as GUI-owned authoritative secret state.
 
 ## Host-local operations
 
@@ -330,15 +328,43 @@ GitHub uses the public REST API with an optional PAT. Drafts are ignored; prerel
 
 In the GUI, discovery and preparation stay separate states. Automatic preparation is a library policy executed by `pacsmithd`, not a second client-side downloader.
 
-## Optional AI resolution
+## External agent integration
 
-Deterministic inspection always runs first. `pacsmithd` then makes the provider HTTP call. Clients enqueue a job (`POST /api/v1/releases/{id}/ai` or `POST /api/v1/ai/github-asset-rule`), poll it, and apply the result. They do not call OpenAI, xAI, or ChatGPT Responses themselves. Model listing is `GET /api/v1/ai/models` on the daemon, using the stored credential. Missing provider, credential, or model is a `400` before a job is queued.
+```text
+User's AI harness
+    └── PacSmith Agent Plugin
+         ├── PacSmith Agent Skill
+         └── stdio MCP (`pacsmith mcp`)
+             ↓
+       shared LibraryClient
+             ↓ normal HTTP API
+          pacsmithd
+```
 
-The evidence bundle is size-bounded JSON. Package content is labeled as untrusted prompt data. Vendor binaries are not sent. Architecture in that bundle is the library host (`pacsmithd`), not the GUI machine. Providers: ChatGPT subscription-backed Responses, OpenAI Responses, xAI Responses. Requests have a fixed transport/output budget and an absolute deadline. Reviews are single-request; a non-empty `informationRequests` array is a failed job, not a local follow-up.
+The harness owns the conversation, provider credentials, model selection, history, screenshots/files, web access, plugin installation, and MCP trust. PacSmith does not implement ACP, a harness registry, harness-specific configuration, or background model calls. The package installs a vendor-neutral Agent Plugins 1.0 bundle containing the Skill and `mcp.json`; `pacsmith plugin path` reports its canonical directory. `pacsmith skill install` safely copies the same Skill to the cross-harness standalone convention `~/.agents/skills/pacsmith`, while `pacsmith skill path` reports the active copy.
 
-The response is constrained to typed field changes, finding dispositions, an empty information-request array, and an optional Arch lifecycle file. `AiResolutionApplier` stays on the client. It accepts only an explicit field allowlist, refuses signing-key hashes not already trusted from vendor evidence or a user import, preserves user-owned values unless separately approved, and validates package names and payload paths.
+A standalone Skill cannot grant execution permission or add tools to an active harness session. When the Skill is present but MCP is absent, it must ask the user whether to install the integration and stop. Only after approval may it use the harness's native plugin/MCP installation control. It never substitutes CLI project operations, direct HTTP, Unix-socket access, D-Bus, daemon management, database access, or filesystem scraping. This boundary also prevents a local-only fallback from silently breaking the configured remote PacSmith connection.
 
-Vendor AppArmor profiles remain packaged even when AppArmor is not currently enabled on a particular client machine. PacSmith never asks the model whether AppArmor happens to be active during analysis. AppArmor policy in the evidence bundle is package policy, not host AppArmor state.
+MCP constructs the same `LibraryClient` as the normal CLI. Its local Unix-socket or remote HTTPS/mTLS connection comes from the same connection config. It never opens SQLite, reads the artifact store, or assumes that `pacsmithd` is local. Stdio stdout is JSON-RPC only; diagnostics use stderr.
+
+Ordinary recipe saves use the revisioned release-configuration API. The client sends only an allowlisted set of human-editable recipe fields; large payload inventories and other PacSmith-owned inspection/artifact evidence stay on `pacsmithd`. This avoids re-uploading a complete inspection document for a one-field edit, and the server rejects attempts to include evidence fields in a configuration patch.
+
+Tools are typed, domain-oriented projections of normal PacSmith operations. They cover projects/releases, acquisition and inspection evidence, package metadata, inspected mappings and explicit runtime dependencies, payload, lifecycle, AppRun, launchers, desktop entries/icons, Guided/Custom recipes, deterministic update checks, builds/jobs/logs/artifacts, project/global repository and signing state, library automation/retention, local-admin remote enrollment, GitHub credential status, client tray/login preferences, and the same generic harness-launch profiles exposed in GUI settings. The GUI's Package metadata and Dependencies pages expose the same metadata and additional-dependency state as MCP. Harness profile tools retain structured executable/argv values and operate on the client settings belonging to the host running MCP; they do not configure the connected AI harness. There is no generic JSON/state mutation tool. If a mutation is not a legitimate human-facing PacSmith feature, MCP does not gain it.
+
+Tool annotations describe read-only, destructive, idempotent, and open-world behavior. They are advisory. A central PacSmith permission policy additionally requires MCP form elicitation for destructive project/release deletion, resetting a release through reanalysis, published/global repository and signing changes, library automation/retention changes, login autostart, remote listener/client trust, and credential changes. The client response must explicitly accept and set the confirmation field. A client without form elicitation fails closed and the user must use a compatible client or perform the operation directly through PacSmith.
+
+Every mutating project and release tool input uses human-readable project/package names and release versions from `list_projects`. UUIDs remain available to read tools as stable lookup identifiers, but are not the sole target shown to a person in a harness preflight. Sensitive operations also use the server-verified names in PacSmith's elicitation prompt.
+
+Routine recipe edits do not trigger confirmation spam. The boundary is maintained project state versus deletion, trust/system changes, or published repository state. PacSmith currently does not expose package installation or repository bootstrap/trust installation through MCP.
+
+Automatic updates remain deterministic:
+
+```text
+discover → acquire/verify → inspect → carry known decisions
+         → continue when safety rules permit, otherwise Needs Review
+```
+
+Guided mode carries only supported structured behavior. Arbitrary Bash/filesystem logic belongs in Custom PKGBUILD. A Custom PKGBUILD and explicit text support files copy forward verbatim from the most applicable release; PacSmith-owned artifacts, inspection state, and build output do not. `pacsmith.vars` is freshly generated for the new release. No shell-code merge occurs and historical releases are immutable.
 
 ## Installation prefix and units
 
@@ -388,7 +414,7 @@ These current behaviors are real, and they are intentionally replaced:
 | `pacsmith-update.timer` (already disabled in current C++) | Persistent `pacsmithd.service` |
 | Clients open PKGBUILD paths on disk | Editable-file APIs + streaming |
 | `BuildService` as a client `QProcess` | Server job running `makepkg` unprivileged on the library host |
-| GUI/CLI call OpenAI, xAI, or ChatGPT Responses in-process | `pacsmithd` jobs plus `SecretStore`; clients apply the result |
+| Built-in provider calls, OAuth, model catalogs, and one-shot AI review jobs | External harness using `pacsmith mcp` and the PacSmith Agent Skill |
 
 The current C++ `GuiInstanceServer` local socket (`pacsmith-gui-<uid>`) is a single-instance GUI helper, not a library protocol. It may remain a client-side concern.
 

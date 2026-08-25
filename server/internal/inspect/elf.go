@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-func analyzeELF(path string) (Analysis, error) {
+func analyzeELF(path, originalFilename string) (Analysis, error) {
 	file, err := openRegular(path)
 	if err != nil {
 		return Analysis{}, err
@@ -48,9 +48,9 @@ func analyzeELF(path string) (Analysis, error) {
 
 	var result Analysis
 	result.Type = SourceELF
-	inferNameVersion(path, &result.Metadata)
+	inferNameVersion(originalFilename, &result.Metadata)
 	result.Metadata.Architecture = architecture
-	filename := filepath.Base(path)
+	filename := filepath.Base(originalFilename)
 	result.Install.BinarySourcePath = filename
 	result.Install.BinaryDestination = "/usr/bin/" + result.Metadata.Package
 	result.Install.Launchers = []LauncherMapping{{

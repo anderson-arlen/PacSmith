@@ -65,8 +65,6 @@ type Release struct {
 	DisplayName            string
 	ArchPackageName        string
 	CompatPackageName      string
-	Provides               []string
-	Conflicts              []string
 	SourceType             SourceType
 	Acquisition            Acquisition
 	InstallMapping         InstallMapping
@@ -75,6 +73,7 @@ type Release struct {
 	ArchPkgrel             int
 	ArchPkgrelOverride     string
 	Debian                 DebianMetadata
+	PackageMetadata        PackageMetadata
 	Dependencies           []Dependency
 	PayloadRules           []PayloadRule
 	Lifecycle              LifecycleScript
@@ -93,6 +92,15 @@ type DebianMetadata struct {
 	Homepage     string
 	Provides     string
 	Conflicts    string
+}
+
+type PackageMetadata struct {
+	Description            string
+	Homepage               string
+	Licenses               []string
+	Provides               []string
+	Conflicts              []string
+	AdditionalDependencies []string
 }
 
 type Dependency struct {

@@ -1,5 +1,7 @@
 #include "core/project_store/internal.hpp"
 
+#include "core/release_review.hpp"
+
 #include "core/apt_repository.hpp"
 #include "core/apt_sources.hpp"
 #include "core/deb_analyzer.hpp"
@@ -830,6 +832,7 @@ bool repairSloganDisplayName(Project &project) {
 
 void carryForward(const PackageRelease &previous, PackageRelease &next,
                   const QString &previousPkgbuild) {
+    next.packageMetadata = previous.packageMetadata;
     for (auto &dependency : next.dependencies) {
         const auto old = std::find_if(previous.dependencies.cbegin(), previous.dependencies.cend(),
                                       [&](const auto &candidate) {
@@ -993,66 +996,19 @@ void carryForward(const PackageRelease &previous, PackageRelease &next,
         next.installMapping.appRun.acknowledgedFingerprint =
             previous.installMapping.appRun.acknowledgedFingerprint;
     }
-    if (previous.pkgbuildManuallyModified) next.previousManualPkgbuild = previousPkgbuild;
+    if (previous.pkgbuildManuallyModified) {
+        next.customPkgbuild = previousPkgbuild.isEmpty() ? previous.customPkgbuild : previousPkgbuild;
+        next.customFiles = previous.customFiles;
+        next.pkgbuildManuallyModified = true;
+    }
 }
 
 bool archiveDesktopCommandUnmapped(const PackageRelease &release) {
-    if (release.sourceType != SourcePackageType::Archive) return false;
-    QSet<QString> exposed;
-    for (const auto &launcher : release.installMapping.launchers) {
-        if (!launcher.enabled || launcher.missing || launcher.commandName.isEmpty()) continue;
-        exposed.insert(launcher.commandName.toLower());
-        if (!launcher.destination.isEmpty()) {
-            exposed.insert(QFileInfo(launcher.destination).fileName().toLower());
-        }
-    }
-    for (const auto &desktop : release.installMapping.desktopEntries) {
-        if (!desktop.enabled) continue;
-        const auto command = desktopEntryCommand(desktop.contents);
-        if (command.isEmpty()) continue;
-        if (!exposed.contains(command.toLower())) return true;
-    }
-    return false;
+    return pacsmith::archiveDesktopCommandUnmapped(release);
 }
 
 bool releaseNeedsReview(const PackageRelease &release) {
-    if (release.installMapping.appRun.requiresReview() ||
-        release.installMapping.icon.missing || archiveDesktopCommandUnmapped(release) ||
-        std::any_of(release.installMapping.launchers.cbegin(),
-                    release.installMapping.launchers.cend(),
-                    [](const auto &launcher) { return launcher.enabled && launcher.missing; }) ||
-        std::any_of(release.installMapping.desktopEntries.cbegin(),
-                    release.installMapping.desktopEntries.cend(),
-                    [](const auto &desktop) { return desktop.enabled && desktop.missing; })) {
-        return true;
-    }
-    if (std::any_of(release.dependencies.cbegin(), release.dependencies.cend(),
-                    [](const auto &dependency) {
-                        return dependency.status == MappingStatus::Unresolved;
-                    })) return true;
-    if (release.sourceType != SourcePackageType::AppImage) {
-        for (const auto &entry : release.payload) {
-            if (entry.requiresReview && PayloadReview::state(release, entry).needsReview) return true;
-        }
-    }
-    if (!release.lifecycleScript.contents.isEmpty() &&
-        (!release.lifecycleScript.validationPassed ||
-         release.lifecycleScript.requiresAcknowledgement())) return true;
-    for (const auto &finding : release.scriptFindings) {
-        const auto script = std::find_if(release.maintainerScripts.cbegin(),
-                                         release.maintainerScripts.cend(),
-                                         [&](const auto &candidate) {
-                                             return candidate.name == finding.scriptName;
-                                         });
-        if (script != release.maintainerScripts.cend() && !script->requiresReview()) continue;
-        if (finding.disposition == ScriptDisposition::Unresolved) return true;
-        if (finding.disposition == ScriptDisposition::LifecycleRequired &&
-            (!release.lifecycleScript.validationPassed ||
-             !release.lifecycleScript.sourceFingerprints.contains(finding.evidenceFingerprint))) {
-            return true;
-        }
-    }
-    return false;
+    return !releaseReviewIssues(release).isEmpty();
 }
 
 } // namespace pacsmith::project_store_internal
