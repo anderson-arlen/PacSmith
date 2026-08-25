@@ -53,6 +53,7 @@ type Manager struct {
 	canceled      map[string]struct{}
 	currentID     string
 	currentCancel context.CancelFunc
+	observer      func(Job)
 }
 
 func New(db *sqlite.DB, logDir string, handle Handler) (*Manager, error) {
@@ -127,7 +128,24 @@ func (m *Manager) Enqueue(ctx context.Context, kind string, payload any, project
 	case <-ctx.Done():
 		return Job{}, ctx.Err()
 	}
-	return jobFromRow(row), nil
+	job := jobFromRow(row)
+	m.notify(job)
+	return job, nil
+}
+
+func (m *Manager) SetObserver(observer func(Job)) {
+	m.mu.Lock()
+	m.observer = observer
+	m.mu.Unlock()
+}
+
+func (m *Manager) notify(job Job) {
+	m.mu.Lock()
+	observer := m.observer
+	m.mu.Unlock()
+	if observer != nil {
+		observer(job)
+	}
 }
 
 func (m *Manager) Cancel(id string) error {
@@ -199,7 +217,7 @@ func (m *Manager) run(ctx context.Context, id string) {
 	m.mu.Unlock()
 	started := time.Now().UTC().Format(time.RFC3339Nano)
 	if skipped {
-		_, _ = m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
+		updated, updateErr := m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
 			Status:     "interrupted",
 			Error:      "canceled",
 			LogOffset:  m.logSize(id),
@@ -209,6 +227,9 @@ func (m *Manager) run(ctx context.Context, id string) {
 			ReleaseID:  row.ReleaseID,
 			ID:         row.ID,
 		})
+		if updateErr == nil {
+			m.notify(jobFromRow(updated))
+		}
 		return
 	}
 	row, err = m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
@@ -224,6 +245,7 @@ func (m *Manager) run(ctx context.Context, id string) {
 	if err != nil {
 		return
 	}
+	m.notify(jobFromRow(row))
 	jobCtx, cancel := context.WithCancel(ctx)
 	m.mu.Lock()
 	m.currentID = id
@@ -265,7 +287,7 @@ func (m *Manager) run(ctx context.Context, id string) {
 		logFn(errText + "\n")
 	}
 	offset := m.logSize(id)
-	_, _ = m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
+	updated, updateErr := m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
 		Status:     status,
 		Error:      errText,
 		LogOffset:  offset,
@@ -275,6 +297,9 @@ func (m *Manager) run(ctx context.Context, id string) {
 		ReleaseID:  row.ReleaseID,
 		ID:         row.ID,
 	})
+	if updateErr == nil {
+		m.notify(jobFromRow(updated))
+	}
 }
 
 func (m *Manager) appendLog(id, text string) error {

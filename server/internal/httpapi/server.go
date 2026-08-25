@@ -11,6 +11,7 @@ import (
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
+	"github.com/anderson-arlen/pacsmith/server/internal/events"
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
 	"github.com/anderson-arlen/pacsmith/server/internal/listen"
@@ -41,6 +42,7 @@ type Config struct {
 	Repo        *repo.Service
 	ApplyRepo   func(listen.Config) error
 	RepoBound   func() []string
+	Events      *events.Hub
 }
 
 type Server struct {
@@ -49,10 +51,17 @@ type Server struct {
 }
 
 func New(cfg Config) http.Handler {
+	if cfg.Events == nil {
+		cfg.Events = events.New()
+	}
 	server := &Server{Config: cfg, limiter: newIPLimiter()}
+	if cfg.Jobs != nil {
+		cfg.Jobs.SetObserver(server.publishJob)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/version", server.version)
 	mux.HandleFunc("GET /api/v1/health", server.health)
+	mux.HandleFunc("GET /api/v1/events", server.streamEvents)
 	mux.HandleFunc("POST /api/v1/artifacts", server.createArtifact)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}", server.getArtifact)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/content", server.getArtifactContent)
@@ -61,6 +70,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", server.patchProject)
 	mux.HandleFunc("DELETE /api/v1/projects/{id}", server.deleteProject)
 	mux.HandleFunc("GET /api/v1/releases/{id}", server.getRelease)
+	mux.HandleFunc("GET /api/v1/releases/{id}/payload-inspection", server.inspectPayloadFile)
 	mux.HandleFunc("PUT /api/v1/releases/{id}", server.putRelease)
 	mux.HandleFunc("PATCH /api/v1/releases/{id}/configuration", server.patchReleaseConfiguration)
 	mux.HandleFunc("DELETE /api/v1/releases/{id}", server.deleteRelease)
@@ -118,8 +128,31 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, "forbidden", "not authorized")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), principal)))
+		r = r.WithContext(auth.WithPrincipal(r.Context(), principal))
+		if !isMutation(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		response := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(response, r)
+		if response.status >= http.StatusOK && response.status < http.StatusMultipleChoices {
+			s.publishMutation(r)
+		}
 	})
+}
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusResponseWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func isMutation(method string) bool {
+	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
 }
 
 func (s *Server) principalFor(r *http.Request) auth.Principal {

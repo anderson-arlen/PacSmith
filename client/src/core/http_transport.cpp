@@ -48,6 +48,24 @@ size_t writeCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return total;
 }
 
+struct StreamContext {
+    const std::function<bool(const QByteArray &)> *receive{nullptr};
+    const std::stop_token *stopToken{nullptr};
+};
+
+size_t streamWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    auto *context = static_cast<StreamContext *>(userdata);
+    const auto total = size * nmemb;
+    if (context->stopToken->stop_requested()) return 0;
+    const QByteArray chunk(ptr, static_cast<qsizetype>(total));
+    return (*context->receive)(chunk) ? total : 0;
+}
+
+int streamProgressCallback(void *userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    const auto *stopToken = static_cast<const std::stop_token *>(userdata);
+    return stopToken->stop_requested() ? 1 : 0;
+}
+
 size_t headerCallback(char *buffer, size_t size, size_t nitems, void *userdata) {
     auto *headers = static_cast<QMap<QString, QString> *>(userdata);
     const auto total = size * nitems;
@@ -319,6 +337,42 @@ bool HttpTransport::downloadToFile(const QString &path, const QString &destinati
         return false;
     }
     return true;
+}
+
+HttpStreamResult HttpTransport::stream(
+    const QString &path, const std::stop_token stopToken,
+    const std::function<bool(const QByteArray &)> &receive) const {
+    HttpStreamResult result;
+    CURL *curl = curl_easy_init();
+    if (curl == nullptr) {
+        result.error = QStringLiteral("could not initialize HTTP client");
+        return result;
+    }
+    applyConnection(curl, config_);
+    const auto url = joinOrigin(config_, path);
+    StreamContext context{&receive, &stopToken};
+    curl_easy_setopt(curl, CURLOPT_URL, url.toUtf8().constData());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, streamWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &context);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, streamProgressCallback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &stopToken);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "Accept: text/event-stream");
+    headers = curl_slist_append(headers, "Cache-Control: no-cache");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    const auto code = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    result.status = static_cast<int>(status);
+    result.canceled = stopToken.stop_requested();
+    if (code != CURLE_OK && !result.canceled) {
+        result.error = QString::fromUtf8(curl_easy_strerror(code));
+    }
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return result;
 }
 
 } // namespace pacsmith

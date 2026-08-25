@@ -10,7 +10,9 @@ QString basePrompt(const QString &projectId, const QString &releaseId) {
     if (!releaseId.isEmpty()) prompt += QStringLiteral(", release %1").arg(releaseId);
     prompt += QStringLiteral(
         ".\nUse the PacSmith MCP tools to inspect the actual current project/release state before "
-        "making conclusions. If PacSmith MCP tools are unavailable, do not use PacSmith CLI "
+        "making conclusions. Use get_payload for the package inventory and "
+        "get_payload_file_inspection for detailed file or ELF evidence; do not download or unpack "
+        "the source artifact for inspection. If PacSmith MCP tools are unavailable, do not use PacSmith CLI "
         "project commands, sockets, D-Bus, or daemon access as a substitute. Ask me whether to "
         "install the PacSmith integration, then after approval use this harness's native plugin or "
         "MCP installer with the bundle reported by `pacsmith plugin path`. Resume only after the "

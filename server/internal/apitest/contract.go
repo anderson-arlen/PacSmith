@@ -1,6 +1,7 @@
 package apitest
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +116,7 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			t.Fatal("missing server_version")
 		}
 		if !contains(body.Capabilities, "http") || !contains(body.Capabilities, "unix") ||
-			!contains(body.Capabilities, "library") {
+			!contains(body.Capabilities, "library") || !contains(body.Capabilities, "events") {
 			t.Fatalf("capabilities %v", body.Capabilities)
 		}
 	})
@@ -246,6 +248,26 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			t.Fatalf("projects %+v", projects)
 		}
 		releaseID := projects.Projects[0].Releases[0].ID
+		inspectionResp := mustDo(t, client, origin, http.MethodGet,
+			"/api/v1/releases/"+releaseID+"/payload-inspection?path="+
+				url.QueryEscape("usr/bin/pacsmith-smoke"), nil, nil)
+		if inspectionResp.StatusCode != http.StatusOK {
+			t.Fatalf("payload inspection %d %s", inspectionResp.StatusCode, readBody(t, inspectionResp))
+		}
+		var inspection struct {
+			Path       string `json:"path"`
+			Mode       string `json:"mode"`
+			Executable bool   `json:"executable"`
+			SHA256     string `json:"sha256"`
+			Text       string `json:"text"`
+		}
+		decodeJSON(t, inspectionResp, &inspection)
+		inspectionResp.Body.Close()
+		if inspection.Path != "usr/bin/pacsmith-smoke" || inspection.Mode != "0755" ||
+			!inspection.Executable || inspection.SHA256 == "" ||
+			!strings.Contains(inspection.Text, "PacSmith fixture payload") {
+			t.Fatalf("payload inspection %+v", inspection)
+		}
 		pkgbuild := mustDo(t, client, origin, http.MethodGet, "/api/v1/releases/"+releaseID+"/files/PKGBUILD", nil, nil)
 		defer pkgbuild.Body.Close()
 		body := readBody(t, pkgbuild)
@@ -406,6 +428,46 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			t.Fatalf("expected revision conflict, got %d %s", conflict.StatusCode, readBody(t, conflict))
 		}
 	})
+	t.Run("event_stream", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/api/v1/events", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stream.Body.Close()
+		if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" {
+			t.Fatalf("event stream status=%d content-type=%q", stream.StatusCode, stream.Header.Get("Content-Type"))
+		}
+		reader := bufio.NewReader(stream.Body)
+		if initial := readSSE(t, reader); !strings.Contains(initial, "event: sync") ||
+			!strings.Contains(initial, `"topics":["all"]`) {
+			t.Fatalf("unexpected initial event %q", initial)
+		}
+
+		settingsResponse := mustDo(t, client, origin, http.MethodGet, "/api/v1/settings", nil, nil)
+		var settings map[string]any
+		decodeJSON(t, settingsResponse, &settings)
+		settingsResponse.Body.Close()
+		payload, err := json.Marshal(settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		patched := mustDo(t, client, origin, http.MethodPatch, "/api/v1/settings",
+			map[string]string{"Content-Type": "application/json"}, payload)
+		if patched.StatusCode != http.StatusOK {
+			t.Fatalf("event mutation status %d %s", patched.StatusCode, readBody(t, patched))
+		}
+		patched.Body.Close()
+		if changed := readSSE(t, reader); !strings.Contains(changed, "event: change") ||
+			!strings.Contains(changed, `"topics":["settings"]`) {
+			t.Fatalf("unexpected change event %q", changed)
+		}
+	})
 	t.Run("builtin_ai_api_is_gone", func(t *testing.T) {
 		for _, path := range []string{"/api/v1/ai/models", "/api/v1/ai/github-asset-rule"} {
 			response := mustDo(t, client, origin, http.MethodGet, path, nil, nil)
@@ -423,6 +485,21 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			}
 		}
 	})
+}
+
+func readSSE(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	var block strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		block.WriteString(line)
+		if line == "\n" || line == "\r\n" {
+			return block.String()
+		}
+	}
 }
 
 func AssertLegacyUntouched(t *testing.T, dataHome string, before map[string]string) {

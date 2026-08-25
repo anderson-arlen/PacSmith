@@ -11,6 +11,21 @@ struct ProjectLoadResult {
     QString error;
 };
 
+struct ProjectListRefreshResult {
+    QList<Project> projects;
+    QString error;
+};
+
+struct RepositoryTaskResult {
+    std::optional<ProjectRepository> status;
+    QString error;
+};
+
+struct ProjectDeletionResult {
+    bool succeeded{false};
+    QString error;
+};
+
 } // namespace
 
 void MainWindow::updateDashboardActions() {
@@ -480,7 +495,7 @@ void MainWindow::publishUpdateCheckActivity(const bool running, const QString &p
     updateState.checkingProjectId.clear();
     updateState.checkingProjectName.clear();
     if (updateState.preparingProjectId.isEmpty()) {
-        applyAvailableUpdateCensus(updateState, library_.list());
+        applyAvailableUpdateCensus(updateState, projectCache_.values());
         updateState.message = finishedUpdateCheckStatus(updateState);
     }
     static_cast<void>(BackgroundUpdateStateStore::save(updateState));
@@ -496,7 +511,7 @@ QString MainWindow::displayNameForProject(const QString &projectId) const {
     if (cached != projectCache_.cend()) {
         return cached->displayName.isEmpty() ? cached->archPackageName : cached->displayName;
     }
-    return projectId;
+    return QStringLiteral("Package");
 }
 
 void MainWindow::publishPreparationActivity() {
@@ -532,7 +547,7 @@ void MainWindow::clearPublishedPreparationActivity(const QString &projectId) {
 void MainWindow::startListDownloadActivity(const QString &projectId, const QString &releaseId) {
     if (projectId.isEmpty()) return;
     const bool known = (project_ && project_->id == projectId) || projectCache_.contains(projectId);
-    if (!known && !library_.load(projectId, nullptr)) return;
+    if (!known) return;
     preparingProjectId_ = projectId;
     preparingReleaseId_ = releaseId;
     preparationPhase_ = QStringLiteral("Downloading");
@@ -573,57 +588,82 @@ void MainWindow::resetPreparationState() {
 
 void MainWindow::reloadVisibleProjects(const bool refreshOpenProject) {
     const auto projectId = project_ ? project_->id : QString{};
-    refreshProjectList(projectId);
-    if (!projectId.isEmpty() && (!project_ || project_->id != projectId)) loadProject(projectId);
-    if (refreshOpenProject && project_) refreshCurrentProject();
-    syncActivityTimer();
-    updateUpdateCheckIndicators();
+    refreshProjectList(projectId, [this, refreshOpenProject](const bool succeeded) {
+        if (succeeded && refreshOpenProject && project_) refreshCurrentProject();
+        syncActivityTimer();
+        updateUpdateCheckIndicators();
+    });
 }
 
 void MainWindow::refreshLibraryView() {
+    if (projectStale_) {
+        reloadExternalProject();
+        return;
+    }
     const auto projectId = project_ ? project_->id : QString{};
-    const auto releaseId = currentReleaseId_;
-    refreshProjectList(projectId);
-    if (projectId.isEmpty()) {
+    refreshProjectList(projectId, [this](const bool succeeded) {
+        if (!succeeded) return;
+        if (project_) {
+            refreshCurrentProject();
+            updateDashboardActions();
+            prefetchSigningKeys(*project_);
+        }
+        syncTrayUpdateCensus();
         statusBar()->showMessage(QStringLiteral("Package list refreshed"), 4000);
-        return;
-    }
-    projectCache_.remove(projectId);
-    QString error;
-    auto loaded = library_.load(projectId, &error);
-    if (!loaded) {
-        statusBar()->showMessage(error.isEmpty() ? QStringLiteral("Could not reload the selected package")
-                                                 : error,
-                                 8000);
-        if (project_) refreshCurrentProject();
-        return;
-    }
-    projectCache_.insert(loaded->id, *loaded);
-    project_ = std::move(*loaded);
-    if (project_->release(releaseId) != nullptr) {
-        currentReleaseId_ = releaseId;
-    } else {
-        const auto *initial = project_->activeTrackingRelease();
-        if (initial == nullptr) initial = project_->newestRelease();
-        currentReleaseId_ = initial == nullptr ? QString{} : initial->id;
-    }
-    refreshCurrentProject();
-    updateDashboardActions();
-    syncTrayUpdateCensus();
-    statusBar()->showMessage(QStringLiteral("Package list refreshed"), 4000);
+    });
 }
 
 void MainWindow::syncTrayUpdateCensus() {
-    static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(library_.list()));
+    static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(projectCache_.values()));
     static_cast<void>(GuiInstanceServer::requestTray());
 }
 
-void MainWindow::refreshProjectList(const QString &selectId) {
+void MainWindow::setProjectListBusy(const bool busy, const QString &message) {
+    projectListRefreshInFlight_ = busy;
+    if (projectListBusyLabel_ != nullptr) {
+        projectListBusyLabel_->setText(message);
+        projectListBusyLabel_->setVisible(busy && !message.isEmpty());
+    }
+    if (projectListProgress_ != nullptr) projectListProgress_->setVisible(busy);
+    if (refreshProjectListButton_ != nullptr) refreshProjectListButton_->setEnabled(!busy);
+    if (projectList_ != nullptr) projectList_->setEnabled(!busy);
+    updateDeleteButton();
+}
+
+void MainWindow::refreshProjectList(const QString &selectId,
+                                    std::function<void(bool)> completed) {
+    const auto generation = ++projectListRefreshGeneration_;
+    setProjectListBusy(true, QStringLiteral("Refreshing…"));
+    statusBar()->showMessage(QStringLiteral("Refreshing packages…"));
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<ProjectListRefreshResult>(this);
+    connect(watcher, &QFutureWatcher<ProjectListRefreshResult>::finished, this,
+            [this, watcher, generation, selectId, completed = std::move(completed)]() mutable {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        if (generation != projectListRefreshGeneration_) return;
+        setProjectListBusy(false);
+        if (!result.error.isEmpty()) {
+            statusBar()->showMessage(result.error, 8000);
+            if (completed) completed(false);
+            return;
+        }
+        applyProjectList(std::move(result.projects), selectId);
+        if (completed) completed(true);
+    });
+    watcher->setFuture(QtConcurrent::run([config] {
+        LibraryClient client(config);
+        ProjectListRefreshResult result;
+        result.projects = client.list(&result.error);
+        return result;
+    }));
+}
+
+void MainWindow::applyProjectList(QList<Project> projects, const QString &selectId,
+                                  const QString &error, const bool preserveCurrent) {
     const auto previous = selectId.isEmpty() && project_ ? project_->id : selectId;
     QSignalBlocker blocker(projectList_);
     projectList_->clear();
-    QString error;
-    const auto projects = library_.list(&error);
     projectCache_.clear();
     projectCache_.reserve(projects.size());
     for (const auto &project : projects) projectCache_.insert(project.id, project);
@@ -684,6 +724,10 @@ void MainWindow::refreshProjectList(const QString &selectId) {
     syncActivityTimer();
     updateUpdateCheckIndicators();
     if (projects.isEmpty()) {
+        if (preserveCurrent && project_) {
+            deleteProjectButton_->setEnabled(false);
+            return;
+        }
         project_.reset();
         projectCache_.clear();
         stageTabs_->setEnabled(false);
@@ -709,7 +753,7 @@ void MainWindow::refreshProjectList(const QString &selectId) {
         remaining.insert(iterator.key());
     }
     hydratedProjectIds_.intersect(remaining);
-    if (loadingProjectId_.isEmpty() && project_ && projectCache_.contains(project_->id)) {
+    if (!preserveCurrent && loadingProjectId_.isEmpty() && project_ && projectCache_.contains(project_->id)) {
         const auto releaseId = currentReleaseId_;
         project_ = projectCache_.value(project_->id);
         if (project_->release(releaseId) != nullptr) {
@@ -777,16 +821,7 @@ void MainWindow::loadProject(const QString &id) {
         prefetchSigningKeys(*project_);
         return;
     }
-    QString error;
-    auto loaded = library_.load(id, &error);
-    if (!loaded) {
-        QMessageBox::critical(this, QStringLiteral("Could not load project"), error);
-        if (dashboardBodyStack_ != nullptr && projectTabs_ != nullptr) {
-            dashboardBodyStack_->setCurrentWidget(projectTabs_);
-        }
-        return;
-    }
-    applyLoadedProject(std::move(*loaded));
+    loadProjectInteractively(id);
 }
 
 void MainWindow::loadProjectInteractively(const QString &id) {
@@ -1027,7 +1062,8 @@ void MainWindow::updateDeleteButton() {
         if (reanalyzeButton_ != nullptr) reanalyzeButton_->setEnabled(false);
         return;
     }
-    const bool busy = buildInProgress() || installService_.isRunning() ||
+    const bool busy = projectListRefreshInFlight_ || projectDeleteInFlight_ ||
+                      buildInProgress() || installService_.isRunning() ||
                       aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
                       githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
                       importThread_ != nullptr;
@@ -1052,7 +1088,7 @@ void MainWindow::updateDeleteButton() {
 }
 
 void MainWindow::deleteCurrentProject() {
-    if (!project_) return;
+    if (!project_ || !ensureCurrentProjectWritable()) return;
     if (project_->ownsInstalledPackage()) {
         QMessageBox::warning(this, QStringLiteral("Project cannot be deleted"),
                              QStringLiteral("%1 is installed. Uninstall it with pacman before deleting its PacSmith project.")
@@ -1080,16 +1116,40 @@ void MainWindow::deleteCurrentProject() {
     confirmation.exec();
     if (confirmation.clickedButton() != deleteButton) return;
 
-    const auto deletedName = project_->displayName;
-    QString error;
-    if (!library_.deleteProject(*project_, &error)) {
-        QMessageBox::critical(this, QStringLiteral("Could not delete project"), error);
-        return;
-    }
-    project_.reset();
-    refreshProjectList();
-    syncTrayUpdateCensus();
-    statusBar()->showMessage(QStringLiteral("Deleted project %1").arg(deletedName), 8000);
+    const auto deletedId = project_->id;
+    const auto deletedName = project_->displayName.isEmpty()
+        ? project_->archPackageName : project_->displayName;
+    projectDeleteInFlight_ = true;
+    setProjectListBusy(true, QStringLiteral("Deleting…"));
+    statusBar()->showMessage(QStringLiteral("Deleting package %1…").arg(deletedName));
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<ProjectDeletionResult>(this);
+    connect(watcher, &QFutureWatcher<ProjectDeletionResult>::finished, this,
+            [this, watcher, deletedId, deletedName] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        projectDeleteInFlight_ = false;
+        if (!result.succeeded) {
+            setProjectListBusy(false);
+            QMessageBox::critical(
+                this, QStringLiteral("Could not delete project"),
+                result.error.isEmpty() ? QStringLiteral("The library rejected the deletion")
+                                       : result.error);
+            return;
+        }
+        if (project_ && project_->id == deletedId) project_.reset();
+        projectCache_.remove(deletedId);
+        refreshProjectList({}, [this, deletedName](const bool succeeded) {
+            if (succeeded) syncTrayUpdateCensus();
+            statusBar()->showMessage(QStringLiteral("Deleted package %1").arg(deletedName), 8000);
+        });
+    });
+    watcher->setFuture(QtConcurrent::run([config, deletedId] {
+        LibraryClient client(config);
+        ProjectDeletionResult result;
+        result.succeeded = client.deleteProject(deletedId, &result.error);
+        return result;
+    }));
 }
 
 void MainWindow::populateOverview() {
@@ -1382,23 +1442,45 @@ void MainWindow::populateRepository() {
         if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
         return;
     }
-    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(true);
-    QString error;
-    const auto status = library_.projectRepo(project_->id, &error);
-    if (!status) {
+    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(!repositoryOperationInFlight_);
+    if (applyingServerRefresh_) {
         applyProjectRepository(project_->repository);
-        if (repoStatusLabel_ != nullptr) {
-            repoStatusLabel_->setText(error.isEmpty()
-                                          ? QStringLiteral("Could not load repository status.")
-                                          : error);
-        }
         return;
     }
-    applyProjectRepository(*status);
+    const auto generation = ++repositoryLoadGeneration_;
+    const auto projectId = project_->id;
+    const auto fallback = project_->repository;
+    if (repoStatusLabel_ != nullptr) repoStatusLabel_->setText(QStringLiteral("Loading repository status…"));
+    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
+    if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<RepositoryTaskResult>(this);
+    connect(watcher, &QFutureWatcher<RepositoryTaskResult>::finished, this,
+            [this, watcher, generation, projectId, fallback] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (generation != repositoryLoadGeneration_ || !project_ || project_->id != projectId) return;
+        if (!result.status) {
+            applyProjectRepository(fallback);
+            if (repoStatusLabel_ != nullptr) {
+                repoStatusLabel_->setText(result.error.isEmpty()
+                                              ? QStringLiteral("Could not load repository status.")
+                                              : result.error);
+            }
+            return;
+        }
+        applyProjectRepository(*result.status);
+    });
+    watcher->setFuture(QtConcurrent::run([config, projectId] {
+        LibraryClient client(config);
+        RepositoryTaskResult result;
+        result.status = client.projectRepo(projectId, &result.error);
+        return result;
+    }));
 }
 
 bool MainWindow::saveProjectRepository() {
-    if (!project_) return false;
+    if (!project_ || repositoryOperationInFlight_ || !ensureCurrentProjectWritable()) return false;
     const auto published = project_->repository.publishedPackageName;
     const auto effective = repoEffectiveName_ != nullptr ? repoEffectiveName_->text().trimmed()
                                                         : project_->repository.effectivePackageName;
@@ -1411,37 +1493,76 @@ bool MainWindow::saveProjectRepository() {
             return false;
         }
     }
-    QString error;
-    const auto saved = library_.saveProjectRepo(
-        project_->id, repoPublishCheck_ != nullptr && repoPublishCheck_->isChecked(),
-        repoOverrideEdit_ != nullptr ? repoOverrideEdit_->text().trimmed() : QString{},
-        project_->revision, &error);
-    if (!saved) {
-        QMessageBox::critical(this, QStringLiteral("Could not save repository settings"), error);
-        return false;
-    }
-    applyProjectRepository(*saved);
-    project_->revision++;
-    projectCache_.insert(project_->id, *project_);
-    refreshCurrentProject();
+    const auto projectId = project_->id;
+    const auto publish = repoPublishCheck_ != nullptr && repoPublishCheck_->isChecked();
+    const auto overrideName = repoOverrideEdit_ != nullptr
+        ? repoOverrideEdit_->text().trimmed() : QString{};
+    const auto revision = project_->revision;
+    repositoryOperationInFlight_ = true;
+    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
+    if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
+    if (repoStatusLabel_ != nullptr) repoStatusLabel_->setText(QStringLiteral("Saving repository settings…"));
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<RepositoryTaskResult>(this);
+    connect(watcher, &QFutureWatcher<RepositoryTaskResult>::finished, this,
+            [this, watcher, projectId] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        repositoryOperationInFlight_ = false;
+        if (!project_ || project_->id != projectId) return;
+        if (!result.status) {
+            if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(true);
+            QMessageBox::critical(this, QStringLiteral("Could not save repository settings"), result.error);
+            return;
+        }
+        applyProjectRepository(*result.status);
+        project_->revision++;
+        projectCache_.insert(project_->id, *project_);
+        refreshCurrentProject();
+    });
+    watcher->setFuture(QtConcurrent::run([config, projectId, publish, overrideName, revision] {
+        LibraryClient client(config);
+        RepositoryTaskResult result;
+        result.status = client.saveProjectRepo(projectId, publish, overrideName, revision, &result.error);
+        return result;
+    }));
     return true;
 }
 
 void MainWindow::promoteProjectRepository() {
-    if (!project_) return;
+    if (!project_ || repositoryOperationInFlight_ || !ensureCurrentProjectWritable()) return;
     if (QMessageBox::question(this, QStringLiteral("Promote to Stable"),
                               QStringLiteral("Promote the newest package that advances stable, bypassing remaining soak time? Stable is never downgraded.")) !=
         QMessageBox::Yes) {
         return;
     }
-    QString error;
-    const auto status = library_.promoteProjectRepo(project_->id, &error);
-    if (!status) {
-        QMessageBox::critical(this, QStringLiteral("Could not promote to stable"), error);
-        return;
-    }
-    applyProjectRepository(*status);
-    refreshCurrentProject();
+    const auto projectId = project_->id;
+    repositoryOperationInFlight_ = true;
+    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
+    if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
+    if (repoStatusLabel_ != nullptr) repoStatusLabel_->setText(QStringLiteral("Promoting package to stable…"));
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<RepositoryTaskResult>(this);
+    connect(watcher, &QFutureWatcher<RepositoryTaskResult>::finished, this,
+            [this, watcher, projectId] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        repositoryOperationInFlight_ = false;
+        if (!project_ || project_->id != projectId) return;
+        if (!result.status) {
+            if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(true);
+            QMessageBox::critical(this, QStringLiteral("Could not promote to stable"), result.error);
+            return;
+        }
+        applyProjectRepository(*result.status);
+        refreshCurrentProject();
+    });
+    watcher->setFuture(QtConcurrent::run([config, projectId] {
+        LibraryClient client(config);
+        RepositoryTaskResult result;
+        result.status = client.promoteProjectRepo(projectId, &result.error);
+        return result;
+    }));
 }
 
 } // namespace pacsmith::gui

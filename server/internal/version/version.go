@@ -16,4 +16,5 @@ var Capabilities = []string{
 	"jobs",
 	"pki",
 	"repo",
+	"events",
 }

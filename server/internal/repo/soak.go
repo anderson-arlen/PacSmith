@@ -11,16 +11,22 @@ import (
 )
 
 func (s *Service) EvaluateSoaks(ctx context.Context) error {
+	_, err := s.EvaluateSoaksChanged(ctx)
+	return err
+}
+
+func (s *Service) EvaluateSoaksChanged(ctx context.Context) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.evaluateSoaksLocked(ctx)
 }
 
-func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
+func (s *Service) evaluateSoaksLocked(ctx context.Context) (bool, error) {
+	changed := false
 	now := s.now()
 	soaks, err := s.DB.Queries.ListSoaks(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, soak := range soaks {
 		if soak.Status != SoakSoaking {
@@ -37,13 +43,14 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
 				Arch:    soak.Arch,
 				Pkgver:  soak.Pkgver,
 			}); err != nil {
-				return err
+				return false, err
 			}
+			changed = true
 		}
 	}
 	soaks, err = s.DB.Queries.ListSoaks(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	groups := map[string][]sqlcdb.RepoSoak{}
 	for _, soak := range soaks {
@@ -71,14 +78,14 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
 		if err == nil {
 			stableEpoch, stableVer, stableRel = stable.Epoch, stable.Pkgver, stable.Pkgrel
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
+			return false, err
 		}
 		var best *sqlcdb.RepoSoak
 		for i := range eligible {
 			soak := eligible[i]
 			ok, err := Advances(soak.Epoch, soak.Pkgver, soak.Pkgrel, stableEpoch, stableVer, stableRel)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !ok {
 				if err := s.DB.Queries.UpdateSoakStatus(ctx, sqlcdb.UpdateSoakStatusParams{
@@ -87,8 +94,9 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
 					Arch:    soak.Arch,
 					Pkgver:  soak.Pkgver,
 				}); err != nil {
-					return err
+					return false, err
 				}
+				changed = true
 				continue
 			}
 			if best == nil {
@@ -101,7 +109,7 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
 				VersionString(best.Epoch, best.Pkgver, best.Pkgrel),
 			)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if cmp > 0 {
 				copy := eligible[i]
@@ -112,18 +120,19 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
 			continue
 		}
 		if err := s.promoteLocked(ctx, *best, false); err != nil {
-			return err
+			return false, err
 		}
 		if err := s.publishStableDBs(ctx, *best); err != nil {
-			return err
+			return false, err
 		}
+		changed = true
 		for _, soak := range eligible {
 			if soak.Pkgver == best.Pkgver && soak.Pkgname == best.Pkgname && soak.Arch == best.Arch {
 				continue
 			}
 			ok, err := Advances(soak.Epoch, soak.Pkgver, soak.Pkgrel, best.Epoch, best.Pkgver, best.Pkgrel)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !ok {
 				_ = s.DB.Queries.UpdateSoakStatus(ctx, sqlcdb.UpdateSoakStatusParams{
@@ -135,7 +144,7 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return changed, nil
 }
 
 func (s *Service) Promote(ctx context.Context, projectID, pkgver, arch string) (ProjectStatus, error) {

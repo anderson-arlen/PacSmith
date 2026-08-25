@@ -71,6 +71,7 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                              QStringLiteral("get_build_job"),
                              QStringLiteral("get_build_job_log"),
                              QStringLiteral("cancel_build_job"),
+                             QStringLiteral("get_payload_file_inspection"),
                              QStringLiteral("download_artifact"),
                              QStringLiteral("remove_launcher"),
                              QStringLiteral("delete_desktop_entry"),
@@ -96,6 +97,16 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         findTool(QStringLiteral("get_release_issues")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(issueAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), true);
     QCOMPARE(issueAnnotations.value(QStringLiteral("destructiveHint")).toBool(), false);
+    const auto payloadInspection = findTool(QStringLiteral("get_payload_file_inspection"));
+    QCOMPARE(payloadInspection.value(QStringLiteral("annotations")).toObject()
+                 .value(QStringLiteral("readOnlyHint")).toBool(), true);
+    const auto payloadInspectionSchema = payloadInspection.value(QStringLiteral("inputSchema")).toObject();
+    QVERIFY(payloadInspectionSchema.value(QStringLiteral("properties")).toObject()
+                .contains(QStringLiteral("path")));
+    QVERIFY(payloadInspectionSchema.value(QStringLiteral("required")).toArray()
+                .contains(QStringLiteral("path")));
+    QVERIFY(findTool(QStringLiteral("download_artifact")).value(QStringLiteral("description"))
+                .toString().contains(QStringLiteral("Do not use this to inspect")));
     const auto profileAnnotations =
         findTool(QStringLiteral("upsert_harness_profile")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(profileAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), false);

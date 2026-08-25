@@ -7,6 +7,7 @@
 #include "core/github_update_service.hpp"
 #include "core/process_services.hpp"
 #include "core/library_client.hpp"
+#include "core/library_events.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/rpm_update_service.hpp"
 
@@ -16,6 +17,7 @@
 #include <QSet>
 #include <QThread>
 
+#include <functional>
 #include <optional>
 
 class QComboBox;
@@ -34,6 +36,7 @@ class QNetworkAccessManager;
 class QNetworkReply;
 class QPlainTextEdit;
 class QProgressDialog;
+class QProgressBar;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
@@ -62,6 +65,7 @@ public:
 
 signals:
     void clientSettingsReloaded();
+    void serverTopicsChanged(const QStringList &topics);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -145,7 +149,11 @@ private:
     void deleteCurrentProject();
     void syncTrayUpdateCensus();
     void refreshLibraryView();
-    void refreshProjectList(const QString &selectId = {});
+    void refreshProjectList(const QString &selectId = {},
+                            std::function<void(bool)> completed = {});
+    void setProjectListBusy(bool busy, const QString &message = {});
+    void applyProjectList(QList<Project> projects, const QString &selectId,
+                          const QString &error = {}, bool preserveCurrent = false);
     void loadProject(const QString &id);
     void loadProjectInteractively(const QString &id);
     void applyLoadedProject(Project project);
@@ -154,6 +162,14 @@ private:
     void prefetchProjectIcons();
     void prefetchSigningKeys(const Project &project);
     void refreshCurrentProject();
+    void handleServerEvent(const ServerEvent &event);
+    void runEventRefresh();
+    void applyEventProjects(QList<Project> projects, const QString &error,
+                            const QSet<QString> &topics);
+    void reloadExternalProject();
+    void showExternalChange(bool deleted);
+    [[nodiscard]] bool hasUnsavedProjectDraft() const;
+    [[nodiscard]] bool ensureCurrentProjectWritable();
     void populateCurrentWorkbenchPage();
     void updateDeleteButton();
     void populateOverview();
@@ -302,13 +318,25 @@ private:
     qint64 librarySettingsRevision_{1};
     QFileSystemWatcher *clientSettingsWatcher_{nullptr};
     QTimer *clientSettingsReloadTimer_{nullptr};
+    LibraryEventStream *libraryEventStream_{nullptr};
+    QTimer *eventRefreshTimer_{nullptr};
+    QSet<QString> pendingEventTopics_;
+    bool eventRefreshInFlight_{false};
+    bool eventRefreshAgain_{false};
+    bool applyingServerRefresh_{false};
+    bool projectStale_{false};
+    bool pendingExternalDeletion_{false};
+    std::optional<Project> pendingExternalProject_;
     QHash<QString, QString> sessionCredentials_;
     CredentialStore &credentialStore_;
     std::optional<Project> project_;
     QHash<QString, Project> projectCache_;
     QSet<QString> hydratedProjectIds_;
     quint64 projectLoadGeneration_{0};
+    quint64 projectListRefreshGeneration_{0};
     QString loadingProjectId_;
+    bool projectListRefreshInFlight_{false};
+    bool projectDeleteInFlight_{false};
     QString currentReleaseId_;
     QString updateCheckReleaseId_;
     bool updateCheckFromWorkbench_{false};
@@ -317,6 +345,8 @@ private:
     QString buildJobId_;
     qint64 buildLogAfter_{0};
     QTimer *buildPollTimer_{nullptr};
+    bool buildPollInFlight_{false};
+    bool buildFinishInFlight_{false};
     QThread networkIoThread_;
     DebDownloadService *debDownloadService_{nullptr};
     RepositoryKeyDownloadService signingKeyDownloadService_;
@@ -348,12 +378,21 @@ private:
     QSet<QString> repositoryDependencyChecksPending_;
     bool repositoryCatalogLoaded_{false};
     bool repositoryImportRunning_{false};
+    quint64 repositoryLoadGeneration_{0};
+    bool repositoryOperationInFlight_{false};
 
     QWidget *projectSidebar_{nullptr};
+    QFrame *externalChangeBanner_{nullptr};
+    QLabel *externalChangeLabel_{nullptr};
+    QPushButton *externalReloadButton_{nullptr};
     QListWidget *projectList_{nullptr};
+    QLabel *projectListBusyLabel_{nullptr};
+    QProgressBar *projectListProgress_{nullptr};
+    QPushButton *refreshProjectListButton_{nullptr};
     QPushButton *deleteProjectButton_{nullptr};
     QPushButton *connectionButton_{nullptr};
     QTimer *connectionStatusTimer_{nullptr};
+    bool connectionStatusInFlight_{false};
     QLabel *projectTitle_{nullptr};
     QLabel *projectSubtitle_{nullptr};
     QStackedWidget *rightStack_{nullptr};

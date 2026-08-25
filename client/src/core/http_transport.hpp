@@ -5,6 +5,9 @@
 #include <QString>
 #include <QUrl>
 
+#include <functional>
+#include <stop_token>
+
 namespace pacsmith {
 
 struct ConnectionConfig {
@@ -34,6 +37,12 @@ struct HttpResponse {
     QMap<QString, QString> headers;
 };
 
+struct HttpStreamResult {
+    int status{0};
+    QString error;
+    bool canceled{false};
+};
+
 class HttpTransport final {
 public:
     explicit HttpTransport(ConnectionConfig config);
@@ -45,6 +54,9 @@ public:
                                       const QString &kind, const QString &filePath) const;
     [[nodiscard]] bool downloadToFile(const QString &path, const QString &destination,
                                       QString *error = nullptr) const;
+    [[nodiscard]] HttpStreamResult stream(
+        const QString &path, std::stop_token stopToken,
+        const std::function<bool(const QByteArray &)> &receive) const;
 
 private:
     ConnectionConfig config_;

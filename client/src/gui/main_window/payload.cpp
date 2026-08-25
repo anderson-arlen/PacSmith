@@ -344,7 +344,8 @@ void MainWindow::loadSelectedPayloadPreview(const QString &path) {
     excludePayloadButton_->setEnabled(false);
     clearPayloadDecisionButton_->setEnabled(false);
     const auto projectId = project_->id;
-    const auto debPath = library_.sourcePath(*currentRelease());
+    const auto release = *currentRelease();
+    const auto config = library_.config();
     using InspectionTaskResult = std::pair<std::optional<PayloadInspection>, QString>;
     auto *watcher = new QFutureWatcher<InspectionTaskResult>(this);
     connect(watcher, &QFutureWatcher<InspectionTaskResult>::finished, this,
@@ -369,8 +370,13 @@ void MainWindow::loadSelectedPayloadPreview(const QString &path) {
                 projectCache_.insert(project_->id, *project_);
                 updateSelectedPayload();
             });
-    watcher->setFuture(QtConcurrent::run([debPath, path]() -> InspectionTaskResult {
+    watcher->setFuture(QtConcurrent::run([config, release, path]() -> InspectionTaskResult {
+        LibraryClient client(config);
         QString error;
+        const auto debPath = client.sourcePath(release);
+        if (debPath.empty()) {
+            return {std::nullopt, QStringLiteral("Could not cache the source artifact")};
+        }
         auto result = PayloadInspector::inspectFile(debPath, path, &error);
         return {std::move(result), std::move(error)};
     }));
@@ -850,11 +856,10 @@ void MainWindow::populateIcon() {
                           std::filesystem::path(icon.projectPath.toUtf8().constData());
         pixmap.load(QString::fromUtf8(path.string().c_str()));
     }
-    if (icon.isConfigured() && pixmap.isNull()) {
-        const auto artifact = library_.iconPath(*currentRelease());
-        if (!artifact.empty()) {
-            pixmap.load(QString::fromUtf8(artifact.string().c_str()));
-        }
+    if (icon.isConfigured() && pixmap.isNull() && !currentRelease()->iconArtifactId.isEmpty()) {
+        const auto artifact = library_.cachedArtifactPath(
+            currentRelease()->iconArtifactId, QStringLiteral("icon"));
+        if (!artifact.isEmpty()) pixmap.load(artifact);
     }
     if (!pixmap.isNull()) {
         iconPreview_->clear();
@@ -875,18 +880,42 @@ void MainWindow::populateIcon() {
 }
 
 void MainWindow::selectPayloadIcon() {
-    if (!project_ || payloadIconCandidates_->currentIndex() < 0) return;
+    if (!project_ || payloadInspectionRunning_ || payloadIconCandidates_->currentIndex() < 0) return;
     const auto path = payloadIconCandidates_->currentData().toString();
     if (path.isEmpty()) return;
-    QString error;
-    const auto contents = PayloadInspector::readFileBytes(
-        library_.sourcePath(*currentRelease()), path, 4 * 1024 * 1024, &error);
-    if (!contents) {
-        QMessageBox::warning(this, QStringLiteral("Could not read payload icon"), error);
-        return;
-    }
-    applyIconBytes(*contents, QFileInfo(path).suffix().toLower(),
-                   IconSourceKind::Payload, path);
+    payloadInspectionRunning_ = true;
+    payloadIconCandidates_->setEnabled(false);
+    iconStatus_->setText(QStringLiteral("Loading icon from the saved vendor artifact…"));
+    const auto projectId = project_->id;
+    const auto release = *currentRelease();
+    const auto config = library_.config();
+    using IconTaskResult = std::pair<std::optional<QByteArray>, QString>;
+    auto *watcher = new QFutureWatcher<IconTaskResult>(this);
+    connect(watcher, &QFutureWatcher<IconTaskResult>::finished, this,
+            [this, watcher, projectId, path] {
+        const auto [contents, error] = watcher->result();
+        watcher->deleteLater();
+        payloadInspectionRunning_ = false;
+        if (payloadIconCandidates_ != nullptr) payloadIconCandidates_->setEnabled(true);
+        if (!project_ || project_->id != projectId) return;
+        if (!contents) {
+            populateIcon();
+            QMessageBox::warning(this, QStringLiteral("Could not read payload icon"), error);
+            return;
+        }
+        applyIconBytes(*contents, QFileInfo(path).suffix().toLower(),
+                       IconSourceKind::Payload, path);
+    });
+    watcher->setFuture(QtConcurrent::run([config, release, path]() -> IconTaskResult {
+        LibraryClient client(config);
+        QString error;
+        const auto source = client.sourcePath(release);
+        if (source.empty()) {
+            return {std::nullopt, QStringLiteral("Could not cache the source artifact")};
+        }
+        auto contents = PayloadInspector::readFileBytes(source, path, 4 * 1024 * 1024, &error);
+        return {std::move(contents), std::move(error)};
+    }));
 }
 
 void MainWindow::importLocalIcon() {
@@ -955,7 +984,8 @@ void MainWindow::fetchRemoteIcon() {
 void MainWindow::applyIconBytes(const QByteArray &contents, const QString &suffixValue,
                                 const IconSourceKind sourceKind, const QString &sourcePath,
                                 const QString &sourceUrl) {
-    if (!project_ || contents.isEmpty() || contents.size() > 4 * 1024 * 1024) return;
+    if (!project_ || contents.isEmpty() || contents.size() > 4 * 1024 * 1024 ||
+        !ensureCurrentProjectWritable()) return;
     const auto suffix = suffixValue.toLower();
     if (suffix != QStringLiteral("png") && suffix != QStringLiteral("svg") &&
         suffix != QStringLiteral("xpm")) {

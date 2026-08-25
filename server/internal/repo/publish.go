@@ -135,7 +135,8 @@ func (s *Service) PublishBuild(ctx context.Context, projectID, releaseID string,
 			Revision:             project.Revision,
 		})
 	}
-	return s.evaluateSoaksLocked(ctx)
+	_, err = s.evaluateSoaksLocked(ctx)
+	return err
 }
 
 func (s *Service) preparePublishedPackage(ctx context.Context, settings sqlcdb.RepoSetting, project sqlcdb.Project, releaseID, artifactID string) (pendingPackage, error) {

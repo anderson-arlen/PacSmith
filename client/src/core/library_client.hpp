@@ -173,6 +173,8 @@ public:
                                  QString *error = nullptr) const;
     [[nodiscard]] bool downloadArtifact(const QString &artifactId, const QString &destination,
                                         QString *error = nullptr) const;
+    [[nodiscard]] std::optional<QJsonObject> inspectPayloadFile(
+        const QString &releaseId, const QString &path, QString *error = nullptr) const;
     void prefetchReleaseArtifacts(const Project &project) const;
     [[nodiscard]] QString cacheArtifact(const QString &artifactId, const QString &filename,
                                         QString *error = nullptr) const;

@@ -147,6 +147,11 @@ QJsonArray tools() {
              objectSchema({{QStringLiteral("release_id"), release}}, {QStringLiteral("release_id")}), read),
         tool(QStringLiteral("get_payload"), QStringLiteral("Get inspected payload evidence and current keep/exclude dispositions."),
              objectSchema({{QStringLiteral("release_id"), release}}, {QStringLiteral("release_id")}), read),
+        tool(QStringLiteral("get_payload_file_inspection"),
+             QStringLiteral("Statically inspect one exact payload path inside PacSmith. Returns original mode, size, SHA256, MIME/magic, bounded text, and ELF identity, interpreter, dependencies, paths, build ID, stripped/hardening, and bounded program-header/section evidence without downloading, extracting, or executing the vendor artifact."),
+             objectSchema({{QStringLiteral("release_id"), release},
+                           {QStringLiteral("path"), stringProperty(QStringLiteral("Exact path returned by get_payload."))}},
+                          {QStringLiteral("release_id"), QStringLiteral("path")}), read),
         tool(QStringLiteral("get_lifecycle"), QStringLiteral("Get vendor maintainer scripts, structured lifecycle findings, and the current Arch lifecycle script."),
              objectSchema({{QStringLiteral("release_id"), release}}, {QStringLiteral("release_id")}), read),
         tool(QStringLiteral("get_install_configuration"), QStringLiteral("Get Guided layout, launchers, AppRun, desktop entries, and icon configuration."),
@@ -389,7 +394,7 @@ QJsonArray tools() {
                            {QStringLiteral("after"), integerProperty(QStringLiteral("Byte offset; defaults to zero."))}}, {QStringLiteral("job_id")}), read),
         tool(QStringLiteral("cancel_build_job"), QStringLiteral("Cancel a running PacSmith build or preparation job."),
              objectSchema({{QStringLiteral("job_id"), stringProperty(QStringLiteral("PacSmith job UUID."))}}, {QStringLiteral("job_id")}), annotations(false, true, true, false)),
-        tool(QStringLiteral("download_artifact"), QStringLiteral("Download a PacSmith artifact through the configured API to a new local file."),
+        tool(QStringLiteral("download_artifact"), QStringLiteral("Export a PacSmith artifact to a new local file for an explicit user-facing purpose. Do not use this to inspect package contents; use get_payload and get_payload_file_inspection."),
              objectSchema({{QStringLiteral("artifact_id"), stringProperty(QStringLiteral("Opaque artifact UUID returned by release/build tools."))},
                            {QStringLiteral("destination"), stringProperty(QStringLiteral("Absolute path that must not already exist."))}},
                           {QStringLiteral("artifact_id"), QStringLiteral("destination")}), annotations(false, false, false, false)),
@@ -1188,6 +1193,11 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     if (name == QStringLiteral("get_payload")) {
         return toolResult(id, QJsonObject{{QStringLiteral("findings"), release->toJson().value(QStringLiteral("payload"))},
                                           {QStringLiteral("dispositions"), release->toJson().value(QStringLiteral("payloadRules"))}});
+    }
+    if (name == QStringLiteral("get_payload_file_inspection")) {
+        const auto inspection = library_.inspectPayloadFile(
+            release->id, argumentString(args, QStringLiteral("path")), &error);
+        return inspection ? toolResult(id, *inspection) : fail(error);
     }
     if (name == QStringLiteral("get_lifecycle")) {
         return toolResult(id, QJsonObject{{QStringLiteral("vendor_scripts"), release->toJson().value(QStringLiteral("maintainerScripts"))},

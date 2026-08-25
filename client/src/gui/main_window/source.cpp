@@ -609,7 +609,7 @@ void MainWindow::beginLifecycleEdit() {
 }
 
 void MainWindow::saveLifecycleEdit() {
-    if (!project_ || !lifecycleEditing_) return;
+    if (!project_ || !lifecycleEditing_ || !ensureCurrentProjectWritable()) return;
     const auto contents = lifecycleView_->toPlainText();
     if (contents.trimmed().isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Lifecycle script is empty"),
@@ -705,7 +705,8 @@ void MainWindow::acknowledgeLifecycleScript() {
 }
 
 void MainWindow::discardLifecycleScript() {
-    if (!project_ || currentRelease()->lifecycleScript.contents.isEmpty()) return;
+    if (!project_ || currentRelease()->lifecycleScript.contents.isEmpty() ||
+        !ensureCurrentProjectWritable()) return;
     if (QMessageBox::warning(
             this, QStringLiteral("Remove lifecycle script"),
             QStringLiteral("This removes the project .install file and prevents its lifecycle actions from running. "

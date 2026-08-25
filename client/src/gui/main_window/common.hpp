@@ -86,6 +86,7 @@
 #include <QPen>
 #include <QProcess>
 #include <QProgressDialog>
+#include <QProgressBar>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -112,6 +113,7 @@
 #include <QSystemTrayIcon>
 #include <QTextCursor>
 #include <QThread>
+#include <QThreadPool>
 #include <QTimer>
 #include <QTemporaryDir>
 #include <QTreeWidget>

@@ -35,6 +35,7 @@ add_library(pacsmith_core STATIC
     src/core/background_updates.cpp
     src/core/model.cpp
     src/core/http_transport.cpp
+    src/core/library_events.cpp
     src/core/daemon_control.cpp
     src/core/domain_validation.cpp
     src/core/release_review.cpp
@@ -118,6 +119,7 @@ add_executable(pacsmith-gui
     src/gui/main_window/pages.cpp
     src/gui/main_window/import.cpp
     src/gui/main_window/dashboard.cpp
+    src/gui/main_window/library_sync.cpp
     src/gui/main_window/source.cpp
     src/gui/main_window/payload.cpp
     src/gui/main_window/recipe.cpp
@@ -155,6 +157,7 @@ if(BUILD_TESTING)
         tests/core_tests/core_tests.hpp
         tests/core_tests/core_tests.cpp
         tests/core_tests/parser.cpp
+        tests/core_tests/library_events.cpp
         tests/core_tests/script_evidence.cpp
         tests/core_tests/repository.cpp
         tests/core_tests/project_persistence.cpp

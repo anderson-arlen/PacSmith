@@ -61,6 +61,20 @@ func (s *Server) getRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, encodeRelease(release))
 }
 
+func (s *Server) inspectPayloadFile(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "path is required")
+		return
+	}
+	inspection, err := s.Library.InspectPayloadFile(r.Context(), r.PathValue("id"), path)
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inspection)
+}
+
 func (s *Server) putRelease(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Revision int64          `json:"revision"`
@@ -196,11 +210,12 @@ func (s *Server) createImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) reanalyze(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Library.GetRelease(r.Context(), id); err != nil {
+	release, err := s.Library.GetRelease(r.Context(), id)
+	if err != nil {
 		writeRequestError(w, err)
 		return
 	}
-	job, err := s.Jobs.Enqueue(r.Context(), jobs.KindReanalyze, map[string]string{"release_id": id}, "", id)
+	job, err := s.Jobs.Enqueue(r.Context(), jobs.KindReanalyze, map[string]string{"release_id": id}, release.ProjectID, id)
 	if err != nil {
 		writeRequestError(w, err)
 		return
@@ -210,11 +225,12 @@ func (s *Server) reanalyze(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createBuild(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Library.GetRelease(r.Context(), id); err != nil {
+	release, err := s.Library.GetRelease(r.Context(), id)
+	if err != nil {
 		writeRequestError(w, err)
 		return
 	}
-	job, err := s.Jobs.Enqueue(r.Context(), jobs.KindBuild, map[string]string{"release_id": id}, "", id)
+	job, err := s.Jobs.Enqueue(r.Context(), jobs.KindBuild, map[string]string{"release_id": id}, release.ProjectID, id)
 	if err != nil {
 		writeRequestError(w, err)
 		return

@@ -9,6 +9,11 @@
 namespace pacsmith::gui {
 namespace {
 
+struct LibrarySettingsLoadResult {
+    std::optional<LibrarySettings> settings;
+    QString error;
+};
+
 bool sameBackgroundSettings(const BackgroundUpdateSettings &left,
                             const BackgroundUpdateSettings &right) {
     return left.enabled == right.enabled && left.startAtLogin == right.startAtLogin &&
@@ -108,14 +113,26 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     auto *leftLayout = new QVBoxLayout(leftPanel);
     auto *packagesHeader = new QHBoxLayout;
     auto *packagesLabel = new QLabel(QStringLiteral("<b>Packages</b>"), leftPanel);
-    auto *refreshButton = new QPushButton(QStringLiteral("Refresh"), leftPanel);
+    refreshProjectListButton_ = new QPushButton(QStringLiteral("Refresh"), leftPanel);
     auto refreshIcon = QIcon::fromTheme(QStringLiteral("view-refresh"));
     if (refreshIcon.isNull()) refreshIcon = style()->standardIcon(QStyle::SP_BrowserReload);
-    refreshButton->setIcon(refreshIcon);
-    refreshButton->setToolTip(QStringLiteral("Reload the package list and the selected package from the library."));
-    refreshButton->setShortcut(QKeySequence::Refresh);
+    refreshProjectListButton_->setIcon(refreshIcon);
+    refreshProjectListButton_->setToolTip(QStringLiteral("Reload the package list and the selected package from the library."));
+    refreshProjectListButton_->setShortcut(QKeySequence::Refresh);
+    projectListBusyLabel_ = new QLabel(leftPanel);
+    projectListBusyLabel_->setObjectName(QStringLiteral("projectListBusyLabel"));
+    projectListBusyLabel_->setVisible(false);
+    projectListProgress_ = new QProgressBar(leftPanel);
+    projectListProgress_->setObjectName(QStringLiteral("projectListProgress"));
+    projectListProgress_->setRange(0, 0);
+    projectListProgress_->setFixedWidth(54);
+    projectListProgress_->setMaximumHeight(10);
+    projectListProgress_->setTextVisible(false);
+    projectListProgress_->setVisible(false);
     packagesHeader->addWidget(packagesLabel, 1);
-    packagesHeader->addWidget(refreshButton, 0, Qt::AlignRight);
+    packagesHeader->addWidget(projectListBusyLabel_, 0, Qt::AlignRight);
+    packagesHeader->addWidget(projectListProgress_, 0, Qt::AlignRight);
+    packagesHeader->addWidget(refreshProjectListButton_, 0, Qt::AlignRight);
     projectList_ = new QListWidget(leftPanel);
     projectList_->setMinimumWidth(260);
     projectList_->setIconSize(QSize(44, 44));
@@ -152,11 +169,22 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     projectButtons->addWidget(settingsButton);
     leftLayout->addLayout(projectButtons);
     connect(deleteProjectButton_, &QPushButton::clicked, this, &MainWindow::deleteCurrentProject);
-    connect(refreshButton, &QPushButton::clicked, this, &MainWindow::refreshLibraryView);
+    connect(refreshProjectListButton_, &QPushButton::clicked, this, &MainWindow::refreshLibraryView);
     connect(settingsButton, &QPushButton::clicked, this, &MainWindow::showSettings);
 
     auto *rightPanel = new QWidget(splitter);
     auto *rightLayout = new QVBoxLayout(rightPanel);
+    externalChangeBanner_ = new QFrame(rightPanel);
+    externalChangeBanner_->setFrameShape(QFrame::StyledPanel);
+    auto *externalChangeLayout = new QHBoxLayout(externalChangeBanner_);
+    externalChangeLabel_ = new QLabel(externalChangeBanner_);
+    externalChangeLabel_->setWordWrap(true);
+    externalReloadButton_ = new QPushButton(QStringLiteral("Reload"), externalChangeBanner_);
+    externalChangeLayout->addWidget(externalChangeLabel_, 1);
+    externalChangeLayout->addWidget(externalReloadButton_);
+    externalChangeBanner_->setVisible(false);
+    connect(externalReloadButton_, &QPushButton::clicked,
+            this, &MainWindow::reloadExternalProject);
     rightStack_ = new QStackedWidget(rightPanel);
 
     auto *dashboard = new QWidget(rightStack_);
@@ -357,6 +385,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     rightStack_->addWidget(dashboard);
     rightStack_->addWidget(workbench);
     rightStack_->setCurrentWidget(dashboard);
+    rightLayout->addWidget(externalChangeBanner_);
     rightLayout->addWidget(rightStack_, 1);
     splitter->addWidget(leftPanel);
     splitter->addWidget(rightPanel);
@@ -435,7 +464,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
                 }
             });
     connect(&installService_, &InstallService::failedToStart, this, [this](const QString &message) {
-        projectList_->setEnabled(true);
+        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
         pendingPackageOperation_.clear();
         if (project_) {
             currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("install"),
@@ -453,7 +482,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         updateDeleteButton();
     });
     connect(&installService_, &InstallService::finished, this, [this](const ProcessResult &result) {
-        projectList_->setEnabled(true);
+        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
         if (!project_) return;
         if (result.succeeded()) static_cast<void>(library_.reconcileInstalled(*project_, nullptr));
         const auto operation = pendingPackageOperation_.isEmpty()
@@ -467,10 +496,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         pendingPackageOperation_.clear();
         persistCurrent();
         const auto projectId = project_->id;
-        refreshProjectList(projectId);
-        if (!project_ || project_->id != projectId) loadProject(projectId);
-        refreshCurrentProject();
-        if (result.succeeded()) syncTrayUpdateCensus();
         const auto succeeded = result.succeeded();
         const auto summary = operation == QStringLiteral("uninstall")
             ? (succeeded ? QStringLiteral("Uninstall completed successfully.")
@@ -488,6 +513,10 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
                                      succeeded ? QStringLiteral("Pacman completed successfully.")
                                                : QStringLiteral("Pacman did not complete successfully. Review the captured output in the progress dialog."));
         }
+        refreshProjectList(projectId, [this, succeeded](const bool refreshed) {
+            if (refreshed && project_) refreshCurrentProject();
+            if (succeeded) syncTrayUpdateCensus();
+        });
     });
 
     connect(debDownloadService_, &DebDownloadService::progress, this,
@@ -562,7 +591,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             signingKeyProgress_->deleteLater();
             signingKeyProgress_ = nullptr;
         }
-        projectList_->setEnabled(true);
+        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
         if (aptSigningKeyDownloadButton_ != nullptr) {
             aptSigningKeyDownloadButton_->setText(QStringLiteral("Fetch && Review…"));
             aptSigningKeyDownloadButton_->setEnabled(updateStrategy_->currentIndex() == 2 ||
@@ -585,7 +614,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             signingKeyProgress_->deleteLater();
             signingKeyProgress_ = nullptr;
         }
-        projectList_->setEnabled(true);
+        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
         aptSigningKeyDownloadButton_->setText(QStringLiteral("Fetch && Review…"));
         aptSigningKeyDownloadButton_->setEnabled(updateStrategy_->currentIndex() == 2 ||
                                                   updateStrategy_->currentIndex() == 3);
@@ -705,14 +734,34 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     if (!applyLibraryRuntime(library_.config(), &runtimeError) && !runtimeError.isEmpty()) {
         statusBar()->showMessage(runtimeError, 10000);
     }
-    QString libraryError;
-    if (const auto library = library_.librarySettings(&libraryError)) {
-        applyLibrarySettings(*library);
-    } else if (!libraryError.isEmpty() && runtimeError.isEmpty()) {
-        statusBar()->showMessage(libraryError, 8000);
-    }
+    const auto config = library_.config();
+    auto *settingsWatcher = new QFutureWatcher<LibrarySettingsLoadResult>(this);
+    connect(settingsWatcher, &QFutureWatcher<LibrarySettingsLoadResult>::finished, this,
+            [this, settingsWatcher, runtimeError] {
+        const auto result = settingsWatcher->result();
+        settingsWatcher->deleteLater();
+        if (result.settings) {
+            applyLibrarySettings(*result.settings);
+        } else if (!result.error.isEmpty() && runtimeError.isEmpty()) {
+            statusBar()->showMessage(result.error, 8000);
+        }
+    });
+    settingsWatcher->setFuture(QtConcurrent::run([config] {
+        LibraryClient client(config);
+        LibrarySettingsLoadResult result;
+        result.settings = client.librarySettings(&result.error);
+        return result;
+    }));
     refreshConnectionStatus();
     refreshProjectList();
+    eventRefreshTimer_ = new QTimer(this);
+    eventRefreshTimer_->setSingleShot(true);
+    eventRefreshTimer_->setInterval(75);
+    connect(eventRefreshTimer_, &QTimer::timeout, this, &MainWindow::runEventRefresh);
+    libraryEventStream_ = new LibraryEventStream(library_.config(), this);
+    connect(libraryEventStream_, &LibraryEventStream::eventReceived,
+            this, &MainWindow::handleServerEvent);
+    libraryEventStream_->start();
     QTimer::singleShot(0, this, [this] { syncActivityTimer(); });
 }
 
@@ -722,6 +771,12 @@ void MainWindow::showConnectionDialog() {
 }
 
 namespace {
+
+struct ConnectionStatusResult {
+    ConnectionConfig config;
+    bool reachable{false};
+    QString error;
+};
 
 QIcon connectionStatusIcon(QWidget *widget, bool reachable) {
     auto icon = QIcon::fromTheme(reachable ? QStringLiteral("network-wired")
@@ -750,24 +805,46 @@ QString remoteConnectionCaption(const ConnectionConfig &config, const QFontMetri
 } // namespace
 
 void MainWindow::refreshConnectionStatus() {
-    if (connectionButton_ == nullptr) return;
-    const auto &config = library_.config();
+    if (connectionButton_ == nullptr || connectionStatusInFlight_) return;
+    const auto config = library_.config();
     const bool remote = config.mode == ConnectionConfig::Mode::Remote;
-    QString error;
-    const bool ok = library_.reachable(&error);
-    const auto target = config.summary();
-    connectionButton_->setIcon(connectionStatusIcon(this, ok));
-    connectionButton_->setText(remote ? remoteConnectionCaption(config, connectionButton_->fontMetrics())
-                                      : QStringLiteral("Local"));
-    if (ok) {
-        connectionButton_->setToolTip(
-            QStringLiteral("Connected to %1. Click to change library connection.").arg(target));
-    } else {
-        connectionButton_->setToolTip(
-            error.isEmpty()
-                ? QStringLiteral("Not connected to %1. Click to change library connection.").arg(target)
-                : error);
-    }
+    connectionStatusInFlight_ = true;
+    connectionButton_->setText(remote ? QStringLiteral("Checking remote…")
+                                      : QStringLiteral("Checking local…"));
+    connectionButton_->setToolTip(QStringLiteral("Checking the library connection…"));
+    auto *watcher = new QFutureWatcher<ConnectionStatusResult>(this);
+    connect(watcher, &QFutureWatcher<ConnectionStatusResult>::finished, this,
+            [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        connectionStatusInFlight_ = false;
+        if (result.config.summary() != library_.config().summary()) {
+            refreshConnectionStatus();
+            return;
+        }
+        const auto resultIsRemote = result.config.mode == ConnectionConfig::Mode::Remote;
+        const auto target = result.config.summary();
+        connectionButton_->setIcon(connectionStatusIcon(this, result.reachable));
+        connectionButton_->setText(
+            resultIsRemote ? remoteConnectionCaption(result.config, connectionButton_->fontMetrics())
+                           : QStringLiteral("Local"));
+        if (result.reachable) {
+            connectionButton_->setToolTip(
+                QStringLiteral("Connected to %1. Click to change library connection.").arg(target));
+        } else {
+            connectionButton_->setToolTip(
+                result.error.isEmpty()
+                    ? QStringLiteral("Not connected to %1. Click to change library connection.").arg(target)
+                    : result.error);
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([config] {
+        LibraryClient client(config);
+        ConnectionStatusResult result;
+        result.config = config;
+        result.reachable = client.reachable(&result.error);
+        return result;
+    }));
 }
 
 QWidget *MainWindow::createStageHost(QListWidget **nav, QStackedWidget **stack, QWidget *navHeader) {
@@ -941,6 +1018,7 @@ void MainWindow::updateConfigurationModeChrome() {
 
 void MainWindow::setConfigurationMode(const bool custom) {
     if (switchingConfigurationMode_) return;
+    if (!ensureCurrentProjectWritable()) return;
     switchingConfigurationMode_ = true;
     const struct SwitchingGuard {
         bool *flag;
@@ -1196,6 +1274,7 @@ void MainWindow::rememberSessionCredential(const QString &name, const QString &v
 }
 
 MainWindow::~MainWindow() {
+    if (libraryEventStream_ != nullptr) libraryEventStream_->stop();
     ++projectLoadGeneration_;
     loadingProjectId_.clear();
     if (networkIoThread_.isRunning()) {

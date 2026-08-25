@@ -422,42 +422,45 @@ void MainWindow::importPackage(const QString &path) {
             return;
         }
         resetPreparationState();
-        refreshProjectList(projectId);
-        if (!project_ || project_->id != projectId) loadProject(projectId);
-        if (project_ && project_->release(releaseId) != nullptr) {
-            currentReleaseId_ = releaseId;
-            refreshCurrentProject();
-        }
-        if (preparedUpdate) applyRetentionCleanup();
-        const auto loaded = library_.load(projectId);
-        statusBar()->showMessage(
-            loaded ? QStringLiteral("Imported to %1").arg(projectDirectory(library_, *loaded))
-                   : QStringLiteral("Package imported successfully"),
-            10000);
-        if (preparedUpdate) showReleaseWorkbenchAtFirstAttention(releaseId);
-        QTimer::singleShot(0, this, [this, projectId, releaseId] {
-            if (!project_ || project_->id != projectId || project_->release(releaseId) == nullptr) return;
-            currentReleaseId_ = releaseId;
-            const bool needsReview = pendingScriptFindings(*currentRelease()) > 0 ||
-                                     pendingPayloadReviews(*currentRelease()) > 0 ||
-                                     currentRelease()->installMapping.appRun.requiresReview() ||
-                                     std::any_of(currentRelease()->dependencies.cbegin(), currentRelease()->dependencies.cend(),
-                                                 [](const auto &dependency) {
-                                                     return dependency.status == MappingStatus::Unresolved;
-                                                 });
-            if (!needsReview) {
-                showReleaseWorkbenchAtFirstAttention(releaseId);
+        refreshProjectList(projectId, [this, projectId, releaseId, preparedUpdate](const bool succeeded) {
+            if (!succeeded || !project_ || project_->id != projectId ||
+                project_->release(releaseId) == nullptr) {
                 statusBar()->showMessage(
-                    QStringLiteral("Import complete. Review the readiness checklist, then build the package."),
-                    12000);
+                    QStringLiteral("Package imported, but its refreshed state could not be loaded"), 10000);
                 return;
             }
-            showReleaseWorkbenchAtFirstAttention(releaseId);
-            QMessageBox::information(
-                this, QStringLiteral("Package needs review"),
-                QStringLiteral("PacSmith found items that need an Arch-specific decision and opened the first section "
-                               "that needs your attention. Resolve the highlighted items, then continue to PKGBUILD and Build.\n\n"
-                               "Use Ask AI to launch your configured external harness with this project and release context."));
+            currentReleaseId_ = releaseId;
+            refreshCurrentProject();
+            if (preparedUpdate) applyRetentionCleanup();
+            statusBar()->showMessage(
+                QStringLiteral("Imported to %1").arg(projectDirectory(library_, *project_)), 10000);
+            if (preparedUpdate) showReleaseWorkbenchAtFirstAttention(releaseId);
+            QTimer::singleShot(0, this, [this, projectId, releaseId] {
+                if (!project_ || project_->id != projectId ||
+                    project_->release(releaseId) == nullptr) return;
+                currentReleaseId_ = releaseId;
+                const bool needsReview = pendingScriptFindings(*currentRelease()) > 0 ||
+                                         pendingPayloadReviews(*currentRelease()) > 0 ||
+                                         currentRelease()->installMapping.appRun.requiresReview() ||
+                                         std::any_of(currentRelease()->dependencies.cbegin(),
+                                                     currentRelease()->dependencies.cend(),
+                                                     [](const auto &dependency) {
+                                                         return dependency.status == MappingStatus::Unresolved;
+                                                     });
+                if (!needsReview) {
+                    showReleaseWorkbenchAtFirstAttention(releaseId);
+                    statusBar()->showMessage(
+                        QStringLiteral("Import complete. Review the readiness checklist, then build the package."),
+                        12000);
+                    return;
+                }
+                showReleaseWorkbenchAtFirstAttention(releaseId);
+                QMessageBox::information(
+                    this, QStringLiteral("Package needs review"),
+                    QStringLiteral("PacSmith found items that need an Arch-specific decision and opened the first section "
+                                   "that needs your attention. Resolve the highlighted items, then continue to PKGBUILD and Build.\n\n"
+                                   "Use Ask AI to launch your configured external harness with this project and release context."));
+            });
         });
     });
     connect(worker, &ImportWorker::completed, thread, &QThread::quit);

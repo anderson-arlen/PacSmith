@@ -14,6 +14,7 @@ import (
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
+	"github.com/anderson-arlen/pacsmith/server/internal/events"
 	"github.com/anderson-arlen/pacsmith/server/internal/httpapi"
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
@@ -46,6 +47,7 @@ type Daemon struct {
 	stopSoak   context.CancelFunc
 	db         *sqlite.DB
 	jobs       *jobs.Manager
+	events     *events.Hub
 	closeOnce  sync.Once
 	closeErr   error
 }
@@ -94,6 +96,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		WorkDir:   filepath.Join(cfg.Dirs.Work, "releases"),
 	}
 	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(cfg.Dirs.Work, "repo"), filepath.Join(cfg.Dirs.Data, "gnupg"))
+	eventHub := events.New()
 	lib.Repo = repoSvc
 	manager, err := jobs.New(db, filepath.Join(cfg.Dirs.Work, "jobs"), JobHandler(lib))
 	if err != nil {
@@ -129,6 +132,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		repo:   repoSvc,
 		db:     db,
 		jobs:   manager,
+		events: eventHub,
 	}
 	handler := httpapi.New(httpapi.Config{
 		DB:          db,
@@ -143,6 +147,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		Repo:        repoSvc,
 		ApplyRepo:   d.SetRepoListen,
 		RepoBound:   d.RepoBound,
+		Events:      eventHub,
 	})
 	d.handler = handler
 	listener, err := listenUnix(cfg.Dirs.Socket)

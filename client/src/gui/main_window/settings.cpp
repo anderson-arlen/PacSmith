@@ -31,6 +31,25 @@ QString htmlLink(const QString &url, const QString &text) {
 
 bool hostSelected(const QStringList &hosts, const QString &value) { return hosts.contains(value, Qt::CaseInsensitive); }
 
+struct SettingsRefreshResult {
+    std::optional<LibrarySettings> library;
+    std::optional<RepoSettings> repo;
+    std::optional<CredentialStatus> githubCredential;
+    std::optional<ServerInfo> server;
+    QList<Registration> registrations;
+    QList<RemoteClient> clients;
+    QString libraryError;
+    QString repositoryError;
+    QString credentialError;
+    QString administrationError;
+};
+
+struct ClientsRefreshResult {
+    QList<Registration> registrations;
+    QList<RemoteClient> clients;
+    QString error;
+};
+
 void populateListenInterfaces(QListWidget *list, const QStringList &selected) {
     list->clear();
     const bool allSelected = hostSelected(selected, QStringLiteral("0.0.0.0")) ||
@@ -150,19 +169,9 @@ void setListeningStatus(QLabel *label, const bool enabled, const QStringList &bo
 
 void MainWindow::showSettings() {
     reloadClientSettings();
-    QString loadError;
-    auto library = library_.librarySettings(&loadError);
-    if (library) applyLibrarySettings(*library);
-    else if (!loadError.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Could not load library settings"), loadError);
-    }
-    QString repoLoadError;
-    auto repo = library_.repoSettings(&repoLoadError);
-    QString credentialLoadError;
-    if (const auto credential = library_.credentialStatus(QStringLiteral("github.token"),
-                                                           &credentialLoadError)) {
-        appSettings_.githubTokenConfigured = credential->configured;
-    }
+    std::optional<LibrarySettings> library;
+    std::optional<RepoSettings> repo;
+    const QString repoLoadError;
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("PacSmith Settings"));
@@ -171,9 +180,11 @@ void MainWindow::showSettings() {
     auto *rootLayout = new QVBoxLayout(&dialog);
     auto *settingsSyncNotice = new QLabel(&dialog);
     settingsSyncNotice->setWordWrap(true);
-    settingsSyncNotice->setVisible(false);
+    settingsSyncNotice->setText(QStringLiteral("Loading library settings…"));
+    settingsSyncNotice->setVisible(true);
     rootLayout->addWidget(settingsSyncNotice);
     auto *settingsTabs = new QTabWidget(&dialog);
+    settingsTabs->setEnabled(false);
 
     auto *generalPage = new QWidget(settingsTabs);
     auto *generalLayout = new QVBoxLayout(generalPage);
@@ -211,8 +222,8 @@ void MainWindow::showSettings() {
 
     const auto currentConnection = library_.config();
     const bool localAdmin = currentConnection.mode == ConnectionConfig::Mode::Local;
+    std::optional<ServerInfo> info;
     QString infoError;
-    const auto info = localAdmin ? library_.serverInfo(&infoError) : std::optional<ServerInfo>{};
     auto *secretsGroup = new QGroupBox(QStringLiteral("Library secrets"), generalPage);
     auto *secretsForm = new QFormLayout(secretsGroup);
     secretsForm->addRow(settingsSectionHelp(secretsGroup,
@@ -953,6 +964,8 @@ void MainWindow::showSettings() {
 
     std::function<bool()> applyListenSettings = [] { return true; };
     std::function<void()> refreshClientsTables;
+    std::function<void(const QList<Registration> &, const QList<RemoteClient> &, const QString &)>
+        applyClientsTables;
     std::function<void(const ListenSettings &)> updateListenVisibility = [](const ListenSettings &) {};
     ListenSettings lastAppliedListen = info ? info->listen : ListenSettings{};
     QCheckBox *listenEnabled = nullptr;
@@ -1081,9 +1094,9 @@ void MainWindow::showSettings() {
         wireExclusiveListenHosts(listenInterfaces);
         QObject::connect(applyListen, &QPushButton::clicked, &dialog,
                          [&] { static_cast<void>(applyListenSettings()); });
-        refreshClientsTables = [&] {
-            QString error;
-            const auto pending = library_.pendingRegistrations(&error);
+        applyClientsTables = [&](const QList<Registration> &pending,
+                                 const QList<RemoteClient> &enrolled,
+                                 const QString &error) {
             pendingTable->setRowCount(0);
             for (const auto &reg : pending) {
                 const auto row = pendingTable->rowCount();
@@ -1115,9 +1128,6 @@ void MainWindow::showSettings() {
                     refreshClientsTables();
                 });
             }
-            QString clientError;
-            const auto enrolled = library_.clients(&clientError);
-            if (error.isEmpty()) error = clientError;
             clientsTable->setRowCount(0);
             for (const auto &client : enrolled) {
                 const auto row = clientsTable->rowCount();
@@ -1150,6 +1160,29 @@ void MainWindow::showSettings() {
             clientsTable->resizeColumnsToContents();
             clientsError->setText(error);
             clientsError->setVisible(!error.isEmpty());
+        };
+        refreshClientsTables = [&] {
+            refreshClients->setEnabled(false);
+            clientsError->setText(QStringLiteral("Loading library clients…"));
+            clientsError->setVisible(true);
+            const auto config = library_.config();
+            auto *watcher = new QFutureWatcher<ClientsRefreshResult>(&dialog);
+            QObject::connect(watcher, &QFutureWatcher<ClientsRefreshResult>::finished,
+                             &dialog, [&, watcher] {
+                const auto result = watcher->result();
+                watcher->deleteLater();
+                refreshClients->setEnabled(true);
+                applyClientsTables(result.registrations, result.clients, result.error);
+            });
+            watcher->setFuture(QtConcurrent::run([config] {
+                LibraryClient client(config);
+                ClientsRefreshResult result;
+                result.registrations = client.pendingRegistrations(&result.error);
+                QString clientError;
+                result.clients = client.clients(&clientError);
+                if (result.error.isEmpty()) result.error = clientError;
+                return result;
+            }));
         };
         QObject::connect(refreshClients, &QPushButton::clicked, &dialog, refreshClientsTables);
         updateListenVisibility(info ? info->listen : ListenSettings{});
@@ -1283,51 +1316,100 @@ void MainWindow::showSettings() {
     refreshScheduleControls();
 
     auto *serverSettingsRefresh = new QTimer(&dialog);
-    serverSettingsRefresh->setInterval(1000);
+    serverSettingsRefresh->setSingleShot(true);
+    serverSettingsRefresh->setInterval(75);
+    bool settingsRefreshRunning = false;
+    bool settingsRefreshAgain = false;
+    bool settingsInitialLoad = true;
+    QObject::connect(this, &MainWindow::serverTopicsChanged, &dialog,
+                     [serverSettingsRefresh](const QStringList &topics) {
+        if (topics.contains(QStringLiteral("all")) ||
+            topics.contains(QStringLiteral("settings")) ||
+            topics.contains(QStringLiteral("repository")) ||
+            topics.contains(QStringLiteral("credentials")) ||
+            topics.contains(QStringLiteral("administration"))) {
+            serverSettingsRefresh->start();
+        }
+    });
     QObject::connect(serverSettingsRefresh, &QTimer::timeout, &dialog, [&] {
+        if (settingsRefreshRunning) {
+            settingsRefreshAgain = true;
+            return;
+        }
+        settingsRefreshRunning = true;
+        auto *watcher = new QFutureWatcher<SettingsRefreshResult>(&dialog);
+        QObject::connect(watcher, &QFutureWatcher<SettingsRefreshResult>::finished,
+                         &dialog, [&, watcher] {
+        const auto latest = watcher->result();
+        watcher->deleteLater();
+        settingsRefreshRunning = false;
+        if (latest.server) {
+            info = latest.server;
+            infoError = latest.administrationError;
+        }
         bool updated = false;
         bool conflicted = false;
-        QString error;
-        const auto latestLibrary = library_.librarySettings(&error);
-        if (latestLibrary && latestLibrary->revision != librarySettingsRevision_) {
+        if (latest.library &&
+            (settingsInitialLoad || latest.library->revision != librarySettingsRevision_)) {
             if (libraryFieldsDirty) {
                 conflicted = true;
             } else {
                 const QScopedValueRollback applying(applyingLibraryFields, true);
-                applyLibrarySettings(*latestLibrary);
-                backgroundEnabled->setChecked(latestLibrary->updatesEnabled);
-                schedule->setCurrentIndex(latestLibrary->updatesDaily ? 0 : 1);
-                weekday->setCurrentIndex(std::clamp(latestLibrary->weekDay, 1, 7) - 1);
-                checkTime->setTime(latestLibrary->localTime);
-                automaticPrepare->setChecked(latestLibrary->automaticallyPrepare);
-                retainedPackages->setValue(latestLibrary->retainedPackageVersions);
-                retainedReleases->setValue(latestLibrary->retainedCompleteReleases);
+                library = latest.library;
+                applyLibrarySettings(*latest.library);
+                backgroundEnabled->setChecked(latest.library->updatesEnabled);
+                schedule->setCurrentIndex(latest.library->updatesDaily ? 0 : 1);
+                weekday->setCurrentIndex(std::clamp(latest.library->weekDay, 1, 7) - 1);
+                checkTime->setTime(latest.library->localTime);
+                automaticPrepare->setChecked(latest.library->automaticallyPrepare);
+                retainedPackages->setValue(latest.library->retainedPackageVersions);
+                retainedReleases->setValue(latest.library->retainedCompleteReleases);
                 refreshScheduleControls();
                 updated = true;
             }
         }
-        error.clear();
-        const auto latestRepo = library_.repoSettings(&error);
-        if (latestRepo && (!repo || latestRepo->revision != repo->revision)) {
+        if (latest.repo && (!repo || latest.repo->revision != repo->revision)) {
             if (repoFieldsDirty) {
                 conflicted = true;
             } else {
-                repo = latestRepo;
-                applyRepoUi(*latestRepo);
+                repo = latest.repo;
+                applyRepoUi(*latest.repo);
                 updated = true;
             }
         }
-        error.clear();
-        const auto githubCredential =
-            library_.credentialStatus(QStringLiteral("github.token"), &error);
-        if (githubCredential &&
-            githubCredential->configured != appSettings_.githubTokenConfigured) {
-            appSettings_.githubTokenConfigured = githubCredential->configured;
+        if (latest.githubCredential &&
+            latest.githubCredential->configured != appSettings_.githubTokenConfigured) {
+            appSettings_.githubTokenConfigured = latest.githubCredential->configured;
             githubToken->setPlaceholderText(
-                githubCredential->configured
+                latest.githubCredential->configured
                     ? QStringLiteral("Configured on the library daemon; leave blank to keep it")
                     : QStringLiteral("Optional personal access token"));
             updated = true;
+        }
+        if (latest.server && listenEnabled != nullptr && listenPort != nullptr &&
+            listenInterfaces != nullptr &&
+            !sameListenTarget(latest.server->listen, lastAppliedListen)) {
+            ListenSettings edited;
+            edited.enabled = listenEnabled->isChecked();
+            edited.port = listenPort->value();
+            edited.hosts = selectedListenHosts(listenInterfaces);
+            if (!sameListenTarget(edited, lastAppliedListen)) {
+                conflicted = true;
+            } else {
+                lastAppliedListen = latest.server->listen;
+                listenEnabled->setChecked(lastAppliedListen.enabled);
+                listenPort->setValue(lastAppliedListen.port);
+                populateListenInterfaces(listenInterfaces, lastAppliedListen.hosts);
+                updateListenVisibility(lastAppliedListen);
+                updated = true;
+            }
+        }
+        if (latest.server && backendLabel != nullptr) {
+            backendLabel->setText(secretBackendLabel(latest.server->secretBackend));
+        }
+        if (applyClientsTables && latest.server) {
+            applyClientsTables(latest.registrations, latest.clients,
+                               latest.administrationError);
         }
         if (conflicted) {
             settingsSyncNotice->setText(
@@ -1337,8 +1419,44 @@ void MainWindow::showSettings() {
             settingsSyncNotice->setText(
                 QStringLiteral("✓ Settings updated by another PacSmith client."));
             settingsSyncNotice->setVisible(true);
+        } else if (settingsInitialLoad) {
+            const auto loadError = !latest.libraryError.isEmpty()
+                ? latest.libraryError
+                : !latest.repositoryError.isEmpty() ? latest.repositoryError
+                                                    : latest.credentialError;
+            settingsSyncNotice->setText(loadError.isEmpty()
+                                            ? QString{}
+                                            : QStringLiteral("Could not load all library settings: %1")
+                                                  .arg(loadError));
+            settingsSyncNotice->setVisible(!loadError.isEmpty());
         }
+        if (settingsInitialLoad) settingsTabs->setEnabled(true);
+        settingsInitialLoad = false;
+        if (settingsRefreshAgain) {
+            settingsRefreshAgain = false;
+            serverSettingsRefresh->start();
+        }
+        });
+        const auto config = library_.config();
+        watcher->setFuture(QtConcurrent::run([config, localAdmin] {
+            LibraryClient client(config);
+            SettingsRefreshResult result;
+            result.library = client.librarySettings(&result.libraryError);
+            result.repo = client.repoSettings(&result.repositoryError);
+            result.githubCredential = client.credentialStatus(
+                QStringLiteral("github.token"), &result.credentialError);
+            if (localAdmin) {
+                QString error;
+                result.server = client.serverInfo(&error);
+                result.registrations = client.pendingRegistrations(&error);
+                QString clientError;
+                result.clients = client.clients(&clientError);
+                result.administrationError = error.isEmpty() ? clientError : error;
+            }
+            return result;
+        }));
     });
+
     serverSettingsRefresh->start();
 
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);

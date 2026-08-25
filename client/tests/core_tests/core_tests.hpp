@@ -6,6 +6,9 @@ class CoreTests final : public QObject {
     Q_OBJECT
 
 private slots:
+    void parsesChunkedServerEvents();
+    void ignoresMalformedServerEventsAndHeartbeats();
+    void describesUnnamedServerJobsWithoutOpaqueIds();
     void parsesControlFields();
     void parsesMultilineControlFields();
     void prefersApplicationNameOverPackageDescription();

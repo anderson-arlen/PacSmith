@@ -5,6 +5,27 @@
 #include <QGuiApplication>
 
 namespace pacsmith::gui {
+namespace {
+
+struct BuildPollResult {
+    std::optional<JobStatus> job;
+    QString logChunk;
+    QString error;
+    qint64 nextOffset{0};
+};
+
+struct BuildFinishResult {
+    std::optional<JobStatus> job;
+    std::optional<Project> project;
+    QString error;
+};
+
+struct ReleaseDeletionResult {
+    bool succeeded{false};
+    QString error;
+};
+
+} // namespace
 
 void MainWindow::startReanalysis() {
     if (!project_ || currentRelease() == nullptr || importThread_ != nullptr ||
@@ -12,15 +33,10 @@ void MainWindow::startReanalysis() {
         debDownloadService_->isRunning()) {
         return;
     }
+    if (!ensureCurrentProjectWritable()) return;
     const auto projectId = project_->id;
     const auto releaseId = currentRelease()->id;
     const auto version = currentRelease()->debian.version;
-    if (!std::filesystem::is_regular_file(library_.sourcePath(*currentRelease()))) {
-        QMessageBox::critical(
-            this, QStringLiteral("Cannot reanalyze artifact"),
-            QStringLiteral("The immutable stored artifact for this release is missing."));
-        return;
-    }
 
     QMessageBox confirmation(
         QMessageBox::Warning, QStringLiteral("Reset and reanalyze release?"),
@@ -74,38 +90,40 @@ void MainWindow::startReanalysis() {
                     importProgress_->deleteLater();
                     importProgress_ = nullptr;
                 }
-                projectList_->setEnabled(true);
+                projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
                 if (completedProjectId.isEmpty()) {
                     statusBar()->clearMessage();
                     QMessageBox::critical(this, QStringLiteral("Reanalysis failed"), error);
                     updateDeleteButton();
                     return;
                 }
-                refreshProjectList(projectId);
-                loadProject(projectId);
-                currentReleaseId_ = completedReleaseId.isEmpty()
+                const auto completedId = completedReleaseId.isEmpty()
                     ? releaseId : completedReleaseId;
-                const auto *release = currentRelease();
-                const auto commands = release == nullptr
-                    ? 0 : release->installMapping.launchers.size();
-                const auto desktopEntries = release == nullptr
-                    ? 0 : release->installMapping.desktopEntries.size();
-                const auto iconDetected = release != nullptr &&
-                    release->installMapping.icon.sourceKind != IconSourceKind::None;
-                showReleaseWorkbenchAtFirstAttention(currentReleaseId_);
-                statusBar()->showMessage(
-                    QStringLiteral("Artifact reanalyzed from a blank package setup"), 12000);
-                QMessageBox::information(
-                    this, QStringLiteral("Artifact reanalyzed"),
-                    QStringLiteral(
-                        "PacSmith rebuilt this release's setup from the stored artifact.\n\n"
-                        "Detected commands: %1\nDesktop entries: %2\nIcon: %3\n\n"
-                        "The first section that still needs attention is now open.")
-                        .arg(commands)
-                        .arg(desktopEntries)
-                        .arg(iconDetected ? QStringLiteral("detected")
-                                          : QStringLiteral("not detected")));
-                updateDeleteButton();
+                refreshProjectList(projectId, [this, projectId, completedId](const bool succeeded) {
+                    if (!succeeded || !project_ || project_->id != projectId) return;
+                    currentReleaseId_ = completedId;
+                    const auto *release = currentRelease();
+                    const auto commands = release == nullptr
+                        ? 0 : release->installMapping.launchers.size();
+                    const auto desktopEntries = release == nullptr
+                        ? 0 : release->installMapping.desktopEntries.size();
+                    const auto iconDetected = release != nullptr &&
+                        release->installMapping.icon.sourceKind != IconSourceKind::None;
+                    showReleaseWorkbenchAtFirstAttention(currentReleaseId_);
+                    statusBar()->showMessage(
+                        QStringLiteral("Artifact reanalyzed from a blank package setup"), 12000);
+                    QMessageBox::information(
+                        this, QStringLiteral("Artifact reanalyzed"),
+                        QStringLiteral(
+                            "PacSmith rebuilt this release's setup from the stored artifact.\n\n"
+                            "Detected commands: %1\nDesktop entries: %2\nIcon: %3\n\n"
+                            "The first section that still needs attention is now open.")
+                            .arg(commands)
+                            .arg(desktopEntries)
+                            .arg(iconDetected ? QStringLiteral("detected")
+                                              : QStringLiteral("not detected")));
+                    updateDeleteButton();
+                });
             });
     connect(worker, &ReanalyzeWorker::completed, thread, &QThread::quit);
     connect(worker, &ReanalyzeWorker::completed, worker, &QObject::deleteLater);
@@ -116,7 +134,7 @@ void MainWindow::startReanalysis() {
             importProgress_ = nullptr;
         }
         if (importThread_ == thread) importThread_ = nullptr;
-        projectList_->setEnabled(true);
+        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
         askAiButton_->setEnabled(currentRelease() != nullptr &&
                                  currentRelease()->state != ReleaseState::Discovered);
         updateDeleteButton();
@@ -245,7 +263,8 @@ void MainWindow::startUpdateCheck() {
 
 void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
                                         const QString &sourceName) {
-    projectList_->setEnabled(true);
+    if (!ensureCurrentProjectWritable()) return;
+    projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
     updateDeleteButton();
     publishUpdateCheckActivity(false, project_ ? project_->id : QString{});
     if (!project_) return;
@@ -379,7 +398,8 @@ void MainWindow::finishCommandProgress(const bool success, const QString &summar
 
 void MainWindow::startBuild(const bool installWhenSuccessful) {
     installAfterSuccessfulBuild_ = false;
-    if (!project_ || currentRelease() == nullptr || buildInProgress()) return;
+    if (!project_ || currentRelease() == nullptr || buildInProgress() ||
+        !ensureCurrentProjectWritable()) return;
     bool lifecycleChanged = false;
     QString lifecycleError;
     if (!library_.synchronizeLifecycle(*project_, *currentRelease(), &lifecycleChanged, &lifecycleError)) {
@@ -538,56 +558,95 @@ bool MainWindow::buildInProgress() const {
 
 void MainWindow::cancelRemoteBuild() {
     if (buildJobId_.isEmpty()) return;
-    QString error;
-    static_cast<void>(library_.cancelJob(buildJobId_, &error));
+    const auto config = library_.config();
+    const auto jobId = buildJobId_;
+    statusBar()->showMessage(QStringLiteral("Canceling build…"));
+    QThreadPool::globalInstance()->start([config, jobId] {
+        LibraryClient client(config);
+        QString error;
+        static_cast<void>(client.cancelJob(jobId, &error));
+    });
 }
 
 void MainWindow::pollBuildJob() {
-    if (buildJobId_.isEmpty()) return;
-    QString error;
-    const auto job = library_.getJob(buildJobId_, &error);
-    if (!job) return;
-    qint64 next = buildLogAfter_;
-    const auto chunk = library_.jobLog(buildJobId_, buildLogAfter_, &next, nullptr);
-    if (!chunk.isEmpty() && commandProgress_ != nullptr) {
-        commandProgress_->appendOutput(chunk);
-    }
-    buildLogAfter_ = next;
-    if (job->status == QStringLiteral("succeeded") || job->status == QStringLiteral("failed") ||
-        job->status == QStringLiteral("interrupted")) {
-        if (buildPollTimer_ != nullptr) buildPollTimer_->stop();
-        finishBuildJob();
-    }
+    if (buildJobId_.isEmpty() || buildPollInFlight_ || buildFinishInFlight_) return;
+    buildPollInFlight_ = true;
+    const auto config = library_.config();
+    const auto jobId = buildJobId_;
+    const auto after = buildLogAfter_;
+    auto *watcher = new QFutureWatcher<BuildPollResult>(this);
+    connect(watcher, &QFutureWatcher<BuildPollResult>::finished, this,
+            [this, watcher, jobId] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        buildPollInFlight_ = false;
+        if (jobId != buildJobId_ || !result.job) return;
+        if (!result.logChunk.isEmpty() && commandProgress_ != nullptr) {
+            commandProgress_->appendOutput(result.logChunk);
+        }
+        buildLogAfter_ = result.nextOffset;
+        if (result.job->status == QStringLiteral("succeeded") ||
+            result.job->status == QStringLiteral("failed") ||
+            result.job->status == QStringLiteral("interrupted")) {
+            if (buildPollTimer_ != nullptr) buildPollTimer_->stop();
+            finishBuildJob();
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([config, jobId, after] {
+        LibraryClient client(config);
+        BuildPollResult result;
+        result.job = client.getJob(jobId, &result.error);
+        result.nextOffset = after;
+        if (result.job) {
+            result.logChunk = client.jobLog(jobId, after, &result.nextOffset, nullptr);
+        }
+        return result;
+    }));
 }
 
 void MainWindow::finishBuildJob() {
+    if (buildFinishInFlight_ || buildJobId_.isEmpty()) return;
+    buildFinishInFlight_ = true;
     const auto jobId = buildJobId_;
-    QString error;
-    const auto job = library_.getJob(jobId, &error);
-    buildJobId_.clear();
-    if (!project_) return;
-    auto reloaded = library_.load(project_->id, &error);
-    if (reloaded) {
-        project_ = *reloaded;
-        projectCache_.insert(project_->id, *project_);
-    }
-    const bool succeeded = job && job->status == QStringLiteral("succeeded");
-    const bool canceled = job && job->status == QStringLiteral("interrupted");
-    populateOverview();
-    populateBuild();
-    populateHistory();
-    updateDeleteButton();
-    updateDashboardActions();
-    const auto shouldInstall = succeeded && !canceled && installAfterSuccessfulBuild_;
-    installAfterSuccessfulBuild_ = false;
-    finishCommandProgress(succeeded && !canceled,
-                          canceled ? QStringLiteral("Build canceled.")
-                          : succeeded ? QStringLiteral("Build succeeded.")
-                                      : QStringLiteral("Build failed."));
-    statusBar()->showMessage(canceled ? QStringLiteral("Build canceled")
-                             : succeeded ? QStringLiteral("Build succeeded")
-                                         : QStringLiteral("Build failed"), 8000);
-    if (shouldInstall) QTimer::singleShot(0, this, [this] { startInstall(); });
+    const auto projectId = project_ ? project_->id : QString{};
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<BuildFinishResult>(this);
+    connect(watcher, &QFutureWatcher<BuildFinishResult>::finished, this,
+            [this, watcher, jobId, projectId] {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        buildFinishInFlight_ = false;
+        if (jobId != buildJobId_) return;
+        buildJobId_.clear();
+        if (!projectId.isEmpty() && result.project && result.project->id == projectId) {
+            project_ = std::move(*result.project);
+            projectCache_.insert(project_->id, *project_);
+        }
+        const bool succeeded = result.job && result.job->status == QStringLiteral("succeeded");
+        const bool canceled = result.job && result.job->status == QStringLiteral("interrupted");
+        populateOverview();
+        populateBuild();
+        populateHistory();
+        updateDeleteButton();
+        updateDashboardActions();
+        const auto shouldInstall = succeeded && !canceled && installAfterSuccessfulBuild_;
+        installAfterSuccessfulBuild_ = false;
+        finishCommandProgress(succeeded && !canceled,
+                              canceled ? QStringLiteral("Build canceled.")
+                              : succeeded ? QStringLiteral("Build succeeded.")
+                                          : QStringLiteral("Build failed."));
+        statusBar()->showMessage(canceled ? QStringLiteral("Build canceled")
+                                 : succeeded ? QStringLiteral("Build succeeded")
+                                             : QStringLiteral("Build failed"), 8000);
+        if (shouldInstall) QTimer::singleShot(0, this, [this] { startInstall(); });
+    });
+    watcher->setFuture(QtConcurrent::run([config, jobId, projectId] {
+        LibraryClient client(config);
+        BuildFinishResult result;
+        result.job = client.getJob(jobId, &result.error);
+        if (!projectId.isEmpty()) result.project = client.load(projectId, &result.error);
+        return result;
+    }));
 }
 
 void MainWindow::startInstall() {
@@ -727,7 +786,7 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
 }
 
 void MainWindow::deleteSelectedRelease() {
-    if (!project_) return;
+    if (!project_ || !ensureCurrentProjectWritable()) return;
     const auto id = selectedDashboardReleaseId();
     const auto *release = project_->release(id);
     if (release == nullptr || id == project_->installedReleaseId) return;
@@ -736,19 +795,40 @@ void MainWindow::deleteSelectedRelease() {
             QStringLiteral("Permanently delete release %1, including its vendor artifact, settings, PKGBUILD, and built artifacts?")
                 .arg(release->debian.version),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-    QString error;
-    if (!library_.deleteRelease(*project_, id, &error)) {
-        QMessageBox::critical(this, QStringLiteral("Could not delete release"), error);
-        return;
-    }
-    if (currentReleaseId_ == id) {
-        const auto *fallback = project_->activeTrackingRelease();
-        if (fallback == nullptr) fallback = project_->newestRelease();
-        currentReleaseId_ = fallback == nullptr ? QString{} : fallback->id;
-    }
-    refreshProjectList(project_->id);
-    refreshCurrentProject();
-    syncTrayUpdateCensus();
+    const auto projectId = project_->id;
+    const auto version = release->debian.version;
+    const auto projectSnapshot = *project_;
+    setProjectListBusy(true, QStringLiteral("Deleting release…"));
+    statusBar()->showMessage(QStringLiteral("Deleting release %1…").arg(version));
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<ReleaseDeletionResult>(this);
+    connect(watcher, &QFutureWatcher<ReleaseDeletionResult>::finished, this,
+            [this, watcher, projectId, version] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (!result.succeeded) {
+            setProjectListBusy(false);
+            QMessageBox::critical(
+                this, QStringLiteral("Could not delete release"),
+                result.error.isEmpty() ? QStringLiteral("The library rejected the deletion")
+                                       : result.error);
+            return;
+        }
+        refreshProjectList(projectId, [this, version](const bool succeeded) {
+            if (succeeded && project_) {
+                refreshCurrentProject();
+                syncTrayUpdateCensus();
+            }
+            statusBar()->showMessage(QStringLiteral("Deleted release %1").arg(version), 8000);
+        });
+    });
+    watcher->setFuture(QtConcurrent::run([config, projectSnapshot, id] {
+        LibraryClient client(config);
+        auto mutableProject = projectSnapshot;
+        ReleaseDeletionResult result;
+        result.succeeded = client.deleteRelease(mutableProject, id, &result.error);
+        return result;
+    }));
 }
 
 void MainWindow::rollbackSelectedRelease() {

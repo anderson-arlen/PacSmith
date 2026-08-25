@@ -14,6 +14,7 @@
 #include <QTime>
 #include <QThread>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QUuid>
 
 namespace pacsmith {
@@ -423,6 +424,27 @@ bool LibraryClient::downloadArtifact(const QString &artifactId, const QString &d
     return transport_.downloadToFile(
         QStringLiteral("/api/v1/artifacts/") + artifactId + QStringLiteral("/content"),
         destination, error);
+}
+
+std::optional<QJsonObject> LibraryClient::inspectPayloadFile(
+    const QString &releaseId, const QString &path, QString *error) const {
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("path"), path);
+    const auto endpoint = QStringLiteral("/api/v1/releases/%1/payload-inspection?%2")
+                              .arg(releaseId, query.query(QUrl::FullyEncoded));
+    const auto response = transport_.request(QStringLiteral("GET"), endpoint);
+    if (isError(response, error) || response.status != 200) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = apiError(response.body, QStringLiteral("could not inspect payload file"));
+        }
+        return std::nullopt;
+    }
+    const auto document = QJsonDocument::fromJson(response.body);
+    if (!document.isObject()) {
+        if (error != nullptr) *error = QStringLiteral("invalid payload inspection response");
+        return std::nullopt;
+    }
+    return document.object();
 }
 
 void LibraryClient::prefetchReleaseArtifacts(const Project &project) const {

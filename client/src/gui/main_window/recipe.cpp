@@ -459,7 +459,7 @@ void MainWindow::populateHistory() {
 }
 
 bool MainWindow::persistCurrent() {
-    if (!project_) return false;
+    if (!project_ || !ensureCurrentProjectWritable()) return false;
     QString error;
     if (!library_.save(*project_, &error)) {
         QMessageBox::critical(this, QStringLiteral("Could not save project"), error);
@@ -470,7 +470,8 @@ bool MainWindow::persistCurrent() {
 }
 
 bool MainWindow::savePkgbuild() {
-    if (!project_ || currentRelease() == nullptr || pkgbuildEditor_ == nullptr) return false;
+    if (!project_ || currentRelease() == nullptr || pkgbuildEditor_ == nullptr ||
+        !ensureCurrentProjectWritable()) return false;
     if (!pkgbuildEditor_->document()->isModified()) return true;
     QString error;
     if (!library_.saveCustomPkgbuild(*project_, *currentRelease(), pkgbuildEditor_->toPlainText(), &error)) {

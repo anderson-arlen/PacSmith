@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/anderson-arlen/pacsmith/server/internal/events"
 	"github.com/anderson-arlen/pacsmith/server/internal/httpapi"
 	"github.com/anderson-arlen/pacsmith/server/internal/listen"
 	"github.com/anderson-arlen/pacsmith/server/internal/repo"
@@ -129,7 +130,7 @@ func (d *Daemon) startRepoMaintenance() {
 }
 
 func (d *Daemon) runRepoMaintenance(ctx context.Context) {
-	_ = d.repo.EvaluateSoaks(ctx)
+	d.evaluateRepoSoaks(ctx)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -137,7 +138,14 @@ func (d *Daemon) runRepoMaintenance(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = d.repo.EvaluateSoaks(ctx)
+			d.evaluateRepoSoaks(ctx)
 		}
+	}
+}
+
+func (d *Daemon) evaluateRepoSoaks(ctx context.Context) {
+	changed, err := d.repo.EvaluateSoaksChanged(ctx)
+	if err == nil && changed && d.events != nil {
+		d.events.Publish(events.Event{Topics: []string{"repository", "projects"}})
 	}
 }
