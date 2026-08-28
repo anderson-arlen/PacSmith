@@ -290,9 +290,11 @@ QJsonArray tools() {
                            {QStringLiteral("existing_project"), project}},
                           {QStringLiteral("url")}), annotations(false, false, false, true)),
         tool(QStringLiteral("import_direct_url"),
-             QStringLiteral("Create or update a project directly from a first-party HTTPS artifact URL. PacSmith owns the download, SHA256 calculation, upload, and inspection; never download the artifact with curl or another external tool."),
+             QStringLiteral("Create or update a project directly from a first-party HTTPS artifact URL. For a manual update, select the existing project and supply a version when the URL or artifact does not identify itself. PacSmith owns the download, optional publisher-checksum verification, upload, and inspection; never download the artifact with curl or another external tool."),
              objectSchema({{QStringLiteral("url"), stringProperty(QStringLiteral("Direct HTTPS URL for a vendor package or archive."))},
-                           {QStringLiteral("existing_project"), project}},
+                           {QStringLiteral("existing_project"), project},
+                           {QStringLiteral("version"), stringProperty(QStringLiteral("Optional explicit vendor version, required when it cannot be inferred from the artifact."))},
+                           {QStringLiteral("expected_sha256"), stringProperty(QStringLiteral("Optional 64-character publisher SHA256 that must match the downloaded artifact."))}},
                           {QStringLiteral("url")}), annotations(false, false, false, true)),
         tool(QStringLiteral("update_project_metadata"), QStringLiteral("Edit ordinary project display/package/vendor metadata."),
              objectSchema({{QStringLiteral("project"), project}, {QStringLiteral("display_name"), stringProperty(QStringLiteral("Display name."))},
@@ -1374,7 +1376,9 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
             token.fill(QChar::Null);
         } else {
             imported = RemoteImportService::importDirectUrl(
-                library_, url, existingProjectId, &error);
+                library_, url, existingProjectId,
+                argumentString(args, QStringLiteral("version")),
+                argumentString(args, QStringLiteral("expected_sha256")), &error);
         }
         if (!imported) return fail(error);
         const auto *importedRelease = imported->imported.project.release(

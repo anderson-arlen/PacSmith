@@ -697,6 +697,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     });
     connect(debDownloadService_, &DebDownloadService::failed, this, [this](const QString &message) {
         const auto projectId = preparingProjectId_;
+        pendingImportOptions_ = {};
         resetPreparationState();
         statusBar()->showMessage(QStringLiteral("Vendor artifact download failed"), 8000);
         QMessageBox::critical(this, QStringLiteral("Could not prepare release"), message);

@@ -144,6 +144,11 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         QCOMPARE(remoteImport.value(QStringLiteral("annotations")).toObject()
                      .value(QStringLiteral("openWorldHint")).toBool(), true);
     }
+    const auto directImportProperties = findTool(QStringLiteral("import_direct_url"))
+                                            .value(QStringLiteral("inputSchema")).toObject()
+                                            .value(QStringLiteral("properties")).toObject();
+    QVERIFY(directImportProperties.contains(QStringLiteral("version")));
+    QVERIFY(directImportProperties.contains(QStringLiteral("expected_sha256")));
     const auto artifactImport = findTool(QStringLiteral("import_artifact"));
     const auto artifactImportSchema =
         artifactImport.value(QStringLiteral("inputSchema")).toObject();

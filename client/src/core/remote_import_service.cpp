@@ -180,7 +180,7 @@ std::optional<RemoteArtifactImportResult> RemoteImportService::importGitHub(
 
 std::optional<RemoteArtifactImportResult> RemoteImportService::importDirectUrl(
     LibraryClient &library, const QUrl &url, const QString &existingProjectId,
-    QString *error) {
+    const QString &version, const QString &expectedSha256, QString *error) {
     if (!validHttpsUrl(url)) {
         if (error != nullptr) {
             *error = QStringLiteral("Direct artifact URL must be HTTPS without credentials or a fragment");
@@ -195,10 +195,13 @@ std::optional<RemoteArtifactImportResult> RemoteImportService::importDirectUrl(
         if (error != nullptr) *error = QStringLiteral("Could not create a temporary import directory");
         return std::nullopt;
     }
-    const auto downloaded = downloadArtifact(url, filename, {}, temporary, error);
+    const auto downloaded = downloadArtifact(url, filename, expectedSha256,
+                                             temporary, error);
     if (!downloaded) return std::nullopt;
     ImportOptions options;
     options.existingProjectId = existingProjectId;
+    options.version = version;
+    options.expectedSha256 = expectedSha256;
     options.acquisition.kind = AcquisitionKind::DirectUrl;
     options.acquisition.canonicalIdentity =
         url.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment).toString();
@@ -208,8 +211,10 @@ std::optional<RemoteArtifactImportResult> RemoteImportService::importDirectUrl(
     UpdateCheckResult source;
     source.success = true;
     source.supported = true;
+    source.detectedVersion = version;
     source.filename = filename;
     source.downloadUrl = url.toString();
+    source.publisherDigest = expectedSha256.trimmed().toLower();
     return RemoteArtifactImportResult{*imported, source};
 }
 

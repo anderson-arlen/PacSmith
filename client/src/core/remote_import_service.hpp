@@ -35,6 +35,7 @@ public:
 
     [[nodiscard]] static std::optional<RemoteArtifactImportResult> importDirectUrl(
         LibraryClient &library, const QUrl &url, const QString &existingProjectId = {},
+        const QString &version = {}, const QString &expectedSha256 = {},
         QString *error = nullptr);
 };
 

@@ -43,6 +43,15 @@ void MainWindow::submitManualRelease() {
     layout->addWidget(introduction);
 
     auto *form = new QFormLayout;
+    auto *sourceChoice = new QWidget(&dialog);
+    auto *sourceChoiceLayout = new QHBoxLayout(sourceChoice);
+    sourceChoiceLayout->setContentsMargins(0, 0, 0, 0);
+    auto *localSource = new QRadioButton(QStringLiteral("Local file"), sourceChoice);
+    auto *urlSource = new QRadioButton(QStringLiteral("Direct HTTPS URL"), sourceChoice);
+    localSource->setChecked(true);
+    sourceChoiceLayout->addWidget(localSource);
+    sourceChoiceLayout->addWidget(urlSource);
+    sourceChoiceLayout->addStretch();
     auto *artifactRow = new QWidget(&dialog);
     auto *artifactLayout = new QHBoxLayout(artifactRow);
     artifactLayout->setContentsMargins(0, 0, 0, 0);
@@ -51,13 +60,19 @@ void MainWindow::submitManualRelease() {
     auto *browse = new QPushButton(QStringLiteral("Browse…"), artifactRow);
     artifactLayout->addWidget(artifactPath, 1);
     artifactLayout->addWidget(browse);
+    auto *artifactUrl = new QLineEdit(&dialog);
+    artifactUrl->setPlaceholderText(
+        QStringLiteral("https://vendor.example/releases/application.tar.gz"));
+    artifactUrl->setEnabled(false);
     auto *version = new QLineEdit(&dialog);
     version->setPlaceholderText(
         QStringLiteral("Optional when the artifact or filename contains the version"));
     auto *expectedSha256 = new QLineEdit(&dialog);
     expectedSha256->setPlaceholderText(
         QStringLiteral("Optional 64-character checksum published by the vendor"));
-    form->addRow(QStringLiteral("Artifact"), artifactRow);
+    form->addRow(QStringLiteral("Source"), sourceChoice);
+    form->addRow(QStringLiteral("Local artifact"), artifactRow);
+    form->addRow(QStringLiteral("Artifact URL"), artifactUrl);
     form->addRow(QStringLiteral("Vendor version"), version);
     form->addRow(QStringLiteral("Publisher SHA256"), expectedSha256);
     layout->addLayout(form);
@@ -73,6 +88,11 @@ void MainWindow::submitManualRelease() {
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Import && Inspect"));
     layout->addWidget(buttons);
 
+    connect(localSource, &QRadioButton::toggled, artifactRow,
+            &QWidget::setEnabled);
+    connect(urlSource, &QRadioButton::toggled, artifactUrl,
+            &QWidget::setEnabled);
+
     connect(browse, &QPushButton::clicked, &dialog, [this, artifactPath] {
         const auto path = QFileDialog::getOpenFileName(
             this, QStringLiteral("Select Vendor Artifact"), {},
@@ -84,12 +104,23 @@ void MainWindow::submitManualRelease() {
     });
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog,
-            [&dialog, artifactPath, expectedSha256] {
-        const QFileInfo artifact(artifactPath->text().trimmed());
-        if (!artifact.isAbsolute() || !artifact.isFile()) {
-            QMessageBox::warning(&dialog, QStringLiteral("Artifact required"),
-                                 QStringLiteral("Select a local vendor artifact file."));
-            return;
+            [&dialog, localSource, artifactPath, artifactUrl, expectedSha256] {
+        if (localSource->isChecked()) {
+            const QFileInfo artifact(artifactPath->text().trimmed());
+            if (!artifact.isAbsolute() || !artifact.isFile()) {
+                QMessageBox::warning(&dialog, QStringLiteral("Artifact required"),
+                                     QStringLiteral("Select a local vendor artifact file."));
+                return;
+            }
+        } else {
+            const QUrl url(artifactUrl->text().trimmed(), QUrl::StrictMode);
+            if (!url.isValid() || url.scheme() != QStringLiteral("https") ||
+                url.host().isEmpty() || !url.userInfo().isEmpty() || url.hasFragment()) {
+                QMessageBox::warning(
+                    &dialog, QStringLiteral("Invalid artifact URL"),
+                    QStringLiteral("Enter a complete HTTPS artifact URL without credentials or a fragment."));
+                return;
+            }
         }
         const auto checksum = expectedSha256->text().trimmed();
         static const QRegularExpression sha256(QStringLiteral("^[0-9A-Fa-f]{64}$"));
@@ -107,9 +138,18 @@ void MainWindow::submitManualRelease() {
     pendingImportOptions_.existingProjectId = project_->id;
     pendingImportOptions_.version = version->text().trimmed();
     pendingImportOptions_.expectedSha256 = expectedSha256->text().trimmed().toLower();
-    pendingImportOptions_.acquisition.kind = AcquisitionKind::LocalFile;
-    pendingImportOptions_.acquisition.canonicalIdentity = project_->sourceIdentity;
-    importPackage(artifactPath->text().trimmed());
+    if (localSource->isChecked()) {
+        pendingImportOptions_.acquisition.kind = AcquisitionKind::LocalFile;
+        pendingImportOptions_.acquisition.canonicalIdentity = project_->sourceIdentity;
+        importPackage(artifactPath->text().trimmed());
+    } else {
+        const QUrl url(artifactUrl->text().trimmed(), QUrl::StrictMode);
+        pendingImportOptions_.acquisition.kind = AcquisitionKind::DirectUrl;
+        pendingImportOptions_.acquisition.canonicalIdentity =
+            url.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment).toString();
+        pendingImportOptions_.acquisition.originalUrl = url.toString();
+        importPackage(url.toString());
+    }
 }
 
 void MainWindow::importGitHubUrl() {
@@ -445,21 +485,32 @@ void MainWindow::importPackage(const QString &path) {
         if (debDownloadService_->isRunning()) return;
         const auto filename = QFileInfo(remote.path()).fileName().isEmpty()
             ? QStringLiteral("vendor-artifact") : QFileInfo(remote.path()).fileName();
+        const auto expectedSha256 = pendingImportOptions_.expectedSha256;
+        const auto trustDescription = expectedSha256.isEmpty()
+            ? QStringLiteral("PacSmith will compute and record the downloaded bytes' SHA256, but no publisher checksum was supplied.")
+            : QStringLiteral("PacSmith will require the download to match the supplied publisher SHA256 before inspection.");
         if (QMessageBox::question(
                 this, QStringLiteral("Download vendor artifact"),
-                QStringLiteral("Download %1 over HTTPS and inspect it as untrusted input? The server did not provide PacSmith with a trusted publisher checksum; PacSmith will compute and record the downloaded bytes' SHA256.")
-                    .arg(remote.toDisplayString())) != QMessageBox::Yes) return;
-        pendingImportOptions_ = {};
+                QStringLiteral("Download %1 over HTTPS and inspect it as untrusted input? %2")
+                    .arg(remote.toDisplayString(), trustDescription)) != QMessageBox::Yes) {
+            pendingImportOptions_ = {};
+            return;
+        }
+        if (pendingImportOptions_.existingProjectId.isEmpty()) {
+            pendingImportOptions_ = {};
+        }
         pendingImportOptions_.acquisition.kind = AcquisitionKind::DirectUrl;
         pendingImportOptions_.acquisition.canonicalIdentity =
             remote.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment).toString();
         pendingImportOptions_.acquisition.originalUrl = remote.toString();
-        const auto target = defaultDownloadPath(
-            PkgbuildGenerator::sanitizePackageName(QFileInfo(filename).completeBaseName()),
-            QStringLiteral("direct"), filename);
+        const auto projectId = pendingImportOptions_.existingProjectId.isEmpty()
+            ? PkgbuildGenerator::sanitizePackageName(QFileInfo(filename).completeBaseName())
+            : pendingImportOptions_.existingProjectId;
+        const auto target = defaultDownloadPath(projectId, QStringLiteral("direct"),
+                                                filename);
         const auto targetPath = std::filesystem::path(target.toUtf8().constData());
-        onServiceThread(*debDownloadService_, [this, remote, targetPath] {
-            debDownloadService_->start(remote, {}, targetPath);
+        onServiceThread(*debDownloadService_, [this, remote, expectedSha256, targetPath] {
+            debDownloadService_->start(remote, expectedSha256, targetPath);
         });
         return;
     }
