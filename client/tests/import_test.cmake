@@ -139,12 +139,13 @@ endif()
 
 set(mcp_input "${runtime_dir}/mcp-input.jsonl")
 file(WRITE "${mcp_input}"
-    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"pacsmith-test\",\"version\":\"1\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"elicitation\":{\"form\":{}}},\"clientInfo\":{\"name\":\"pacsmith-test\",\"version\":\"1\"}}}\n"
     "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
     "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
     "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"list_projects\",\"arguments\":{\"query\":\"pacsmith-smoke\"}}}\n"
     "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"get_project\",\"arguments\":{\"project\":\"pacsmith-smoke\"}}}\n"
-    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_project\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\"}}}\n")
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"set_library_settings\",\"arguments\":{\"weekday\":0}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":\"pacsmith-confirm-1\",\"result\":{\"action\":\"decline\"}}\n")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" mcp
     INPUT_FILE "${mcp_input}"
@@ -163,14 +164,17 @@ foreach(expected IN ITEMS
         "\"name\":\"upsert_harness_profile\""
         "\"readOnlyHint\":true"
         "\"destructiveHint\":true"
-        "pacsmith-smoke"
-        "requires explicit PacSmith confirmation")
+        "pacsmith-smoke")
     string(FIND "${mcp_output}" "${expected}" found)
     if(found EQUAL -1)
         stop_pacsmithd()
         message(FATAL_ERROR "MCP output omitted ${expected}: ${mcp_output}")
     endif()
 endforeach()
+if(mcp_output MATCHES "elicitation/create")
+    stop_pacsmithd()
+    message(FATAL_ERROR "PacSmith emitted a duplicate MCP elicitation request: ${mcp_output}")
+endif()
 string(REGEX MATCH "\"release_id\":\"([0-9a-f-]+)\"" release_match "${mcp_output}")
 set(release_id "${CMAKE_MATCH_1}")
 if(release_id STREQUAL "")
@@ -212,23 +216,6 @@ if(NOT mcp_write_result EQUAL 0 OR NOT mcp_write_output MATCHES "unknown-vendor-
    OR NOT mcp_write_output MATCHES "libnotify")
     stop_pacsmithd()
     message(FATAL_ERROR "MCP domain write/read round trip failed: ${mcp_write_error}\n${mcp_write_output}")
-endif()
-
-set(mcp_confirm_input "${runtime_dir}/mcp-confirm-input.jsonl")
-file(WRITE "${mcp_confirm_input}"
-    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"elicitation\":{\"form\":{}}},\"clientInfo\":{\"name\":\"pacsmith-test\",\"version\":\"1\"}}}\n"
-    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
-    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_project\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\"}}}\n"
-    "{\"jsonrpc\":\"2.0\",\"id\":\"pacsmith-confirm-1\",\"result\":{\"action\":\"decline\"}}\n")
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" mcp
-    INPUT_FILE "${mcp_confirm_input}"
-    RESULT_VARIABLE mcp_confirm_result OUTPUT_VARIABLE mcp_confirm_output ERROR_VARIABLE mcp_confirm_error)
-if(NOT mcp_confirm_result EQUAL 0 OR NOT mcp_confirm_output MATCHES "elicitation/create"
-   OR NOT mcp_confirm_output MATCHES "pacsmith-smoke-bin"
-   OR NOT mcp_confirm_output MATCHES "declined or canceled")
-    stop_pacsmithd()
-    message(FATAL_ERROR "MCP confirmation round trip failed: ${mcp_confirm_error}\n${mcp_confirm_output}")
 endif()
 
 stop_pacsmithd()

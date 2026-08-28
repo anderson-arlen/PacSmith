@@ -16,8 +16,8 @@ jobs:
       - name: Install official Arch dependencies
         run: >-
           pacman -Syu --noconfirm --needed
-          cmake ninja go qt6-base qt6-svg libarchive pacman polkit gnupg age libsecret
-          desktop-file-utils openssl github-cli git
+          cmake ninja go qt6-base qt6-svg libarchive curl squashfs-tools podman pacman
+          polkit gnupg openssl github-cli git
 
       - uses: actions/checkout@v4
 
@@ -48,11 +48,14 @@ jobs:
           release_version="${GITHUB_REF_NAME#v}"
           install -d -o builder -g builder release-package/stage
           install -o builder -g builder -m 0644 packaging/release/PKGBUILD release-package/PKGBUILD
+          install -o builder -g builder -m 0644 packaging/release/pacsmith.install release-package/pacsmith.install
           runuser -u builder -- env DESTDIR="$GITHUB_WORKSPACE/release-package/stage" \
             cmake --install build-release --prefix /usr
           runuser -u builder -- env PACSMITH_RELEASE_VERSION="$release_version" \
             bash -lc 'cd "$1" && makepkg --clean --force --noconfirm' _ \
             "$GITHUB_WORKSPACE/release-package"
+          bsdtar -xOf release-package/pacsmith-*.pkg.tar.zst .INSTALL | \
+            grep -F 'try-restart pacsmithd.service' >/dev/null
           sha256sum release-package/pacsmith-*.pkg.tar.zst > release-package/SHA256SUMS
 
       - name: Publish release assets

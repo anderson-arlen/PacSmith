@@ -8,7 +8,7 @@ PACMAN := /usr/bin/pacman
 ARCH_RELEASE ?= /etc/arch-release
 OS_RELEASE ?= /etc/os-release
 
-DEPENDENCIES := base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools podman polkit gnupg age libsecret desktop-file-utils openssl
+DEPENDENCIES := base-devel cmake ninja go qt6-base qt6-svg libarchive curl squashfs-tools podman polkit gnupg openssl
 
 .DEFAULT_GOAL := all
 .NOTPARALLEL:
@@ -87,9 +87,8 @@ install: check-user deps test
 	@echo "Portable Agent Plugin: $$($(PREFIX)/bin/pacsmith plugin path)"
 	@echo "The library daemon is $(PREFIX)/bin/pacsmithd (systemd user unit pacsmithd.service)."
 	@if command -v systemctl >/dev/null 2>&1; then \
-		systemctl --user enable pacsmithd.service && \
-		systemctl --user restart pacsmithd.service || \
-			echo "warning: could not enable and restart pacsmithd.service; run 'systemctl --user enable --now pacsmithd.service' later." >&2; \
+		systemctl --user try-restart pacsmithd.service || \
+			echo "warning: could not restart the running pacsmithd.service." >&2; \
 	fi
 
 uninstall: check-user

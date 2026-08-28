@@ -30,6 +30,17 @@ struct RetentionCleanupResult {
     QString error;
 };
 
+struct UpdateCheckJobTask {
+    std::optional<JobStatus> job;
+    QString log;
+    QString error;
+};
+
+struct UpdatePreparationJobTask {
+    std::optional<JobStatus> job;
+    QString error;
+};
+
 struct InstallPreparationResult {
     std::optional<Project> project;
     QString releaseId;
@@ -43,7 +54,7 @@ struct InstallPreparationResult {
 void MainWindow::startReanalysis() {
     if (!project_ || currentRelease() == nullptr || importThread_ != nullptr ||
         buildInProgress() || packageOperationInProgress() ||
-        debDownloadService_->isRunning()) {
+        serverImportRunning_ || repositoryImportRunning_) {
         return;
     }
     if (!ensureCurrentProjectWritable()) return;
@@ -237,191 +248,76 @@ void MainWindow::applyRetentionCleanup() {
 }
 
 void MainWindow::startUpdateCheck() {
-    if (!project_ || directUrlUpdateService_->isRunning() ||
-        aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
-        githubUpdateService_->isRunning() ||
-        debDownloadService_->isRunning() || importThread_ != nullptr) return;
-    if (!saveUpdateConfiguration()) return;
+    if (!project_ || updateCheckRunning_ || updateConfigurationSaveInFlight_ ||
+        serverImportRunning_ || repositoryImportRunning_ || importThread_ != nullptr) return;
     auto *tracker = updateEditorRelease();
     if (tracker == nullptr) return;
-    const auto strategy = tracker->update.strategy;
-    if (strategy != UpdateStrategy::DirectUrl &&
-        strategy != UpdateStrategy::AptRepository && strategy != UpdateStrategy::RpmRepository &&
-        strategy != UpdateStrategy::GitHubRelease) {
-        QMessageBox::information(this, QStringLiteral("Update check"),
-                                 QStringLiteral("Select Direct URL, an APT or RPM repository, or GitHub releases to check automatically."));
-        return;
-    }
-    const auto backgroundState = BackgroundUpdateStateStore::load();
-    if (backgroundState.checking && !directUrlUpdateService_->isRunning() &&
-        !aptUpdateService_->isRunning() &&
-        !rpmUpdateService_->isRunning() && !githubUpdateService_->isRunning()) {
-        statusBar()->showMessage(QStringLiteral("An update check is already running"), 6000);
-        return;
-    }
+    const auto projectId = project_->id;
+    const auto releaseId = tracker->id;
+    const auto projectName = project_->displayName.isEmpty() ? project_->archPackageName
+                                                             : project_->displayName;
+    const auto automaticStrategy = updateStrategy_->currentIndex() >= 1 &&
+                                   updateStrategy_->currentIndex() <= 4;
+    saveUpdateConfigurationThen(
+        [this, projectId, releaseId, projectName, automaticStrategy](const bool saved) {
+            if (!saved) return;
+            if (!automaticStrategy) {
+                QMessageBox::information(
+                    this, QStringLiteral("Update check"),
+                    QStringLiteral("Select Direct URL, an APT or RPM repository, or GitHub releases to check automatically."));
+                return;
+            }
+            startUpdateCheckRequest(projectId, releaseId, projectName);
+        });
+}
+
+void MainWindow::startUpdateCheckRequest(const QString &projectId, const QString &releaseId,
+                                         const QString &projectName) {
+    if (updateCheckRunning_) return;
     updateCheckButton_->setEnabled(false);
     if (historyCheckUpdatesButton_ != nullptr) historyCheckUpdatesButton_->setEnabled(false);
     projectList_->setEnabled(false);
-    updateCheckReleaseId_ = tracker->id;
-    updateCheckFromWorkbench_ = rightStack_ != nullptr && rightStack_->currentIndex() == 1;
-    if (strategy == UpdateStrategy::DirectUrl) {
-        updateCheckStatus_->setText(QStringLiteral("Starting Direct URL check…"));
-        const auto release = *tracker;
-        onServiceThread(*directUrlUpdateService_, [this, release] {
-            directUrlUpdateService_->start(release, true);
-        });
-    } else if (strategy == UpdateStrategy::AptRepository) {
-        updateCheckStatus_->setText(QStringLiteral("Starting APT repository check…"));
-        const auto release = *tracker;
-        const auto path = library_.releasePath(*tracker);
-        onServiceThread(*aptUpdateService_, [this, release, path] {
-            aptUpdateService_->start(release, path);
-        });
-    } else if (strategy == UpdateStrategy::RpmRepository) {
-        updateCheckStatus_->setText(QStringLiteral("Starting RPM repository check…"));
-        const auto release = *tracker;
-        const auto path = library_.releasePath(*tracker);
-        onServiceThread(*rpmUpdateService_, [this, release, path] {
-            rpmUpdateService_->start(release, path);
-        });
-    } else {
-        QString token = sessionCredential(QStringLiteral("github.token"));
-        updateCheckStatus_->setText(QStringLiteral("Starting GitHub release check…"));
-        const auto release = *tracker;
-        onServiceThread(*githubUpdateService_, [this, release, token]() mutable {
-            githubUpdateService_->start(release, token);
-            token.fill(QChar::Null);
-        });
-        token.fill(QChar::Null);
-    }
-    const auto projectName = project_->displayName.isEmpty() ? project_->archPackageName
-                                                             : project_->displayName;
-    publishUpdateCheckActivity(true, project_->id, projectName);
-    updateDeleteButton();
-}
-
-void MainWindow::applyUpdateCheckResult(const UpdateCheckResult &result,
-                                        const QString &sourceName) {
-    if (!ensureCurrentProjectWritable()) return;
-    projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
-    updateDeleteButton();
-    publishUpdateCheckActivity(false, project_ ? project_->id : QString{});
-    if (!project_) return;
-    const auto checkedReleaseId = updateCheckReleaseId_;
-    const bool remainInWorkbench = updateCheckFromWorkbench_;
-    auto *tracker = project_->release(checkedReleaseId);
-    updateCheckReleaseId_.clear();
-    updateCheckFromWorkbench_ = false;
-    if (tracker == nullptr) {
-        statusBar()->showMessage(QStringLiteral("The release used for the update check is no longer available"), 8000);
-        populateUpdates();
-        return;
-    }
-    auto &update = tracker->update;
-    update.lastChecked = QDateTime::currentDateTimeUtc();
-    update.lastCheckMessage = result.message;
-    update.signatureVerified = result.signatureVerified;
-    if (update.strategy == UpdateStrategy::DirectUrl && result.success) {
-        update.directUrlEtag = result.directUrlEtag;
-        update.directUrlLastModified = result.directUrlLastModified;
-        update.directUrlContentLength = result.directUrlContentLength;
-        update.directUrlVendorValidatorName = result.directUrlVendorValidatorName;
-        update.directUrlVendorValidator = result.directUrlVendorValidator;
-        if (!result.directUrlLastSha256.isEmpty()) {
-            update.directUrlLastSha256 = result.directUrlLastSha256;
-        }
-        if (result.directUrlLastFullCheck.isValid()) {
-            update.directUrlLastFullCheck = result.directUrlLastFullCheck;
-        }
-    }
-    if (!result.etag.isEmpty()) update.githubEtag = result.etag;
-    if (result.success && !result.detectedVersion.isEmpty()) {
-        update.detectedVersion = result.detectedVersion;
-        update.detectedFilename = result.filename;
-        update.detectedSha256 = result.sha256;
-        update.detectedUrl = result.downloadUrl;
-        update.githubReleaseId = result.releaseId;
-        update.githubAssetId = result.assetId;
-        update.githubTag = result.tag;
-        update.githubPublisherDigest = result.publisherDigest;
-    }
-    tracker->history.append(
-        {update.lastChecked, QStringLiteral("update-check"), result.message});
-    QString discoveryError;
-    QString discoveredReleaseId;
-    ReleaseState discoveredState = ReleaseState::Discovered;
-    if (result.success && result.updateAvailable) {
-        const auto trackerSnapshot = *tracker;
-        if (const auto *discovered = library_.recordDiscoveredRelease(
-                *project_, trackerSnapshot, result.detectedVersion, result.filename,
-                result.sha256, result.downloadUrl, &discoveryError, result.releaseId,
-                result.assetId, result.tag, result.publisherDigest, result.prerelease);
-            discovered != nullptr) {
-            discoveredReleaseId = discovered->id;
-            discoveredState = discovered->state;
-            if (!result.localArtifactPath.isEmpty()) {
-                QString retainError;
-                static_cast<void>(retainDirectUrlArtifact(
-                    result, project_->id, discoveredReleaseId, &retainError));
-                if (!retainError.isEmpty()) discoveryError = retainError;
-            }
-        }
-    } else {
-        persistCurrent();
-    }
-    if (!discoveryError.isEmpty()) {
-        statusBar()->showMessage(discoveryError, 8000);
-    }
-    const auto projectId = project_->id;
-    refreshProjectList(projectId);
-    if (!project_ || project_->id != projectId) loadProject(projectId);
-    applyRetentionCleanup();
-    syncTrayUpdateCensus();
-    if (remainInWorkbench && project_.has_value() &&
-        project_->release(checkedReleaseId) != nullptr) {
-        showReleaseWorkbench(checkedReleaseId);
-        selectSection(EditorSection::ConfigUpdates);
-        populateUpdates();
-    } else {
-        populateUpdates();
-        populateOverview();
-        populateHistory();
-    }
-
-    if (result.success && result.updateAvailable && !discoveredReleaseId.isEmpty()) {
-        if (!remainInWorkbench) selectDashboardRelease(discoveredReleaseId);
-        statusBar()->showMessage(
-            QStringLiteral("%1 %2 is available").arg(project_->displayName, result.detectedVersion),
-            12000);
-        if (discoveredState != ReleaseState::Discovered) return;
-        if (appSettings_.updates.automaticallyPrepare) {
-            beginReleasePreparation(discoveredReleaseId, false);
+    updateCheckRunning_ = true;
+    setUpdateCheckStatus(QStringLiteral("Requesting daemon update check…"));
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<UpdateCheckJobTask>(this);
+    connect(watcher, &QFutureWatcher<UpdateCheckJobTask>::finished, this,
+            [this, watcher, projectId] {
+        const auto task = watcher->result();
+        watcher->deleteLater();
+        updateCheckRunning_ = false;
+        publishUpdateCheckActivity(false, projectId);
+        projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
+        syncUpdateCheckButtons();
+        updateDeleteButton();
+        if (!task.job || task.job->status != QStringLiteral("succeeded")) {
+            const auto message = !task.error.isEmpty() ? task.error
+                : task.job && !task.job->error.isEmpty() ? task.job->error
+                                                        : QStringLiteral("The daemon update check failed");
+            if (project_ && project_->id == projectId) setUpdateCheckStatus(message, true);
+            statusBar()->showMessage(message, 10000);
             return;
         }
-
-        QMessageBox available(QMessageBox::Warning, QStringLiteral("Update available"),
-            QStringLiteral("%1 %2 is available. Download and inspect the vendor artifact now?\n\n"
-                           "You can choose Later; PacSmith will keep the update alert in the package list and the release in Versions.")
-                .arg(project_->displayName, result.detectedVersion),
-            QMessageBox::NoButton, this);
-        auto *download = available.addButton(QStringLiteral("Download & Inspect"),
-                                             QMessageBox::AcceptRole);
-        available.addButton(QStringLiteral("Later"), QMessageBox::RejectRole);
-        available.exec();
-        if (available.clickedButton() == download) {
-            beginReleasePreparation(discoveredReleaseId, false);
-        }
-        return;
-    }
-
-    statusBar()->showMessage(
-        result.fullContentCheckDeferred
-            ? QStringLiteral("%1 check deferred: the server has no cheap validator")
-                  .arg(sourceName)
-        : result.success
-            ? QStringLiteral("%1 update check completed; package is current").arg(sourceName)
-            : QStringLiteral("%1 update check failed").arg(sourceName),
-        result.fullContentCheckDeferred ? 12000 : 8000);
+        const auto checks = task.job->result.value(QStringLiteral("checks")).toArray();
+        const auto checked = checks.isEmpty() ? QJsonObject{} : checks.first().toObject();
+        const auto message = checked.value(QStringLiteral("message")).toString(
+            QStringLiteral("Update check completed"));
+        if (project_ && project_->id == projectId) setUpdateCheckStatus(message);
+        statusBar()->showMessage(message, 10000);
+        refreshProjectList(projectId);
+        syncTrayUpdateCensus();
+    });
+    watcher->setFuture(QtConcurrent::run([config, releaseId] {
+        UpdateCheckJobTask task;
+        LibraryClient client(config);
+        const auto started = client.startUpdateCheck(releaseId, true, &task.error);
+        if (!started) return task;
+        task.job = client.waitForJob(started->id, &task.error);
+        task.log = client.jobLog(started->id, nullptr);
+        return task;
+    }));
+    publishUpdateCheckActivity(true, projectId, projectName);
+    updateDeleteButton();
 }
 
 void MainWindow::showCommandProgress(const QString &title, const QString &status,
@@ -928,7 +824,7 @@ void MainWindow::prepareSelectedRelease() {
 
 void MainWindow::beginReleasePreparation(const QString &releaseId,
                                          const bool askForConfirmation) {
-    if (!project_ || debDownloadService_->isRunning() || importThread_ != nullptr) return;
+    if (!project_ || !preparingReleaseId_.isEmpty() || importThread_ != nullptr) return;
     const auto *release = project_->release(releaseId);
     if (release == nullptr || release->state != ReleaseState::Discovered) return;
     const auto integrity = release->sourceSha256.isEmpty()
@@ -942,25 +838,14 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
 
     preparingProjectId_ = project_->id;
     preparingReleaseId_ = release->id;
-    const auto *sourceRelease = project_->activeTrackingRelease();
-    preparationSourceReleaseId_ = sourceRelease == nullptr ? QString{} : sourceRelease->id;
-    automaticPreparationBuild_ = !askForConfirmation &&
-                                 appSettings_.updates.automaticallyPrepare;
     preparationPhase_ = QStringLiteral("Downloading");
     preparationBytesReceived_ = 0;
     preparationBytesTotal_ = -1;
     preparationSpinnerFrame_ = 0;
     lastPreparationPublish_.invalidate();
-    const auto target = defaultDownloadPath(project_->id, release->id, release->originalSourceFilename);
-    pendingImportOptions_ = {};
-    pendingImportOptions_.version = release->debian.version;
-    pendingImportOptions_.acquisition = release->acquisition;
-    pendingImportOptions_.githubAssetRegex = release->update.githubAssetRegex;
-    pendingImportOptions_.githubIncludePrereleases = release->update.githubIncludePrereleases;
-    pendingImportOptions_.existingProjectId = project_->id;
-
     downloadProgress_ = new QProgressDialog(
-        QStringLiteral("Downloading vendor artifact…\nYou may hide this window; the download will continue."),
+        QStringLiteral("The PacSmith daemon is downloading and inspecting the vendor artifact…\n"
+                       "You may hide this window; preparation will continue on the server."),
         QStringLiteral("Hide"), 0, 0, this);
     downloadProgress_->setWindowTitle(
         QStringLiteral("Downloading %1 %2").arg(project_->displayName, release->debian.version));
@@ -975,12 +860,34 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
     publishPreparationActivity();
     updatePreparationIndicators();
     updateUpdateCheckIndicators();
-    const auto url = QUrl(release->sourceUrl);
-    const auto sha = release->sourceSha256;
-    const auto path = std::filesystem::path(target.toUtf8().constData());
-    onServiceThread(*debDownloadService_, [this, url, sha, path] {
-        debDownloadService_->start(url, sha, path);
+    const auto projectId = project_->id;
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<UpdatePreparationJobTask>(this);
+    connect(watcher, &QFutureWatcher<UpdatePreparationJobTask>::finished, this,
+            [this, watcher, projectId] {
+        const auto task = watcher->result();
+        watcher->deleteLater();
+        const bool succeeded = task.job && task.job->status == QStringLiteral("succeeded");
+        const auto error = !task.error.isEmpty() ? task.error
+            : task.job && !task.job->error.isEmpty() ? task.job->error : QString{};
+        resetPreparationState();
+        refreshProjectList(projectId);
+        if (succeeded) {
+            statusBar()->showMessage(QStringLiteral("Release prepared by pacsmithd"), 8000);
+        } else {
+            QMessageBox::critical(this, QStringLiteral("Could not prepare release"),
+                                  error.isEmpty() ? QStringLiteral("The daemon rejected release preparation")
+                                                  : error);
+        }
     });
+    watcher->setFuture(QtConcurrent::run([config, releaseId] {
+        UpdatePreparationJobTask task;
+        LibraryClient client(config);
+        const auto started = client.startUpdatePreparation(releaseId, &task.error);
+        if (!started) return task;
+        task.job = client.waitForJob(started->id, &task.error);
+        return task;
+    }));
 }
 
 void MainWindow::deleteSelectedRelease() {

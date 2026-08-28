@@ -2,15 +2,12 @@
 
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
-#include "core/apt_repository.hpp"
-#include "core/apt_update_service.hpp"
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
-#include "core/credential_store.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
-#include "core/github_update_service.hpp"
 #include "core/lifecycle_validator.hpp"
+#include "core/library_client.hpp"
 #include "core/path_safety.hpp"
 #include "core/payload_inspector.hpp"
 #include "core/payload_review.hpp"
@@ -20,7 +17,6 @@
 #include "core/repository_trust.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/rpm_analyzer.hpp"
-#include "core/rpm_repository.hpp"
 #include "core/script_evidence.hpp"
 #include "core/source_analyzer.hpp"
 #include "core/terminal_install_service.hpp"
@@ -292,6 +288,22 @@ void CoreTests::serializesProjectsAndOverrides() {
     QCOMPARE(restoredProject.autoBuildPolicy, pacsmith::AutoBuildPolicy::Ai);
     QCOMPARE(restoredProject.compileCachePolicy,
              pacsmith::CompileCachePolicy::ClearAfterSuccess);
+    QVERIFY(!restoredProject.summaryOnly);
+
+    auto summaryJson = packageProject.toJson();
+    summaryJson.insert(QStringLiteral("summaryOnly"), true);
+    auto summaryProject = pacsmith::Project::fromJson(summaryJson);
+    QVERIFY(summaryProject.summaryOnly);
+    QString saveError;
+    pacsmith::LibraryClient disconnected;
+    QVERIFY(!disconnected.save(summaryProject, &saveError));
+    QVERIFY(saveError.contains(QStringLiteral("project summary")));
+    saveError.clear();
+    QVERIFY(!disconnected.deleteProject(summaryProject, &saveError));
+    QVERIFY(saveError.contains(QStringLiteral("project summary")));
+    saveError.clear();
+    QVERIFY(!disconnected.deleteRelease(summaryProject, QStringLiteral("release-id"), &saveError));
+    QVERIFY(saveError.contains(QStringLiteral("project summary")));
 }
 
 void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
@@ -299,7 +311,6 @@ void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
     QVERIFY(temporary.isValid());
     pacsmith::AppSettingsStore store(temporary.path() + QStringLiteral("/pacsmith-config"));
     pacsmith::AppSettings settings;
-    settings.credentialSources.insert(QStringLiteral("github"), pacsmith::CredentialSource::Age);
     settings.githubTokenConfigured = true;
     settings.harnessProfiles = {
         {QStringLiteral("Terminal harness"), QStringLiteral("/usr/bin/harness"),
@@ -313,11 +324,7 @@ void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
     QCOMPARE(restored.defaultHarness()->name, QStringLiteral("Terminal harness"));
     QCOMPARE(restored.defaultHarness()->arguments,
              QStringList({QStringLiteral("--prompt"), QStringLiteral("{prompt}")}));
-    QCOMPARE(restored.credentialSources.value(QStringLiteral("github")),
-             pacsmith::CredentialSource::Age);
     QVERIFY(restored.githubTokenConfigured);
-    QVERIFY(pacsmith::githubTokenUsesAge(restored));
-    QVERIFY(store.ageSecretsPath().startsWith(temporary.path()));
 
     QTemporaryDir legacyDir;
     QVERIFY(legacyDir.isValid());
@@ -328,8 +335,7 @@ void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
     legacy.close();
     pacsmith::AppSettingsStore legacyStore(legacyDir.path());
     const auto migrated = legacyStore.load();
-    QVERIFY(migrated.githubTokenConfigured);
-    QVERIFY(pacsmith::githubTokenUsesAge(migrated));
+    QVERIFY(!migrated.githubTokenConfigured);
     QVERIFY(migrated.harnessProfiles.isEmpty());
 }
 
@@ -538,55 +544,6 @@ void CoreTests::recountsAvailableUpdatesFromInstalledState() {
     else QVERIFY(qputenv("XDG_STATE_HOME", previous));
 }
 
-void CoreTests::buildsSystemdCalendarSchedules() {
-    pacsmith::BackgroundUpdateSettings settings;
-    settings.daily = true;
-    settings.localTime = QTime(2, 0);
-    QCOMPARE(pacsmith::BackgroundUpdateManager::calendar(settings),
-             QStringLiteral("*-*-* 02:00:00"));
-    settings.daily = false;
-    settings.weekDay = 7;
-    settings.localTime = QTime(23, 45);
-    QCOMPARE(pacsmith::BackgroundUpdateManager::calendar(settings),
-             QStringLiteral("Sun *-*-* 23:45:00"));
-}
-
-void CoreTests::reportsOverdueBackgroundUpdateChecks() {
-    pacsmith::BackgroundUpdateSettings settings;
-    settings.enabled = true;
-    settings.daily = true;
-    settings.localTime = QTime(2, 0);
-    const auto now = QDateTime(QDate(2026, 8, 18), QTime(16, 0), QTimeZone::systemTimeZone());
-
-    QVERIFY(pacsmith::BackgroundUpdateManager::isOverdue(settings, {}, now));
-
-    const auto lastDue = pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, now);
-    QCOMPARE(lastDue.date(), QDate(2026, 8, 18));
-    QCOMPARE(lastDue.time(), QTime(2, 0));
-    QVERIFY(!pacsmith::BackgroundUpdateManager::isOverdue(settings, lastDue, now));
-    QVERIFY(!pacsmith::BackgroundUpdateManager::isOverdue(settings, lastDue.addSecs(60), now));
-    QVERIFY(pacsmith::BackgroundUpdateManager::isOverdue(settings, lastDue.addSecs(-60), now));
-
-    const auto beforeSchedule = QDateTime(QDate(2026, 8, 18), QTime(1, 0), QTimeZone::systemTimeZone());
-    QCOMPARE(pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, beforeSchedule).date(),
-             QDate(2026, 8, 17));
-
-    settings.enabled = false;
-    QVERIFY(!pacsmith::BackgroundUpdateManager::isOverdue(settings, {}, now));
-
-    settings.enabled = true;
-    settings.daily = false;
-    settings.weekDay = 1;
-    const auto weekly = pacsmith::BackgroundUpdateManager::lastScheduledOccurrence(settings, now);
-    QCOMPARE(weekly.date(), QDate(2026, 8, 17));
-    QCOMPARE(weekly.time(), QTime(2, 0));
-    QCOMPARE(pacsmith::BackgroundUpdateManager::nextScheduledOccurrence(settings, now).date(),
-             QDate(2026, 8, 24));
-    settings.daily = true;
-    QCOMPARE(pacsmith::BackgroundUpdateManager::nextScheduledOccurrence(settings, now).date(),
-             QDate(2026, 8, 19));
-}
-
 void CoreTests::persistsMultipleReleases() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
@@ -653,6 +610,35 @@ void CoreTests::selectsActiveTrackingRelease() {
     project.installedVersion.clear();
     project.releases[1].state = pacsmith::ReleaseState::Preparing;
     QCOMPARE(project.activeTrackingRelease()->id, QStringLiteral("1.0"));
+}
+
+void CoreTests::ignoresStaleClonedUpdateFailure() {
+    pacsmith::Project project;
+    pacsmith::PackageRelease installed;
+    installed.id = QStringLiteral("installed");
+    installed.debian.version = QStringLiteral("1.0");
+    installed.state = pacsmith::ReleaseState::Built;
+    installed.update.lastChecked = QDateTime::fromString(
+        QStringLiteral("2026-08-28T22:00:00Z"), Qt::ISODate);
+    installed.update.lastCheckFailed = false;
+    project.releases.append(installed);
+    project.installedReleaseId = installed.id;
+    project.installedVersion = QStringLiteral("1.0-1");
+
+    pacsmith::PackageRelease updated;
+    updated.id = QStringLiteral("updated");
+    updated.debian.version = QStringLiteral("2.0");
+    updated.state = pacsmith::ReleaseState::Built;
+    updated.update.lastChecked = QDateTime::fromString(
+        QStringLiteral("2026-08-28T21:00:00Z"), Qt::ISODate);
+    updated.update.lastCheckFailed = true;
+    updated.update.lastCheckMessage = QStringLiteral("stale cloned failure");
+    project.releases.append(updated);
+
+    QCOMPARE(project.updateHealthRelease()->id, installed.id);
+    project.releases.last().update.lastChecked = QDateTime::fromString(
+        QStringLiteral("2026-08-28T23:00:00Z"), Qt::ISODate);
+    QCOMPARE(project.updateHealthRelease()->id, updated.id);
 }
 
 void CoreTests::reportsInstalledUpdateStatus() {
@@ -1201,6 +1187,9 @@ void CoreTests::preservesRepositoryFirstImportConfiguration() {
     update.detectedFilename = QStringLiteral("vendor-tool.rpm");
     update.detectedSha256 = QString(64, QLatin1Char('a'));
     update.detectedUrl = options.acquisition.originalUrl;
+    update.lastCheckFailed = true;
+    update.lastAutomaticStatus = QStringLiteral("paused");
+    update.lastAutomaticMessage = QStringLiteral("vendor lifecycle scripts changed");
     update.signatureVerified = true;
     options.initialUpdate = update;
 
@@ -1217,6 +1206,10 @@ void CoreTests::preservesRepositoryFirstImportConfiguration() {
     QCOMPARE(release->update.url, update.url);
     QCOMPARE(release->update.rpmPackageName, update.rpmPackageName);
     QCOMPARE(release->update.detectedSha256, update.detectedSha256);
+    QVERIFY(release->update.lastCheckFailed);
+    QCOMPARE(release->update.lastAutomaticStatus, QStringLiteral("paused"));
+    QCOMPARE(release->update.lastAutomaticMessage,
+             QStringLiteral("vendor lifecycle scripts changed"));
     QVERIFY(release->update.signatureVerified);
 
     const auto restored = store.load(imported->project.id, &error);

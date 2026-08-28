@@ -171,9 +171,15 @@ bool isIconCandidate(const QString &path, const qint64 size) {
         suffix != QStringLiteral("xpm")) {
         return false;
     }
-    return (path.startsWith(QStringLiteral("usr/share/icons/")) &&
-            path.contains(QStringLiteral("/apps/"))) ||
-           path.startsWith(QStringLiteral("usr/share/pixmaps/"));
+    if ((path.startsWith(QStringLiteral("usr/share/icons/")) &&
+         path.contains(QStringLiteral("/apps/"))) ||
+        path.startsWith(QStringLiteral("usr/share/pixmaps/"))) {
+        return true;
+    }
+    const auto name = QFileInfo(path).completeBaseName();
+    return path.startsWith(QStringLiteral("opt/")) &&
+           (name.contains(QStringLiteral("icon"), Qt::CaseInsensitive) ||
+            name.contains(QStringLiteral("logo"), Qt::CaseInsensitive));
 }
 
 quint32 bigEndian32(const QByteArray &data, const qsizetype offset) {
@@ -241,12 +247,19 @@ int iconScore(const IconCandidate &candidate, const QSet<QString> &references,
     const auto suffix = info.suffix().toLower();
     score += suffix == QStringLiteral("png") ? 3000
            : suffix == QStringLiteral("svg") ? 2000 : 1000;
-    static const QRegularExpression dimensions(QStringLiteral(R"(/(\d+)x(\d+)/apps/)"));
-    const auto match = dimensions.match(candidate.path);
-    if (match.hasMatch()) {
-        const auto width = match.captured(1).toInt();
-        const auto height = match.captured(2).toInt();
-        score += std::min(std::min(width, height), 512);
+    if (suffix == QStringLiteral("png") && candidate.contents.size() >= 24) {
+        score += std::min(
+            static_cast<int>(std::min(bigEndian32(candidate.contents, 16),
+                                      bigEndian32(candidate.contents, 20))),
+            512);
+    } else {
+        static const QRegularExpression dimensions(QStringLiteral(R"(/(\d+)x(\d+)/apps/)"));
+        const auto match = dimensions.match(candidate.path);
+        if (match.hasMatch()) {
+            const auto width = match.captured(1).toInt();
+            const auto height = match.captured(2).toInt();
+            score += std::min(std::min(width, height), 512);
+        }
     }
     if (!packageName.isEmpty() && stem.contains(packageName, Qt::CaseInsensitive)) score += 500;
     return score;

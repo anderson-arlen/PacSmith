@@ -1,5 +1,4 @@
 #include "gui/main_window/common.hpp"
-
 #include "core/release_review.hpp"
 
 namespace pacsmith::gui {
@@ -8,6 +7,21 @@ namespace {
 struct AutomaticBuildRepositoryReadiness {
     bool ready{false};
     QString message;
+};
+
+struct GitHubResolveTask {
+    UpdateCheckResult result;
+    QString error;
+};
+
+struct GitHubImportTask {
+    std::optional<GitHubImportResult> result;
+    QString error;
+};
+
+struct ArtifactImportTask {
+    std::optional<ImportResult> result;
+    QString error;
 };
 
 } // namespace
@@ -27,7 +41,7 @@ void MainWindow::chooseImport() {
 }
 
 void MainWindow::submitManualRelease() {
-    if (!project_ || importThread_ != nullptr || debDownloadService_->isRunning()) return;
+    if (!project_ || importThread_ != nullptr || serverImportRunning_) return;
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Submit New Release"));
@@ -224,8 +238,7 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                                        const QUrl &signingKeyUrl,
                                        const QByteArray &signingKeyContents,
                                        const QString &signingKeySource) {
-    if (repositoryImportRunning_ || debDownloadService_->isRunning() ||
-        importThread_ != nullptr) {
+    if (repositoryImportRunning_ || serverImportRunning_ || importThread_ != nullptr) {
         statusBar()->showMessage(QStringLiteral("Another package acquisition is already in progress"),
                                  5000);
         return;
@@ -307,26 +320,7 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
             return;
         }
 
-        auto temporary = std::make_shared<QTemporaryDir>();
-        if (!temporary->isValid()) {
-            repositoryImportRunning_ = false;
-            QMessageBox::critical(this, QStringLiteral("Could not query repository"),
-                                  QStringLiteral("Could not create a temporary verification directory."));
-            return;
-        }
-        QString keyError;
-        const auto key = RepositoryTrust::importUserKey(
-            std::filesystem::path(temporary->path().toUtf8().constData()), contents,
-            requestedUrl.toString(), &keyError);
-        if (!key || key->fingerprints.isEmpty()) {
-            repositoryImportRunning_ = false;
-            QMessageBox::critical(this, QStringLiteral("Could not prepare signing key"),
-                                  keyError);
-            return;
-        }
-        configuration.signingKeys = {*key};
-        configuration.aptSigningKeyring = key->relativePath;
-        configuration.trustedSigningFingerprint = key->fingerprints.first();
+        configuration.trustedSigningFingerprint = inspection->fingerprints.first();
         if (rpm) {
             configuration.rpmCandidates.append(
                 {configuration.url, configuration.rpmArchitecture,
@@ -340,128 +334,46 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                  QStringLiteral("user-configured repository")});
         }
 
-        PackageRelease probe;
-        probe.debian.package = packageName;
-        probe.debian.version = QStringLiteral("0");
-        probe.debian.architecture = rpm ? configuration.rpmArchitecture
-                                        : configuration.aptArchitecture;
-        probe.update = configuration;
         auto *queryProgress = new QProgressDialog(
-            QStringLiteral("Downloading and verifying signed repository metadata…"),
-            QStringLiteral("Cancel"), 0, 0, this);
+            QStringLiteral("The PacSmith daemon is verifying the repository and inspecting its package…"),
+            QString{}, 0, 0, this);
         queryProgress->setWindowTitle(rpm ? QStringLiteral("Querying RPM Repository")
                                           : QStringLiteral("Querying APT Repository"));
         queryProgress->setWindowModality(Qt::WindowModal);
         queryProgress->setMinimumDuration(0);
         queryProgress->setAutoClose(false);
+        queryProgress->setCancelButton(nullptr);
         queryProgress->setMinimumWidth(520);
         queryProgress->show();
-
-        const auto finishQuery =
-            [this, queryProgress, temporary, configuration, contents, requestedUrl,
-             packageName, rpm](const UpdateCheckResult &result, QObject *service) {
-            queryProgress->disconnect();
+        auto *watcher = new QFutureWatcher<ArtifactImportTask>(this);
+        connect(watcher, &QFutureWatcher<ArtifactImportTask>::finished, this,
+                [this, watcher, queryProgress, rpm] {
+            const auto task = watcher->result();
+            watcher->deleteLater();
             queryProgress->close();
             queryProgress->deleteLater();
-            service->deleteLater();
-            if (!result.success || !result.signatureVerified ||
-                result.downloadUrl.isEmpty() || result.sha256.isEmpty()) {
-                repositoryImportRunning_ = false;
-                QMessageBox::critical(
-                    this, QStringLiteral("Repository package could not be acquired"),
-                    result.message.isEmpty()
-                        ? QStringLiteral("The repository did not yield a signature-verified package artifact.")
-                        : result.message);
+            repositoryImportRunning_ = false;
+            if (!task.result) {
+                QMessageBox::critical(this,
+                    QStringLiteral("Repository package could not be acquired"), task.error);
                 return;
             }
-            auto importedConfiguration = configuration;
-            importedConfiguration.detectedVersion = result.detectedVersion;
-            importedConfiguration.detectedFilename = result.filename;
-            importedConfiguration.detectedSha256 = result.sha256;
-            importedConfiguration.detectedUrl = result.downloadUrl;
-            importedConfiguration.lastChecked = QDateTime::currentDateTimeUtc();
-            importedConfiguration.lastCheckMessage = result.message;
-            importedConfiguration.signatureVerified = true;
-
-            pendingImportOptions_ = {};
-            pendingImportOptions_.version = result.detectedVersion;
-            pendingImportOptions_.initialUpdate = importedConfiguration;
-            pendingImportOptions_.trustedSigningKey = contents;
-            pendingImportOptions_.trustedSigningKeySource = requestedUrl.toString();
-            auto &acquisition = pendingImportOptions_.acquisition;
-            acquisition.kind = rpm ? AcquisitionKind::RpmRepository
-                                   : AcquisitionKind::AptRepository;
-            acquisition.canonicalIdentity = rpm
-                ? QStringLiteral("rpm:%1:%2:%3")
-                      .arg(importedConfiguration.url.toLower(),
-                           importedConfiguration.rpmArchitecture.toLower(),
-                           importedConfiguration.rpmPackageName.toLower())
-                : QStringLiteral("apt:%1:%2:%3:%4:%5")
-                      .arg(importedConfiguration.url.toLower(),
-                           importedConfiguration.aptSuite.toLower(),
-                           importedConfiguration.aptComponent.toLower(),
-                           importedConfiguration.aptArchitecture.toLower(),
-                           importedConfiguration.aptPackageName.toLower());
-            acquisition.originalUrl = result.downloadUrl;
-            acquisition.publisherDigest = result.sha256;
-            acquisition.publisherVerified = true;
-
-            const auto filename = QFileInfo(QUrl(result.downloadUrl).path()).fileName().isEmpty()
-                ? QFileInfo(result.filename).fileName()
-                : QFileInfo(QUrl(result.downloadUrl).path()).fileName();
-            const auto target = defaultDownloadPath(
-                PkgbuildGenerator::sanitizePackageName(packageName),
-                PkgbuildGenerator::sanitizePackageName(result.detectedVersion), filename);
-            downloadProgress_ = new QProgressDialog(
-                QStringLiteral("Downloading signature-verified %1…\nYou may hide this window; the download will continue.")
-                    .arg(filename),
-                QStringLiteral("Hide"), 0, 0, this);
-            downloadProgress_->setWindowTitle(
-                rpm ? QStringLiteral("Downloading RPM Repository Package")
-                    : QStringLiteral("Downloading APT Repository Package"));
-            downloadProgress_->setWindowModality(Qt::NonModal);
-            downloadProgress_->setMinimumDuration(0);
-            downloadProgress_->setAutoClose(false);
-            downloadProgress_->setAutoReset(false);
-            downloadProgress_->setMinimumWidth(500);
-            downloadProgress_->show();
-            downloadProgress_->raise();
-            downloadProgress_->activateWindow();
-            repositoryImportRunning_ = false;
-            startListDownloadActivity(PkgbuildGenerator::sanitizePackageName(packageName));
-            const auto url = QUrl(result.downloadUrl);
-            const auto sha = result.sha256;
-            const auto path = std::filesystem::path(target.toUtf8().constData());
-            onServiceThread(*debDownloadService_, [this, url, sha, path] {
-                debDownloadService_->start(url, sha, path);
-            });
-        };
-
-        if (rpm) {
-            auto *service = networkServiceOnThread<RpmUpdateService>(networkIoThread_);
-            connect(queryProgress, &QProgressDialog::canceled, service,
-                    &RpmUpdateService::cancel);
-            connect(service, &RpmUpdateService::progressChanged, queryProgress,
-                    &QProgressDialog::setLabelText);
-            connect(service, &RpmUpdateService::finished, this,
-                    [finishQuery, service](const UpdateCheckResult &result) mutable {
-                finishQuery(result, service);
-            });
-            const auto path = std::filesystem::path(temporary->path().toUtf8().constData());
-            onServiceThread(*service, [service, probe, path] { service->start(probe, path); });
-        } else {
-            auto *service = networkServiceOnThread<AptUpdateService>(networkIoThread_);
-            connect(queryProgress, &QProgressDialog::canceled, service,
-                    &AptUpdateService::cancel);
-            connect(service, &AptUpdateService::progressChanged, queryProgress,
-                    &QProgressDialog::setLabelText);
-            connect(service, &AptUpdateService::finished, this,
-                    [finishQuery, service](const UpdateCheckResult &result) mutable {
-                finishQuery(result, service);
-            });
-            const auto path = std::filesystem::path(temporary->path().toUtf8().constData());
-            onServiceThread(*service, [service, probe, path] { service->start(probe, path); });
-        }
+            finishServerArtifactImport(
+                *task.result, false,
+                rpm ? QStringLiteral("RPM repository package verified and inspected by pacsmithd")
+                    : QStringLiteral("APT repository package verified and inspected by pacsmithd"));
+        });
+        const auto config = library_.config();
+        const auto fingerprint = configuration.trustedSigningFingerprint;
+        const auto source = requestedUrl.toString();
+        watcher->setFuture(QtConcurrent::run(
+            [config, configuration, contents, source, fingerprint] {
+                ArtifactImportTask task;
+                LibraryClient client(config);
+                task.result = client.importRepository(configuration, contents, source,
+                                                      fingerprint, &task.error);
+                return task;
+            }));
     });
     keyProgress->show();
     if (signingKeyContents.isEmpty()) {
@@ -482,7 +394,7 @@ void MainWindow::importPackage(const QString &path) {
         return;
     }
     if (remote.isValid() && remote.scheme() == QStringLiteral("https")) {
-        if (debDownloadService_->isRunning()) return;
+        if (serverImportRunning_) return;
         const auto filename = QFileInfo(remote.path()).fileName().isEmpty()
             ? QStringLiteral("vendor-artifact") : QFileInfo(remote.path()).fileName();
         const auto expectedSha256 = pendingImportOptions_.expectedSha256;
@@ -496,22 +408,43 @@ void MainWindow::importPackage(const QString &path) {
             pendingImportOptions_ = {};
             return;
         }
-        if (pendingImportOptions_.existingProjectId.isEmpty()) {
-            pendingImportOptions_ = {};
-        }
-        pendingImportOptions_.acquisition.kind = AcquisitionKind::DirectUrl;
-        pendingImportOptions_.acquisition.canonicalIdentity =
-            remote.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment).toString();
-        pendingImportOptions_.acquisition.originalUrl = remote.toString();
-        const auto projectId = pendingImportOptions_.existingProjectId.isEmpty()
-            ? PkgbuildGenerator::sanitizePackageName(QFileInfo(filename).completeBaseName())
-            : pendingImportOptions_.existingProjectId;
-        const auto target = defaultDownloadPath(projectId, QStringLiteral("direct"),
-                                                filename);
-        const auto targetPath = std::filesystem::path(target.toUtf8().constData());
-        onServiceThread(*debDownloadService_, [this, remote, expectedSha256, targetPath] {
-            debDownloadService_->start(remote, expectedSha256, targetPath);
+        const auto existingProjectId = pendingImportOptions_.existingProjectId;
+        const auto version = pendingImportOptions_.version;
+        pendingImportOptions_ = {};
+        serverImportRunning_ = true;
+        auto *progress = new QProgressDialog(
+            QStringLiteral("The PacSmith daemon is downloading and inspecting the vendor artifact…"),
+            QString{}, 0, 0, this);
+        progress->setWindowTitle(QStringLiteral("Importing Direct Download"));
+        progress->setWindowModality(Qt::WindowModal);
+        progress->setCancelButton(nullptr);
+        progress->setMinimumDuration(0);
+        progress->show();
+        auto *watcher = new QFutureWatcher<ArtifactImportTask>(this);
+        connect(watcher, &QFutureWatcher<ArtifactImportTask>::finished, this,
+                [this, watcher, progress, submittedManualRelease = !existingProjectId.isEmpty()] {
+            const auto task = watcher->result();
+            watcher->deleteLater();
+            progress->close();
+            progress->deleteLater();
+            serverImportRunning_ = false;
+            if (!task.result) {
+                QMessageBox::critical(this, QStringLiteral("Direct download import failed"),
+                                      task.error);
+                return;
+            }
+            finishServerArtifactImport(*task.result, submittedManualRelease,
+                                       QStringLiteral("Vendor artifact downloaded and inspected by pacsmithd"));
         });
+        const auto config = library_.config();
+        watcher->setFuture(QtConcurrent::run(
+            [config, remote, existingProjectId, version, expectedSha256] {
+                ArtifactImportTask task;
+                LibraryClient client(config);
+                task.result = client.importRemoteUrl(remote, existingProjectId, version,
+                                                     expectedSha256, &task.error);
+                return task;
+            }));
         return;
     }
     if (importThread_ != nullptr) {
@@ -556,10 +489,6 @@ void MainWindow::importPackage(const QString &path) {
             !pendingImportOptions_.existingProjectId.isEmpty();
         const auto preparationSourceReleaseId = preparationSourceReleaseId_;
         const bool automaticPreparationBuild = automaticPreparationBuild_;
-        if (!pendingDownloadedImport_.isEmpty()) {
-            static_cast<void>(QFile::remove(pendingDownloadedImport_));
-            pendingDownloadedImport_.clear();
-        }
         pendingImportOptions_ = {};
         if (importProgress_ != nullptr) {
             importProgress_->close();
@@ -706,6 +635,28 @@ void MainWindow::importPackage(const QString &path) {
     thread->start();
 }
 
+void MainWindow::finishServerArtifactImport(const ImportResult &result,
+                                            const bool applyRetention,
+                                            const QString &successMessage) {
+    const auto projectId = result.project.id;
+    const auto releaseId = result.releaseId;
+    refreshProjectList(projectId, [this, projectId, releaseId, applyRetention,
+                                   successMessage](const bool succeeded) {
+        if (!succeeded || !project_ || project_->id != projectId ||
+            project_->release(releaseId) == nullptr) {
+            statusBar()->showMessage(
+                QStringLiteral("Package imported, but its refreshed state could not be loaded"),
+                10000);
+            return;
+        }
+        currentReleaseId_ = releaseId;
+        refreshCurrentProject();
+        if (applyRetention) applyRetentionCleanup();
+        showReleaseWorkbenchAtFirstAttention(releaseId);
+        statusBar()->showMessage(successMessage, 10000);
+    });
+}
+
 void MainWindow::beginGitHubImport(const QUrl &url) {
     const auto parts = url.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
     if (parts.size() < 2) {
@@ -731,129 +682,91 @@ void MainWindow::beginGitHubImport(const QUrl &url) {
                parts.at(3) == QStringLiteral("tag")) {
         requestedTag = parts.mid(4).join(QLatin1Char('/'));
     }
-    PackageRelease probe;
-    probe.debian.version = QStringLiteral("0");
-    probe.update.strategy = UpdateStrategy::GitHubRelease;
-    probe.update.githubOwner = owner;
-    probe.update.githubRepository = repository;
-    probe.update.githubAssetRegex = initialRegex;
-    probe.update.githubIncludePrereleases = false;
-    auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
     auto *progress = new QProgressDialog(QStringLiteral("Loading GitHub release artifacts…"),
-                                         QStringLiteral("Cancel"), 0, 0, this);
+                                         QString{}, 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Import from GitHub"));
     progress->setWindowModality(Qt::WindowModal);
+    progress->setCancelButton(nullptr);
     progress->show();
-    connect(progress, &QProgressDialog::canceled, service, &GitHubUpdateService::cancel);
-    connect(service, &GitHubUpdateService::progressChanged, progress, &QProgressDialog::setLabelText);
-    connect(service, &GitHubUpdateService::finished, this,
-            [this, service, progress, probe, owner, repository, initialRegex,
-             requestedTag](const UpdateCheckResult &result) mutable {
+    auto *watcher = new QFutureWatcher<GitHubResolveTask>(this);
+    connect(watcher, &QFutureWatcher<GitHubResolveTask>::finished, this,
+            [this, watcher, progress, owner, repository, initialRegex,
+             requestedTag]() mutable {
+        const auto task = watcher->result();
+        watcher->deleteLater();
         progress->close();
         progress->deleteLater();
-        service->deleteLater();
-        if (!result.success && result.availableAssets.isEmpty()) {
-            QMessageBox::critical(this, QStringLiteral("GitHub import failed"), result.message);
+        if (!task.error.isEmpty() && task.result.availableAssets.isEmpty()) {
+            QMessageBox::critical(this, QStringLiteral("GitHub import failed"), task.error);
             return;
         }
-        if (initialRegex != QStringLiteral(".*") && result.success) {
-            downloadGitHubAsset(probe, result);
+        if (initialRegex != QStringLiteral(".*") && task.result.success) {
+            continueGitHubImport(owner, repository, initialRegex, false, requestedTag);
             return;
         }
-        const auto rule = chooseGitHubAssetRule(this, result.availableAssets, false);
+        const auto rule = chooseGitHubAssetRule(this, task.result.availableAssets, false);
         if (!rule) return;
         continueGitHubImport(owner, repository, rule->expression,
                              rule->includePrereleases, requestedTag);
     });
-    QString token = sessionCredential(QStringLiteral("github.token"));
-    onServiceThread(*service, [service, probe, token, requestedTag]() mutable {
-        service->start(probe, token, requestedTag);
-        token.fill(QChar::Null);
-    });
-    token.fill(QChar::Null);
+    const auto config = library_.config();
+    watcher->setFuture(QtConcurrent::run([config, url, initialRegex]() {
+        GitHubResolveTask task;
+        LibraryClient client(config);
+        task.result = client.resolveGitHub(url, initialRegex, false, nullptr, &task.error);
+        return task;
+    }));
 }
 
 void MainWindow::continueGitHubImport(const QString &owner, const QString &repository,
                                       const QString &assetRegex, const bool includePrereleases,
                                       const QString &requestedTag) {
-    PackageRelease probe;
-    probe.debian.version = QStringLiteral("0");
-    probe.update.strategy = UpdateStrategy::GitHubRelease;
-    probe.update.githubOwner = owner;
-    probe.update.githubRepository = repository;
-    probe.update.githubAssetRegex = assetRegex;
-    probe.update.githubIncludePrereleases = includePrereleases;
-    auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
-    auto *progress = new QProgressDialog(QStringLiteral("Resolving selected GitHub asset…"),
-                                         QStringLiteral("Cancel"), 0, 0, this);
+    QUrl url(QStringLiteral("https://github.com/%1/%2").arg(owner, repository));
+    if (!requestedTag.isEmpty()) {
+        url.setPath(QStringLiteral("/%1/%2/releases/tag/%3")
+                        .arg(owner, repository, requestedTag));
+    }
+    auto *progress = new QProgressDialog(QStringLiteral("Downloading and inspecting GitHub release…"),
+                                         QString{}, 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Import from GitHub"));
     progress->setWindowModality(Qt::WindowModal);
+    progress->setCancelButton(nullptr);
     progress->show();
-    connect(progress, &QProgressDialog::canceled, service, &GitHubUpdateService::cancel);
-    connect(service, &GitHubUpdateService::finished, this,
-            [this, service, progress, probe](const UpdateCheckResult &result) {
+    auto *watcher = new QFutureWatcher<GitHubImportTask>(this);
+    connect(watcher, &QFutureWatcher<GitHubImportTask>::finished, this,
+            [this, watcher, progress]( ) {
+        const auto task = watcher->result();
+        watcher->deleteLater();
         progress->close();
         progress->deleteLater();
-        service->deleteLater();
-        if (!result.success || result.downloadUrl.isEmpty()) {
-            QMessageBox::critical(this, QStringLiteral("GitHub import failed"), result.message);
+        if (!task.result) {
+            QMessageBox::critical(this, QStringLiteral("GitHub import failed"), task.error);
             return;
         }
-        downloadGitHubAsset(probe, result);
+        const auto projectId = task.result->imported.project.id;
+        const auto releaseId = task.result->imported.releaseId;
+        refreshProjectList(projectId, [this, projectId, releaseId](const bool succeeded) {
+            if (!succeeded || !project_ || project_->id != projectId) {
+                statusBar()->showMessage(
+                    QStringLiteral("Package imported, but its refreshed state could not be loaded"),
+                    10000);
+                return;
+            }
+            currentReleaseId_ = releaseId;
+            refreshCurrentProject();
+            showReleaseWorkbenchAtFirstAttention(releaseId);
+            statusBar()->showMessage(
+                QStringLiteral("GitHub release downloaded and inspected by pacsmithd"), 10000);
+        });
     });
-    QString token = sessionCredential(QStringLiteral("github.token"));
-    onServiceThread(*service, [service, probe, token, requestedTag]() mutable {
-        service->start(probe, token, requestedTag);
-        token.fill(QChar::Null);
-    });
-    token.fill(QChar::Null);
-}
-
-void MainWindow::downloadGitHubAsset(const PackageRelease &probe,
-                                     const UpdateCheckResult &result) {
-    if (debDownloadService_->isRunning()) return;
-    pendingImportOptions_ = {};
-    pendingImportOptions_.version = result.detectedVersion;
-    pendingImportOptions_.githubAssetRegex = probe.update.githubAssetRegex;
-    pendingImportOptions_.githubIncludePrereleases = probe.update.githubIncludePrereleases;
-    auto &acquisition = pendingImportOptions_.acquisition;
-    acquisition.kind = AcquisitionKind::GitHubRelease;
-    acquisition.canonicalIdentity = QStringLiteral("github:%1/%2")
-        .arg(probe.update.githubOwner, probe.update.githubRepository);
-    acquisition.originalUrl = result.downloadUrl;
-    acquisition.githubOwner = probe.update.githubOwner;
-    acquisition.githubRepository = probe.update.githubRepository;
-    acquisition.githubReleaseId = result.releaseId;
-    acquisition.githubPrerelease = result.prerelease;
-    acquisition.githubTag = result.tag;
-    acquisition.githubAssetId = result.assetId;
-    acquisition.githubAssetName = result.filename;
-    acquisition.publisherDigest = result.publisherDigest;
-    const auto projectId = PkgbuildGenerator::sanitizePackageName(probe.update.githubRepository);
-    const auto releaseId = QStringLiteral("%1-%2").arg(result.detectedVersion).arg(result.assetId);
-    const auto target = defaultDownloadPath(projectId, releaseId, result.filename);
-
-    downloadProgress_ = new QProgressDialog(
-        QStringLiteral("Downloading %1…\nYou may hide this window; the download will continue.")
-            .arg(result.filename),
-        QStringLiteral("Hide"), 0, 0, this);
-    downloadProgress_->setWindowTitle(QStringLiteral("Downloading GitHub Release"));
-    downloadProgress_->setWindowModality(Qt::NonModal);
-    downloadProgress_->setMinimumDuration(0);
-    downloadProgress_->setAutoClose(false);
-    downloadProgress_->setAutoReset(false);
-    downloadProgress_->setMinimumWidth(460);
-    downloadProgress_->show();
-    downloadProgress_->raise();
-    downloadProgress_->activateWindow();
-    startListDownloadActivity(projectId);
-
-    const auto url = QUrl(result.downloadUrl);
-    const auto sha = result.sha256;
-    const auto path = std::filesystem::path(target.toUtf8().constData());
-    onServiceThread(*debDownloadService_, [this, url, sha, path] {
-        debDownloadService_->start(url, sha, path);
-    });
+    const auto config = library_.config();
+    watcher->setFuture(QtConcurrent::run(
+        [config, url, assetRegex, includePrereleases]() {
+        GitHubImportTask task;
+        LibraryClient client(config);
+        task.result = client.importGitHub(url, assetRegex, includePrereleases, {}, &task.error);
+        return task;
+    }));
 }
 
 

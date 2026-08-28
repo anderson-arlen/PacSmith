@@ -3,7 +3,6 @@
 #include "gui/gui_instance.hpp"
 #include "gui/wheel_scroll_guard.hpp"
 #include "core/app_settings.hpp"
-#include "core/credential_store.hpp"
 
 #include <QApplication>
 #include <QCommandLineOption>
@@ -118,8 +117,7 @@ int main(int argc, char *argv[]) {
                              QStringLiteral("No system tray is available, so PacSmith will open in a window."));
     }
 
-    pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
-    pacsmith::gui::ApplicationSession session(settingsStore, credentials);
+    pacsmith::gui::ApplicationSession session(settingsStore);
     static_cast<void>(session.listen());
     session.start(hideWindow, importPath);
     return application.exec();

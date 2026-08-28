@@ -371,6 +371,26 @@ func TestWriteReleaseIconCopiesArtifact(t *testing.T) {
 	}
 }
 
+func TestReleaseSummaryIncludesUpdateHealthWithoutFullConfiguration(t *testing.T) {
+	release := Release{Document: map[string]any{}}
+	attachReleaseUpdateHealthSummary(&release, `{"update":{"strategy":"RPM repository",`+
+		`"url":"https://packages.example.invalid","signingKeys":[{"contents":"large"}],`+
+		`"lastChecked":"2026-08-28T21:06:45.510Z","lastCheckMessage":"missing key",`+
+		`"lastCheckFailed":true,"lastAutomaticStatus":"paused",`+
+		`"lastAutomaticMessage":"review required"}}`)
+	update, ok := release.Document["update"].(map[string]any)
+	if !ok || update["lastCheckFailed"] != true || update["lastCheckMessage"] != "missing key" ||
+		update["lastAutomaticStatus"] != "paused" {
+		t.Fatalf("update health summary = %+v", release.Document["update"])
+	}
+	if _, included := update["signingKeys"]; included {
+		t.Fatalf("summary included signing key material: %+v", update)
+	}
+	if _, included := update["url"]; included {
+		t.Fatalf("summary included full update configuration: %+v", update)
+	}
+}
+
 func TestPatchReleaseConfigurationPreservesLargeInspectionEvidence(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

@@ -20,6 +20,11 @@ QString buildSpinnerLabel(const int frame) {
     return QStringLiteral("%1 Cancel Build").arg(frames.at(frame % frames.size()));
 }
 
+struct ProjectSaveTaskResult {
+    std::optional<Project> project;
+    QString error;
+};
+
 } // namespace
 
 void MainWindow::populatePackageMetadata() {
@@ -217,7 +222,8 @@ void MainWindow::populateUpdates() {
         githubPrereleases_->setChecked(false);
         updateCandidates_->clear();
         updateNotice_->setText(QStringLiteral("Update configuration is release-owned; there is no project-level source record."));
-        updateCheckStatus_->setText(QStringLiteral("No update checks are available."));
+        setUpdateCheckStatus(QStringLiteral("No update checks are available."));
+        updateMonitoringAttention();
         syncUpdateCheckButtons();
         populating_ = false;
         return;
@@ -365,14 +371,17 @@ void MainWindow::populateUpdates() {
     const auto githubPolicy = tracker->update.githubIncludePrereleases
         ? QStringLiteral(" Preview tracking is enabled, so newer prereleases may be selected even when a stable release exists.")
         : QStringLiteral(" Stable releases are preferred. If none match, PacSmith follows prereleases until a matching stable release is published, then remains on stable.");
-    const auto directValidators = DirectUrlUpdateService::storedValidators(tracker->update);
+    const bool directValidatorsAvailable = !tracker->update.directUrlEtag.isEmpty() ||
+        !tracker->update.directUrlLastModified.isEmpty() ||
+        (!tracker->update.directUrlVendorValidatorName.isEmpty() &&
+         !tracker->update.directUrlVendorValidator.isEmpty());
     const auto directInterval = tracker->update.directUrlFullCheckIntervalHours <= 0
         ? QStringLiteral("manual only")
         : directUrlFullCheckInterval_->currentText().toLower();
     updateNotice_->setText(updateStrategy_->currentIndex() == 0
                                ? QStringLiteral("Manual updates: PacSmith will not query the network.")
                            : updateStrategy_->currentIndex() == 1
-                               ? directValidators.available()
+                               ? directValidatorsAvailable
                                    ? QStringLiteral("✓ Direct URL checks use the stored remote validator before downloading. SHA256 remains authoritative when the validator changes.")
                                    : tracker->update.lastChecked.isValid()
                                        ? QStringLiteral("⚠ This server exposes no usable cheap change validator. PacSmith must download and hash the complete artifact; automatic full-content checks are %1.")
@@ -384,21 +393,119 @@ void MainWindow::populateUpdates() {
                            : tracker->update.trustedSigningFingerprint.isEmpty()
                                    ? QStringLiteral("⚠ Repository checking is blocked until a trusted signing key is selected.")
                                    : QStringLiteral("✓ Repository metadata must verify against the pinned signing-key fingerprint before update results are trusted."));
-    if (tracker->update.lastChecked.isValid()) {
-        const auto signature = tracker->update.strategy == UpdateStrategy::DirectUrl
-            ? directValidators.available()
-                ? QStringLiteral("Remote validator available; downloaded bytes are verified by SHA256.")
-                : QStringLiteral("No remote validator available; checks require full-content SHA256 comparison.")
-            : tracker->update.signatureVerified
-                ? QStringLiteral("Repository signature verified.")
-                : QStringLiteral("Repository signature not verified.");
-        updateCheckStatus_->setText(QStringLiteral("Last checked %1\n%2\n%3")
-                                        .arg(tracker->update.lastChecked.toLocalTime().toString(Qt::ISODate),
-                                             tracker->update.lastCheckMessage, signature));
-    } else {
-        updateCheckStatus_->setText(QStringLiteral("Not checked yet."));
+    const bool trackerAutomaticPaused = tracker->state != ReleaseState::Built &&
+        tracker->update.lastAutomaticStatus == QStringLiteral("paused");
+    const PackageRelease *healthRelease = project_->updateHealthRelease();
+    const bool healthCheckFailed = healthRelease != nullptr &&
+                                   healthRelease->update.lastCheckFailed;
+    const bool healthAutomaticPaused = healthRelease != nullptr &&
+        healthRelease->state != ReleaseState::Built &&
+        healthRelease->update.lastAutomaticStatus == QStringLiteral("paused");
+    QStringList statusLines;
+    if (healthRelease != tracker && (healthCheckFailed || healthAutomaticPaused)) {
+        const auto version = healthRelease->debian.version;
+        if (healthCheckFailed) {
+            statusLines.append(QStringLiteral("⚠ Last update check failed for release %1")
+                                   .arg(version));
+            statusLines.append(healthRelease->update.lastCheckMessage);
+        }
+        if (healthAutomaticPaused) {
+            statusLines.append(QStringLiteral("⚠ Automatic handling paused for release %1")
+                                   .arg(version));
+            if (!healthRelease->update.lastAutomaticMessage.isEmpty()) {
+                statusLines.append(healthRelease->update.lastAutomaticMessage);
+            }
+        }
+        statusLines.append(QString{});
+        statusLines.append(QStringLiteral("Monitoring source release %1:")
+                               .arg(tracker->debian.version));
     }
+    if (tracker->update.lastChecked.isValid()) {
+        if (tracker->update.lastCheckFailed) {
+            statusLines.append(QStringLiteral("⚠ Last update check failed at %1")
+                                   .arg(tracker->update.lastChecked.toLocalTime().toString(Qt::ISODate)));
+            statusLines.append(tracker->update.lastCheckMessage);
+        } else {
+            const auto signature = tracker->update.strategy == UpdateStrategy::DirectUrl
+                ? directValidatorsAvailable
+                    ? QStringLiteral("Remote validator available; downloaded bytes are verified by SHA256.")
+                    : QStringLiteral("No remote validator available; checks require full-content SHA256 comparison.")
+                : tracker->update.signatureVerified
+                    ? QStringLiteral("Repository signature verified.")
+                    : QStringLiteral("Repository signature not verified.");
+            statusLines.append(QStringLiteral("Last checked %1")
+                                   .arg(tracker->update.lastChecked.toLocalTime().toString(Qt::ISODate)));
+            statusLines.append(tracker->update.lastCheckMessage);
+            statusLines.append(signature);
+        }
+        if (!tracker->update.lastAutomaticStatus.isEmpty()) {
+            const auto automaticLabel = trackerAutomaticPaused
+                ? QStringLiteral("⚠ Automatic handling paused")
+                : QStringLiteral("Automatic handling: %1")
+                      .arg(tracker->update.lastAutomaticStatus);
+            statusLines.append(automaticLabel +
+                (tracker->update.lastAutomaticMessage.isEmpty()
+                     ? QString{}
+                     : QStringLiteral(" — %1").arg(tracker->update.lastAutomaticMessage)));
+        }
+    } else {
+        statusLines.append(QStringLiteral("Not checked yet."));
+    }
+    if (healthCheckFailed || tracker->update.lastCheckFailed) {
+        statusLines.append(QStringLiteral(
+            "This is the retained result of the last check. A successful recheck clears this warning."));
+    }
+    setUpdateCheckStatus(statusLines.join(QLatin1Char('\n')),
+                         healthCheckFailed || tracker->update.lastCheckFailed,
+                         healthAutomaticPaused || trackerAutomaticPaused);
+    updateMonitoringAttention();
     populating_ = false;
+}
+
+void MainWindow::setUpdateCheckStatus(const QString &message, const bool failed,
+                                      const bool warning) {
+    if (updateCheckStatus_ == nullptr) return;
+    updateCheckStatus_->setText(message);
+    if (!failed && !warning) {
+        updateCheckStatus_->setStyleSheet({});
+        return;
+    }
+    const QColor accent = failed ? QColor(QStringLiteral("#ef5350"))
+                                 : QColor(QStringLiteral("#f2b84b"));
+    QColor background = accent;
+    background.setAlpha(36);
+    updateCheckStatus_->setStyleSheet(
+        QStringLiteral("QLabel { background-color: rgba(%1, %2, %3, %4); "
+                       "border: 1px solid %5; border-radius: 6px; padding: 10px; }")
+            .arg(background.red()).arg(background.green()).arg(background.blue())
+            .arg(background.alpha()).arg(accent.name()));
+}
+
+void MainWindow::updateMonitoringAttention() {
+    if (projectTabs_ == nullptr) return;
+    int tabIndex = -1;
+    for (int index = 0; index < projectTabs_->count(); ++index) {
+        auto *page = projectTabs_->widget(index);
+        if (page != nullptr && page->isAncestorOf(dashboardUpdatesHost_)) {
+            tabIndex = index;
+            break;
+        }
+    }
+    if (tabIndex < 0) return;
+    const PackageRelease *release = project_ ? project_->updateHealthRelease() : nullptr;
+    const bool failed = release != nullptr && release->update.lastCheckFailed;
+    const bool warning = release != nullptr && release->state != ReleaseState::Built &&
+                         release->update.lastAutomaticStatus == QStringLiteral("paused");
+    projectTabs_->setTabIcon(tabIndex,
+        failed ? style()->standardIcon(QStyle::SP_MessageBoxCritical)
+               : warning ? style()->standardIcon(QStyle::SP_MessageBoxWarning) : QIcon{});
+    if (failed || warning) {
+        projectTabs_->tabBar()->setTabTextColor(
+            tabIndex, failed ? QColor(QStringLiteral("#ef5350"))
+                             : QColor(QStringLiteral("#f2b84b")));
+    } else {
+        projectTabs_->tabBar()->setTabTextColor(tabIndex, QColor{});
+    }
 }
 
 void MainWindow::populateBuild() {
@@ -625,9 +732,17 @@ void MainWindow::scriptFindingDispositionChanged(const int row, const int) {
     populateBuild();
 }
 
-bool MainWindow::saveUpdateConfiguration() {
+void MainWindow::saveUpdateConfiguration() {
+    saveUpdateConfigurationThen({});
+}
+
+void MainWindow::saveUpdateConfigurationThen(std::function<void(bool)> completed) {
     auto *tracker = updateEditorRelease();
-    if (!project_ || populating_ || tracker == nullptr) return false;
+    if (!project_ || populating_ || tracker == nullptr || updateConfigurationSaveInFlight_ ||
+        !ensureCurrentProjectWritable()) {
+        if (completed) completed(false);
+        return;
+    }
     const auto strategy = updateStrategy_->currentIndex() == 0 ? UpdateStrategy::Manual
                         : updateStrategy_->currentIndex() == 1 ? UpdateStrategy::DirectUrl
                         : updateStrategy_->currentIndex() == 2 ? UpdateStrategy::AptRepository
@@ -668,7 +783,8 @@ bool MainWindow::saveUpdateConfiguration() {
     const auto validationError = DomainValidation::updateConfiguration(tracker->update);
     if (!validationError.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Invalid update source"), validationError);
-        return false;
+        if (completed) completed(false);
+        return;
     }
     tracker->update.aptSigningKeyring = aptSigningKeyring_->text().trimmed();
     if (aptSigningKey_->currentIndex() >= 0 &&
@@ -688,14 +804,76 @@ bool MainWindow::saveUpdateConfiguration() {
             FieldProvenance{ValueOrigin::User, {}, {}, tracker->sourceSha256,
                             QStringLiteral("Edited in the release's Updates tab"), now, true});
     }
-    if (persistCurrent()) {
-        populateUpdates();
-        populateOverview();
+    const auto projectId = project_->id;
+    const auto releaseId = tracker->id;
+    const auto releaseVersion = tracker->debian.version;
+    auto projectSnapshot = *project_;
+    const auto config = library_.config();
+    updateConfigurationSaveInFlight_ = true;
+    updateConfigurationSaveProjectId_ = projectId;
+    updateConfigurationSaveReleaseId_ = releaseId;
+    if (updatesEditor_ != nullptr) updatesEditor_->setEnabled(false);
+    if (updateSaveButton_ != nullptr) updateSaveButton_->setEnabled(false);
+    syncUpdateCheckButtons();
+    setUpdateCheckStatus(QStringLiteral("Saving update configuration…"));
+    updateUpdateCheckIndicators();
+    syncActivityTimer();
+
+    auto *watcher = new QFutureWatcher<ProjectSaveTaskResult>(this);
+    connect(watcher, &QFutureWatcher<ProjectSaveTaskResult>::finished, this,
+            [this, watcher, projectId, releaseVersion,
+             completed = std::move(completed)]() mutable {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        updateConfigurationSaveInFlight_ = false;
+        updateConfigurationSaveProjectId_.clear();
+        updateConfigurationSaveReleaseId_.clear();
+        if (updatesEditor_ != nullptr) updatesEditor_->setEnabled(true);
+        updateUpdateCheckIndicators();
+        syncActivityTimer();
+        if (eventRefreshAgain_ || !pendingEventTopics_.isEmpty() ||
+            !pendingEventProjectIds_.isEmpty() || pendingFullEventRefresh_) {
+            eventRefreshAgain_ = false;
+            eventRefreshTimer_->start();
+        }
+        if (!result.project) {
+            syncUpdateCheckButtons();
+            if (project_ && project_->id == projectId) {
+                setUpdateCheckStatus(result.error.isEmpty()
+                                         ? QStringLiteral("Could not save update configuration")
+                                         : result.error,
+                                     true);
+            }
+            QMessageBox::critical(this, QStringLiteral("Could not save update configuration"),
+                                  result.error);
+            if (completed) completed(false);
+            return;
+        }
+        projectCache_.insert(projectId, *result.project);
+        if (project_ && project_->id == projectId) {
+            project_->revision = result.project->revision;
+            for (auto &localRelease : project_->releases) {
+                if (const auto *savedRelease = result.project->release(localRelease.id)) {
+                    localRelease.revision = savedRelease->revision;
+                }
+            }
+            projectCache_.insert(projectId, *project_);
+            populateUpdates();
+            populateOverview();
+        }
         statusBar()->showMessage(
-            QStringLiteral("Update configuration for release %1 saved").arg(tracker->debian.version), 5000);
-        return true;
-    }
-    return false;
+            QStringLiteral("Update configuration for release %1 saved").arg(releaseVersion), 5000);
+        if (completed) completed(true);
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [config, projectSnapshot = std::move(projectSnapshot)]() mutable {
+            ProjectSaveTaskResult result;
+            LibraryClient client(config);
+            if (client.save(projectSnapshot, &result.error)) {
+                result.project = std::move(projectSnapshot);
+            }
+            return result;
+        }));
 }
 
 void MainWindow::downloadSigningKey() {
@@ -760,10 +938,6 @@ void MainWindow::importSigningKey() {
     tracker->fieldProvenance.insert(QStringLiteral("update.aptSigningKeyring"), key->provenance);
     tracker->fieldProvenance.insert(QStringLiteral("update.trustedSigningFingerprint"), key->provenance);
     if (persistCurrent()) populateUpdates();
-}
-
-bool MainWindow::unlockAgeCredentials() {
-    return promptUnlockAge(credentialStore_, settingsStore_.ageSecretsPath(), this);
 }
 
 

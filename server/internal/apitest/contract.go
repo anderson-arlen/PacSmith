@@ -21,6 +21,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
 	"github.com/anderson-arlen/pacsmith/server/internal/daemon"
+	githubapi "github.com/anderson-arlen/pacsmith/server/internal/github"
 	"github.com/anderson-arlen/pacsmith/server/internal/httpapi"
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/legacy"
@@ -583,7 +584,8 @@ func NewHandler(t *testing.T) (http.Handler, paths.Dirs) {
 	lib := &library.Service{DB: db, Artifacts: registry, WorkDir: filepath.Join(dirs.Work, "releases")}
 	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(dirs.Work, "repo"), filepath.Join(dirs.Data, "gnupg"))
 	lib.Repo = repoSvc
-	manager, err := jobs.New(db, filepath.Join(dirs.Work, "jobs"), daemon.JobHandler(lib))
+	githubSvc := &githubapi.Service{Secrets: opened.Store, Artifacts: registry}
+	manager, err := jobs.New(db, filepath.Join(dirs.Work, "jobs"), daemon.JobHandler(lib, githubSvc))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,6 +602,7 @@ func NewHandler(t *testing.T) (http.Handler, paths.Dirs) {
 		PKI:       runtime,
 		Principal: auth.LocalUnix(),
 		Repo:      repoSvc,
+		GitHub:    githubSvc,
 	}), dirs
 }
 

@@ -82,6 +82,9 @@ func (s *Server) publishJob(job jobs.Job) {
 	event := events.Event{
 		Topics: topics, ProjectID: job.ProjectID, ReleaseID: job.ReleaseID,
 		JobID: job.ID, JobKind: job.Kind, JobStatus: job.Status,
+		JobMessage: job.Message, JobCurrent: job.Current, JobTotal: job.Total,
+		JobFailedItems: job.FailedItems,
+		JobPausedItems: job.PausedItems,
 	}
 	if job.ProjectID != "" {
 		if project, err := s.DB.Queries.GetProject(context.Background(), job.ProjectID); err == nil {

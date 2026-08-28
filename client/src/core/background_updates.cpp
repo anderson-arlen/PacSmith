@@ -219,48 +219,6 @@ bool BackgroundUpdateStateStore::syncAvailableUpdates(const QList<Project> &proj
     return save(state, error);
 }
 
-QString BackgroundUpdateManager::calendar(const BackgroundUpdateSettings &settings) {
-    const auto time = settings.localTime.isValid() ? settings.localTime : QTime(2, 0);
-    if (settings.daily) return QStringLiteral("*-*-* %1:00").arg(time.toString(QStringLiteral("HH:mm")));
-    static const QStringList days{QStringLiteral("Mon"), QStringLiteral("Tue"),
-                                  QStringLiteral("Wed"), QStringLiteral("Thu"),
-                                  QStringLiteral("Fri"), QStringLiteral("Sat"),
-                                  QStringLiteral("Sun")};
-    const auto index = std::clamp(settings.weekDay, 1, 7) - 1;
-    return QStringLiteral("%1 *-*-* %2:00").arg(days.at(index), time.toString(QStringLiteral("HH:mm")));
-}
-
-QDateTime BackgroundUpdateManager::lastScheduledOccurrence(const BackgroundUpdateSettings &settings,
-                                                           const QDateTime &now) {
-    const auto time = settings.localTime.isValid() ? settings.localTime : QTime(2, 0);
-    const auto timeZone = now.timeZone().isValid() ? now.timeZone() : QTimeZone::systemTimeZone();
-    const auto localNow = now.toTimeZone(timeZone);
-    if (settings.daily) {
-        QDateTime candidate(localNow.date(), time, timeZone);
-        if (candidate > localNow) candidate = candidate.addDays(-1);
-        return candidate;
-    }
-    const int targetDay = std::clamp(settings.weekDay, 1, 7);
-    int delta = localNow.date().dayOfWeek() - targetDay;
-    if (delta < 0) delta += 7;
-    QDateTime candidate(localNow.date().addDays(-delta), time, timeZone);
-    if (candidate > localNow) candidate = candidate.addDays(-7);
-    return candidate;
-}
-
-QDateTime BackgroundUpdateManager::nextScheduledOccurrence(const BackgroundUpdateSettings &settings,
-                                                           const QDateTime &now) {
-    const auto last = lastScheduledOccurrence(settings, now);
-    return settings.daily ? last.addDays(1) : last.addDays(7);
-}
-
-bool BackgroundUpdateManager::isOverdue(const BackgroundUpdateSettings &settings,
-                                        const QDateTime &lastRun, const QDateTime &now) {
-    if (!settings.enabled) return false;
-    if (!lastRun.isValid()) return true;
-    return lastRun.toUTC() < lastScheduledOccurrence(settings, now).toUTC();
-}
-
 QString BackgroundUpdateManager::autostartPath() {
     const auto config = qEnvironmentVariable("XDG_CONFIG_HOME");
     const auto base = !config.isEmpty() && QDir::isAbsolutePath(config)

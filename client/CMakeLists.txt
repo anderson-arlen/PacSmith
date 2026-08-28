@@ -9,7 +9,6 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core Network Widgets Concurrent Test)
 find_package(LibArchive REQUIRED)
 find_package(CURL REQUIRED)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LibSecret IMPORTED_TARGET libsecret-1)
 pkg_check_modules(LibAlpm REQUIRED IMPORTED_TARGET libalpm)
 
 function(pacsmith_target_defaults target)
@@ -43,11 +42,8 @@ add_library(pacsmith_core STATIC
     src/core/library_client.cpp
     src/core/package_artifact.cpp
     src/core/control_parser.cpp
-    src/core/credential_store.cpp
     src/core/apt_sources.cpp
-    src/core/apt_repository.cpp
-    src/core/apt_update_service.cpp
-    src/core/apt_update_service.hpp
+    src/core/package_version.cpp
     src/core/dependency_parser.cpp
     src/core/lifecycle_validator.cpp
     src/core/managed_package.cpp
@@ -55,19 +51,12 @@ add_library(pacsmith_core STATIC
     src/core/repository_trust.cpp
     src/core/repository_key_download_service.cpp
     src/core/rpm_analyzer.cpp
-    src/core/rpm_repository.cpp
-    src/core/rpm_update_service.cpp
-    src/core/rpm_update_service.hpp
     src/core/script_evidence.cpp
     src/core/source_analyzer.cpp
     src/core/system_package_query.cpp
     src/core/payload_review.cpp
     src/core/payload_inspector.cpp
     src/core/deb_analyzer.cpp
-    src/core/deb_download_service.cpp
-    src/core/direct_url_update_service.cpp
-    src/core/direct_url_update_service.hpp
-    src/core/github_update_service.cpp
     src/core/remote_import_service.cpp
     src/core/remote_import_service.hpp
     src/core/project_store/project_store.cpp
@@ -77,15 +66,10 @@ add_library(pacsmith_core STATIC
     src/core/pkgbuild_install_plan.cpp
     src/core/process_services.cpp
     src/core/terminal_install_service.cpp
-    src/core/terminal_install_service.hpp
-    src/core/update_source.cpp
-    src/core/update_check_runner.cpp)
+    src/core/terminal_install_service.hpp)
 target_include_directories(pacsmith_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(pacsmith_core PUBLIC Qt6::Core Qt6::Network CURL::libcurl PRIVATE LibArchive::LibArchive PkgConfig::LibAlpm)
-if(LibSecret_FOUND)
-    target_link_libraries(pacsmith_core PRIVATE PkgConfig::LibSecret)
-    target_compile_definitions(pacsmith_core PRIVATE PACSMITH_HAS_LIBSECRET=1)
-endif()
+target_link_libraries(pacsmith_core PUBLIC Qt6::Core Qt6::Network CURL::libcurl
+    PRIVATE Qt6::Concurrent LibArchive::LibArchive PkgConfig::LibAlpm)
 qt_add_resources(pacsmith_core core_resources
     PREFIX "/pacsmith"
     BASE resources
@@ -96,8 +80,7 @@ add_executable(pacsmith
     src/cli/main.cpp
     src/cli/agent_integration.cpp
     src/cli/admin.cpp
-    src/mcp/server.cpp
-    src/mcp/permission_policy.cpp)
+    src/mcp/server.cpp)
 target_link_libraries(pacsmith PRIVATE pacsmith_core Qt6::Core)
 target_compile_definitions(pacsmith PRIVATE
     PACSMITH_BUILD_DIR="${CMAKE_BINARY_DIR}"
@@ -107,7 +90,6 @@ pacsmith_target_defaults(pacsmith)
 
 add_executable(pacsmith-gui
     src/gui/main.cpp
-    src/gui/age_unlock.cpp
     src/gui/appearance.cpp
     src/gui/application_session.cpp
     src/gui/command_progress_dialog.cpp
@@ -165,7 +147,6 @@ if(BUILD_TESTING)
         tests/core_tests/parser.cpp
         tests/core_tests/library_events.cpp
         tests/core_tests/direct_url_update.cpp
-        tests/core_tests/remote_import.cpp
         tests/core_tests/script_evidence.cpp
         tests/core_tests/repository.cpp
         tests/core_tests/project_persistence.cpp
@@ -173,8 +154,7 @@ if(BUILD_TESTING)
         tests/core_tests/pkgbuild.cpp
         tests/core_tests/analyzer.cpp
         tests/core_tests/process_credentials.cpp
-        src/mcp/server.cpp
-        src/mcp/permission_policy.cpp)
+        src/mcp/server.cpp)
     target_include_directories(pacsmith-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/core_tests)
     target_link_libraries(pacsmith-tests PRIVATE pacsmith_core Qt6::Test)
     target_compile_definitions(pacsmith-tests PRIVATE

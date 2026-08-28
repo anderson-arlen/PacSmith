@@ -537,10 +537,17 @@ int iconScore(const IconCandidate &candidate, const QSet<QString> &references,
     const auto suffix = info.suffix().toLower();
     score += suffix == QStringLiteral("png") ? 3000
            : suffix == QStringLiteral("svg") ? 2000 : 1000;
-    static const QRegularExpression dimensions(QStringLiteral(R"(/(\d+)x(\d+)/apps/)"));
-    const auto match = dimensions.match(candidate.path);
-    if (match.hasMatch()) {
-        score += std::min(std::min(match.captured(1).toInt(), match.captured(2).toInt()), 512);
+    if (suffix == QStringLiteral("png") && candidate.contents.size() >= 24) {
+        score += std::min(
+            static_cast<int>(std::min(bigEndian32(candidate.contents, 16),
+                                      bigEndian32(candidate.contents, 20))),
+            512);
+    } else {
+        static const QRegularExpression dimensions(QStringLiteral(R"(/(\d+)x(\d+)/apps/)"));
+        const auto match = dimensions.match(candidate.path);
+        if (match.hasMatch()) {
+            score += std::min(std::min(match.captured(1).toInt(), match.captured(2).toInt()), 512);
+        }
     }
     if (!packageName.isEmpty() && stem.contains(packageName, Qt::CaseInsensitive)) score += 500;
     return score;

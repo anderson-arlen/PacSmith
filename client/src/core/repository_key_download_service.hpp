@@ -7,9 +7,6 @@
 
 #include <optional>
 
-class QNetworkAccessManager;
-class QNetworkReply;
-
 namespace pacsmith {
 
 struct RepositoryKeyDownload {
@@ -39,13 +36,7 @@ signals:
     void failed(const QString &message);
 
 private:
-    void finishReply();
-    void fail(const QString &message);
-
-    QNetworkAccessManager *network_{nullptr};
-    QNetworkReply *reply_{nullptr};
-    QByteArray contents_;
-    QUrl requestedUrl_;
+    QObject *task_{nullptr};
 };
 
 } // namespace pacsmith

@@ -1371,10 +1371,19 @@ void MainWindow::showSettings() {
     QObject::connect(backgroundEnabled, &QCheckBox::toggled, &dialog, [&](bool) { refreshScheduleControls(); });
     QObject::connect(checkNow, &QPushButton::clicked, &dialog, [&] {
         if (GuiInstanceServer::requestCheck()) {
-            serviceStatus->setText(QStringLiteral("✓ Update check started."));
+            checkNow->setEnabled(false);
+            serviceStatus->setText(QStringLiteral("Requesting update check from the library daemon…"));
         } else {
             serviceStatus->setText(QStringLiteral("⚠ Could not reach the running PacSmith session to start a check."));
         }
+    });
+    QObject::connect(this, &MainWindow::updateCheckActivityChanged, &dialog,
+                     [checkNow, serviceStatus](const QString &message, const bool active,
+                                               const bool failed) {
+        checkNow->setEnabled(!active);
+        serviceStatus->setText(failed ? QStringLiteral("⚠ %1").arg(message)
+                                      : active ? QStringLiteral("↻ %1").arg(message)
+                                               : QStringLiteral("✓ %1").arg(message));
     });
     refreshScheduleControls();
 
@@ -1552,7 +1561,6 @@ void MainWindow::showSettings() {
                 QMessageBox::critical(&dialog, QStringLiteral("Could not store GitHub token"), error);
                 return;
             }
-            rememberSessionCredential(QStringLiteral("github.token"), githubToken->text());
             appSettings_.githubTokenConfigured = true;
         }
 

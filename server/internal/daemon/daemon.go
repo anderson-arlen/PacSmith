@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
 	"github.com/anderson-arlen/pacsmith/server/internal/events"
+	githubapi "github.com/anderson-arlen/pacsmith/server/internal/github"
 	"github.com/anderson-arlen/pacsmith/server/internal/httpapi"
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
@@ -24,6 +26,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
+	"github.com/anderson-arlen/pacsmith/server/internal/updatecheck"
 )
 
 type Config struct {
@@ -32,24 +35,25 @@ type Config struct {
 }
 
 type Daemon struct {
-	Dirs       paths.Dirs
-	server     *http.Server
-	handler    http.Handler
-	pki        *pki.Runtime
-	listen     *listen.State
-	tlsMu      sync.Mutex
-	tlsServes  []tlsServe
-	tlsAddr    string
-	repo       *repo.Service
-	repoMu     sync.Mutex
-	repoListen listen.Config
-	repoServes []repoServe
-	stopSoak   context.CancelFunc
-	db         *sqlite.DB
-	jobs       *jobs.Manager
-	events     *events.Hub
-	closeOnce  sync.Once
-	closeErr   error
+	Dirs        paths.Dirs
+	server      *http.Server
+	handler     http.Handler
+	pki         *pki.Runtime
+	listen      *listen.State
+	tlsMu       sync.Mutex
+	tlsServes   []tlsServe
+	tlsAddr     string
+	repo        *repo.Service
+	repoMu      sync.Mutex
+	repoListen  listen.Config
+	repoServes  []repoServe
+	stopSoak    context.CancelFunc
+	stopUpdates context.CancelFunc
+	db          *sqlite.DB
+	jobs        *jobs.Manager
+	events      *events.Hub
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 type tlsServe struct {
@@ -98,7 +102,9 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(cfg.Dirs.Work, "repo"), filepath.Join(cfg.Dirs.Data, "gnupg"))
 	eventHub := events.New()
 	lib.Repo = repoSvc
-	manager, err := jobs.New(db, filepath.Join(cfg.Dirs.Work, "jobs"), JobHandler(lib))
+	githubSvc := &githubapi.Service{Secrets: opened.Store, Artifacts: registry}
+	updateSvc := &updatecheck.Service{DB: db, Library: lib, Artifacts: registry, GitHub: githubSvc}
+	manager, err := jobs.New(db, filepath.Join(cfg.Dirs.Work, "jobs"), JobHandler(lib, githubSvc, updateSvc))
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -148,6 +154,8 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		ApplyRepo:   d.SetRepoListen,
 		RepoBound:   d.RepoBound,
 		Events:      eventHub,
+		GitHub:      githubSvc,
+		Updates:     updateSvc,
 	})
 	d.handler = handler
 	listener, err := listenUnix(cfg.Dirs.Socket)
@@ -180,11 +188,18 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		}
 	}
 	d.startRepoMaintenance()
+	d.startUpdateScheduler(ctx)
 	return d, nil
 }
 
-func JobHandler(lib *library.Service) jobs.Handler {
-	return func(ctx context.Context, job jobs.Job, payload json.RawMessage, log func(string)) (json.RawMessage, error) {
+func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
+	updaters ...*updatecheck.Service) jobs.Handler {
+	var updater *updatecheck.Service
+	if len(updaters) > 0 {
+		updater = updaters[0]
+	}
+	return func(ctx context.Context, job jobs.Job, payload json.RawMessage, log func(string),
+		progress func(jobs.Progress)) (json.RawMessage, error) {
 		switch job.Kind {
 		case jobs.KindImport:
 			var req library.ImportRequest
@@ -198,6 +213,90 @@ func JobHandler(lib *library.Service) jobs.Handler {
 			}
 			log(fmt.Sprintf("Imported project %s release %s\n", result.ProjectID, result.ReleaseID))
 			return json.Marshal(result)
+		case jobs.KindGitHubImport:
+			var req githubapi.ImportRequest
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			if githubSvc == nil {
+				return nil, fmt.Errorf("GitHub service is unavailable")
+			}
+			log("Resolving GitHub release artifact…\n")
+			source, err := githubSvc.Resolve(ctx, githubapi.ResolveRequest{
+				URL: req.URL, AssetRegex: req.AssetRegex,
+				IncludePrereleases: req.IncludePrereleases,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if source.DownloadURL == "" {
+				message := source.Message
+				if len(source.AvailableAssets) > 0 {
+					message += ". Available artifacts: " + strings.Join(source.AvailableAssets, ", ")
+				}
+				return nil, errors.New(message)
+			}
+			log(fmt.Sprintf("Downloading %s…\n", source.Filename))
+			record, err := githubSvc.Download(ctx, source)
+			if err != nil {
+				return nil, err
+			}
+			acquisition, err := json.Marshal(map[string]any{
+				"kind": "github-release", "canonicalIdentity": "github:" + source.Owner + "/" + source.Repository,
+				"originalUrl": source.DownloadURL, "githubOwner": source.Owner,
+				"githubRepository": source.Repository, "githubReleaseId": source.ReleaseID,
+				"githubAssetId": source.AssetID, "githubTag": source.Tag,
+				"githubAssetName": source.Filename, "githubPrerelease": source.Prerelease,
+				"publisherDigest": source.PublisherDigest,
+			})
+			if err != nil {
+				return nil, err
+			}
+			log("Inspecting vendor artifact…\n")
+			imported, err := lib.ImportArtifact(ctx, library.ImportRequest{
+				ArtifactID: record.ID, ExistingProjectID: req.ExistingProjectID,
+				Version: source.DetectedVersion, ExpectedSHA256: source.SHA256,
+				AcquisitionKind:   "github-release",
+				CanonicalIdentity: "github:" + source.Owner + "/" + source.Repository,
+				Acquisition:       acquisition, GitHubAssetRegex: source.AssetRegex,
+				GitHubIncludePrereleases: req.IncludePrereleases,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(map[string]any{
+				"project_id": imported.ProjectID, "release_id": imported.ReleaseID,
+				"project_created": imported.ProjectCreated, "duplicate": imported.Duplicate,
+				"source": source,
+			})
+		case jobs.KindRemoteImport:
+			if updater == nil {
+				return nil, fmt.Errorf("remote importer is unavailable")
+			}
+			var req updatecheck.DirectImportRequest
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			result, err := updater.ImportDirectURL(ctx, req, log)
+			raw, marshalErr := json.Marshal(result)
+			if err != nil {
+				return raw, err
+			}
+			return raw, marshalErr
+		case jobs.KindRepositoryImport:
+			if updater == nil {
+				return nil, fmt.Errorf("repository importer is unavailable")
+			}
+			var req updatecheck.RepositoryImportRequest
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			result, err := updater.ImportRepository(ctx, req, log)
+			raw, marshalErr := json.Marshal(result)
+			if err != nil {
+				return raw, err
+			}
+			return raw, marshalErr
 		case jobs.KindReanalyze:
 			var req struct {
 				ReleaseID string `json:"release_id"`
@@ -226,6 +325,52 @@ func JobHandler(lib *library.Service) jobs.Handler {
 				return raw, err
 			}
 			return raw, marshalErr
+		case jobs.KindUpdateCheck:
+			if updater == nil {
+				return nil, fmt.Errorf("update checker is unavailable")
+			}
+			var req struct {
+				ReleaseID string `json:"release_id"`
+				Force     bool   `json:"force"`
+			}
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			result, err := updater.Run(ctx, req.ReleaseID, req.Force, log,
+				func(update updatecheck.Progress) {
+					progress(jobs.Progress{Message: update.Message, ProjectID: update.ProjectID,
+						ReleaseID: update.ReleaseID, ProjectName: update.ProjectName,
+						PackageName: update.PackageName, Current: update.Current, Total: update.Total})
+				})
+			raw, marshalErr := json.Marshal(result)
+			if err != nil {
+				return raw, err
+			}
+			progress(jobs.Progress{Message: updateBatchSummary(result),
+				Current: len(result.Checks), Total: len(result.Checks), FailedItems: result.Failed,
+				PausedItems: updatePausedCount(result)})
+			return raw, marshalErr
+		case jobs.KindUpdatePrepare:
+			if updater == nil {
+				return nil, fmt.Errorf("update checker is unavailable")
+			}
+			var req struct {
+				ReleaseID string `json:"release_id"`
+			}
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			result, err := updater.PrepareDiscovered(ctx, req.ReleaseID, log,
+				func(update updatecheck.Progress) {
+					progress(jobs.Progress{Message: update.Message, ProjectID: update.ProjectID,
+						ReleaseID: update.ReleaseID, ProjectName: update.ProjectName,
+						PackageName: update.PackageName, Current: update.Current, Total: update.Total})
+				})
+			raw, marshalErr := json.Marshal(result)
+			if err != nil {
+				return raw, err
+			}
+			return raw, marshalErr
 		case jobs.KindRepositoryDistribution:
 			log("Reconciling repository distribution…\n")
 			if err := lib.Repo.ReconcileProjectDistribution(ctx, job.ProjectID); err != nil {
@@ -239,6 +384,86 @@ func JobHandler(lib *library.Service) jobs.Handler {
 	}
 }
 
+func updateBatchSummary(result updatecheck.BatchResult) string {
+	available := 0
+	built := 0
+	failures := make([]string, 0, result.Failed)
+	paused := make([]string, 0)
+	for _, check := range result.Checks {
+		if check.UpdateAvailable {
+			available++
+		}
+		if check.Built {
+			built++
+		}
+		if check.Status == "error" {
+			name := check.ProjectName
+			if name == "" {
+				name = check.PackageName
+			}
+			if name == "" {
+				name = check.ProjectID
+			}
+			if name == "" {
+				name = "Unknown package"
+			}
+			message := strings.TrimSpace(check.Message)
+			if message == "" {
+				message = "update check failed without an error message"
+			}
+			failures = append(failures, fmt.Sprintf("%s — %s", name, message))
+		}
+		if check.AutomaticStatus == "paused" {
+			name := check.ProjectName
+			if name == "" {
+				name = check.PackageName
+			}
+			if name == "" {
+				name = check.ProjectID
+			}
+			message := strings.TrimSpace(check.AutomaticMessage)
+			if message == "" {
+				message = "automatic handling paused without a reason"
+			}
+			paused = append(paused, fmt.Sprintf("%s — %s", name, message))
+		}
+	}
+	if len(failures) > 0 || len(paused) > 0 {
+		summary := fmt.Sprintf("Update check finished: %d update(s) found; %d built automatically",
+			available, built)
+		if len(failures) > 0 {
+			summary += fmt.Sprintf("; %d check(s) failed.\nFailed checks:\n• %s",
+				len(failures), strings.Join(failures, "\n• "))
+		} else {
+			summary += "."
+		}
+		if len(paused) > 0 {
+			summary += fmt.Sprintf("\nAutomatic handling paused:\n• %s",
+				strings.Join(paused, "\n• "))
+		}
+		return summary
+	}
+	if available > 0 {
+		return fmt.Sprintf("Update check finished: %d update(s) found; %d built automatically",
+			available, built)
+	}
+	if built > 0 {
+		return fmt.Sprintf("Update check finished: all vendor versions are current; %d prepared update(s) built automatically",
+			built)
+	}
+	return "Update check finished: all eligible packages are current"
+}
+
+func updatePausedCount(result updatecheck.BatchResult) int {
+	paused := 0
+	for _, check := range result.Checks {
+		if check.AutomaticStatus == "paused" {
+			paused++
+		}
+	}
+	return paused
+}
+
 func (d *Daemon) Close() error {
 	if d == nil {
 		return nil
@@ -247,6 +472,9 @@ func (d *Daemon) Close() error {
 		var errs []error
 		if d.stopSoak != nil {
 			d.stopSoak()
+		}
+		if d.stopUpdates != nil {
+			d.stopUpdates()
 		}
 		d.repoMu.Lock()
 		d.stopRepoLocked()

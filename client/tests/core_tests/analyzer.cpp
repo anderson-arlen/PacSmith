@@ -2,14 +2,10 @@
 
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
-#include "core/apt_repository.hpp"
-#include "core/apt_update_service.hpp"
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
-#include "core/credential_store.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
-#include "core/github_update_service.hpp"
 #include "core/lifecycle_validator.hpp"
 #include "core/path_safety.hpp"
 #include "core/payload_inspector.hpp"
@@ -20,7 +16,6 @@
 #include "core/repository_trust.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/rpm_analyzer.hpp"
-#include "core/rpm_repository.hpp"
 #include "core/script_evidence.hpp"
 #include "core/source_analyzer.hpp"
 #include "core/terminal_install_service.hpp"
@@ -73,6 +68,18 @@ void CoreTests::detectsDebDeclaredOptCommandWithoutExecutingScript() {
     writeFixture(dataRoot / "usr/share/applications/signal-fixture.desktop",
                  QByteArrayLiteral("[Desktop Entry]\nType=Application\nName=Signal Fixture\n"
                                    "Exec=signal-fixture\n"));
+    const auto pngHeader = [](const quint32 size) {
+        QByteArray contents(24, '\0');
+        contents.replace(0, 8, QByteArray("\x89PNG\r\n\x1a\n", 8));
+        for (int offset = 0; offset < 4; ++offset) {
+            const auto shift = static_cast<unsigned int>((3 - offset) * 8);
+            contents[16 + offset] = static_cast<char>((size >> shift) & 0xffU);
+            contents[20 + offset] = static_cast<char>((size >> shift) & 0xffU);
+        }
+        return contents;
+    };
+    writeFixture(dataRoot / "opt/SignalFixture/product_logo_16.png", pngHeader(16));
+    writeFixture(dataRoot / "opt/SignalFixture/product_logo_256.png", pngHeader(256));
     writeFixture(root / "debian-binary", QByteArrayLiteral("2.0\n"));
 
     const auto makeTar = [&](const QString &output, const std::filesystem::path &directory) {
@@ -115,6 +122,9 @@ void CoreTests::detectsDebDeclaredOptCommandWithoutExecutingScript() {
     QCOMPARE(launcher->destination, QStringLiteral("/usr/bin/signal-fixture"));
     QVERIFY(launcher->provenance.rationale.contains(
         QStringLiteral("maintainer script explicitly exposes")));
+    QVERIFY(analysis->icon.has_value());
+    QCOMPARE(analysis->icon->sourcePath,
+             QStringLiteral("opt/SignalFixture/product_logo_256.png"));
 }
 
 void CoreTests::inspectsDebAndAppImagePayloadContents() {

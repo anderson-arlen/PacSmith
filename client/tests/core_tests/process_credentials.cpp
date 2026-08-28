@@ -2,14 +2,10 @@
 
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
-#include "core/apt_repository.hpp"
-#include "core/apt_update_service.hpp"
 #include "core/apt_sources.hpp"
 #include "core/control_parser.hpp"
-#include "core/credential_store.hpp"
 #include "core/dependency_parser.hpp"
 #include "core/deb_analyzer.hpp"
-#include "core/github_update_service.hpp"
 #include "core/lifecycle_validator.hpp"
 #include "core/path_safety.hpp"
 #include "core/payload_inspector.hpp"
@@ -20,7 +16,6 @@
 #include "core/repository_trust.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/rpm_analyzer.hpp"
-#include "core/rpm_repository.hpp"
 #include "core/script_evidence.hpp"
 #include "core/source_analyzer.hpp"
 #include "core/terminal_install_service.hpp"
@@ -157,56 +152,4 @@ void CoreTests::validatesInstallSessionProtocol() {
             R"({"type":"run-command","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})")),
         &error));
     QVERIFY(error.contains(QStringLiteral("Unknown")));
-}
-
-void CoreTests::encryptsCredentialsWithAge() {
-    if (!pacsmith::CredentialStore::ageAvailable()) QSKIP("age is not installed");
-    QTemporaryDir temporary;
-    QVERIFY(temporary.isValid());
-    const auto path = temporary.path() + QStringLiteral("/secrets.age");
-    const QString password = QStringLiteral("pacsmith automated test password");
-    {
-        pacsmith::CredentialStore store(path);
-        QString error;
-        QVERIFY(!store.unlockAge(password, &error));
-        QVERIFY2(store.createAge(password, &error), qPrintable(error));
-        QVERIFY(store.hasAgeFile());
-        QVERIFY(store.ageUnlocked());
-        QVERIFY2(store.store(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age,
-                             QStringLiteral("test-secret-value"), password, &error), qPrintable(error));
-        QVERIFY(QFileInfo::exists(path));
-        const auto encrypted = QFileInfo(path).size();
-        QVERIFY(encrypted > 0);
-    }
-    {
-        pacsmith::CredentialStore store(path);
-        QString error;
-        QVERIFY2(store.unlockAge(password, &error), qPrintable(error));
-        const auto secret = store.load(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age, &error);
-        QVERIFY2(secret.has_value(), qPrintable(error));
-        QCOMPARE(*secret, QStringLiteral("test-secret-value"));
-        QVERIFY2(store.store(QStringLiteral("github"), pacsmith::CredentialSource::Age,
-                             QStringLiteral("gh-token"), {}, &error), qPrintable(error));
-        const auto github = store.load(QStringLiteral("github"), pacsmith::CredentialSource::Age, &error);
-        QVERIFY2(github.has_value(), qPrintable(error));
-        QCOMPARE(*github, QStringLiteral("gh-token"));
-        QVERIFY2(store.remove(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age,
-                              {}, &error), qPrintable(error));
-        QVERIFY(!store.load(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age, &error));
-        store.lockAge();
-        QVERIFY(!store.load(QStringLiteral("integration-test"), pacsmith::CredentialSource::Age, &error));
-    }
-}
-
-void CoreTests::usesInjectedGithubTokenWhenAgeIsLocked() {
-    const auto previous = qgetenv("PACSMITH_GITHUB_TOKEN");
-    QVERIFY(qputenv("PACSMITH_GITHUB_TOKEN", QByteArrayLiteral("injected-github-token")));
-    pacsmith::CredentialStore store(QStringLiteral("/nonexistent/pacsmith-secrets.age"));
-    QVERIFY(!store.ageUnlocked());
-    QString error;
-    const auto token = store.load(QStringLiteral("github"), pacsmith::CredentialSource::Age, &error);
-    QVERIFY2(token.has_value(), qPrintable(error));
-    QCOMPARE(*token, QStringLiteral("injected-github-token"));
-    if (previous.isEmpty()) qunsetenv("PACSMITH_GITHUB_TOKEN");
-    else QVERIFY(qputenv("PACSMITH_GITHUB_TOKEN", previous));
 }

@@ -136,7 +136,7 @@ QWidget *MainWindow::createOverviewPage() {
                                                  : QStringLiteral("Download & Prepare"));
         prepareReleaseButton_->setEnabled(preparing ||
             (selected != nullptr && selected->state == ReleaseState::Discovered &&
-             !debDownloadService_->isRunning() && importThread_ == nullptr));
+             !serverImportRunning_ && !repositoryImportRunning_ && importThread_ == nullptr));
         const bool installed = selected != nullptr && selected->id == project_->installedReleaseId;
         installReleaseButton_->setEnabled(selected != nullptr && !installed &&
                                           releaseHasRetainedPackage(*selected) &&
@@ -935,6 +935,8 @@ QWidget *MainWindow::createUpdatesPage() {
     updateCheckButton_ = new QPushButton(QStringLiteral("Check for Updates"), page);
     updateCheckStatus_ = new QLabel(page);
     updateCheckStatus_->setWordWrap(true);
+    updateCheckStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse |
+                                                Qt::TextSelectableByKeyboard);
     layout->addLayout(form);
     layout->addWidget(updateNotice_);
     layout->addWidget(new QLabel(QStringLiteral("Detected repository/update candidates"), page));
@@ -945,7 +947,9 @@ QWidget *MainWindow::createUpdatesPage() {
     buttons->addStretch();
     layout->addLayout(buttons);
     layout->addWidget(updateCheckStatus_);
-    connect(updateSaveButton_, &QPushButton::clicked, this, &MainWindow::saveUpdateConfiguration);
+    connect(updateSaveButton_, &QPushButton::clicked, this, [this] {
+        saveUpdateConfiguration();
+    });
     connect(updateCheckButton_, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
     connect(keyringBrowse, &QPushButton::clicked, this, &MainWindow::importSigningKey);
     connect(aptSigningKeyDownloadButton_, &QPushButton::clicked,

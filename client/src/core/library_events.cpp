@@ -66,6 +66,11 @@ void SseParser::dispatch(QList<ServerEvent> &events) {
         event.jobId = object.value(QStringLiteral("job_id")).toString();
         event.jobKind = object.value(QStringLiteral("job_kind")).toString();
         event.jobStatus = object.value(QStringLiteral("job_status")).toString();
+        event.jobMessage = object.value(QStringLiteral("job_message")).toString();
+        event.jobCurrent = object.value(QStringLiteral("job_current")).toInt();
+        event.jobTotal = object.value(QStringLiteral("job_total")).toInt();
+        event.jobFailedItems = object.value(QStringLiteral("job_failed_items")).toInt();
+        event.jobPausedItems = object.value(QStringLiteral("job_paused_items")).toInt();
         events.append(std::move(event));
     }
     eventName_.clear();
@@ -124,11 +129,24 @@ QString jobStatusMessage(const ServerEvent &event) {
     if (event.jobKind == QStringLiteral("update_check")) {
         if (event.jobStatus == QStringLiteral("queued")) return QStringLiteral("Update check queued…");
         if (event.jobStatus == QStringLiteral("running")) {
+            if (!event.jobMessage.isEmpty()) {
+                return event.jobTotal > 1 && event.jobCurrent > 0
+                    ? QStringLiteral("%1 (%2/%3)").arg(event.jobMessage)
+                          .arg(event.jobCurrent).arg(event.jobTotal)
+                    : event.jobMessage;
+            }
             return named(QStringLiteral("Checking package %1 for updates…"),
                          QStringLiteral("Checking packages for updates…"));
         }
-        if (event.jobStatus == QStringLiteral("succeeded")) return QStringLiteral("Update check finished");
-        if (event.jobStatus == QStringLiteral("failed")) return QStringLiteral("Update check failed");
+        if (event.jobStatus == QStringLiteral("succeeded")) {
+            return event.jobMessage.isEmpty() ? QStringLiteral("Update check finished")
+                                              : event.jobMessage;
+        }
+        if (event.jobStatus == QStringLiteral("failed")) {
+            return event.jobMessage.isEmpty() ? QStringLiteral("Update check failed")
+                                              : QStringLiteral("Update check failed: %1")
+                                                    .arg(event.jobMessage);
+        }
         if (event.jobStatus == QStringLiteral("interrupted")) return QStringLiteral("Update check was canceled");
     }
     if (event.jobKind == QStringLiteral("import")) {

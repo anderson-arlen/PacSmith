@@ -43,6 +43,15 @@ bool writeBytes(const QString &path, const QByteArray &data) {
     return true;
 }
 
+bool completeProjectRequired(const Project &project, QString *error) {
+    if (!project.summaryOnly) return true;
+    if (error != nullptr) {
+        *error = QStringLiteral(
+            "Refusing to modify a project summary; load the complete project first");
+    }
+    return false;
+}
+
 void materializeSigningKeys(const LibraryClient &client, PackageRelease &release) {
     for (auto &key : release.update.signingKeys) {
         const auto safe = PathSafety::normalizedArchivePath(key.relativePath);
@@ -70,6 +79,30 @@ Project projectFromObject(const LibraryClient &client, const QJsonObject &object
         if (materializeKeys) materializeSigningKeys(client, release);
     }
     return project;
+}
+
+UpdateCheckResult githubSourceFromObject(const QJsonObject &object) {
+    UpdateCheckResult result;
+    result.supported = true;
+    result.success = object.value(QStringLiteral("success")).toBool();
+    result.updateAvailable = object.value(QStringLiteral("update_available")).toBool();
+    result.detectedVersion = object.value(QStringLiteral("detected_version")).toString();
+    result.filename = object.value(QStringLiteral("filename")).toString();
+    result.sha256 = object.value(QStringLiteral("sha256")).toString();
+    result.downloadUrl = object.value(QStringLiteral("download_url")).toString();
+    result.message = object.value(QStringLiteral("message")).toString();
+    result.releaseId = object.value(QStringLiteral("release_id")).toInteger();
+    result.assetId = object.value(QStringLiteral("asset_id")).toInteger();
+    result.tag = object.value(QStringLiteral("tag")).toString();
+    result.publisherDigest = object.value(QStringLiteral("publisher_digest")).toString();
+    result.prerelease = object.value(QStringLiteral("prerelease")).toBool();
+    for (const auto &asset : object.value(QStringLiteral("available_assets")).toArray()) {
+        result.availableAssets.append(asset.toString());
+    }
+    for (const auto &asset : object.value(QStringLiteral("matching_assets")).toArray()) {
+        result.matchingAssets.append(asset.toString());
+    }
+    return result;
 }
 
 QJsonObject releaseConfiguration(const PackageRelease &release) {
@@ -185,6 +218,7 @@ QList<Project> LibraryClient::list(QString *error) const {
     const auto array = object->value(QStringLiteral("projects")).toArray();
     for (const auto &entry : array) {
         auto project = projectFromObject(*this, entry.toObject(), false);
+        project.summaryOnly = true;
         static_cast<void>(reconcileInstalled(project, installed, nullptr));
         projects.append(std::move(project));
     }
@@ -194,23 +228,14 @@ QList<Project> LibraryClient::list(QString *error) const {
 std::optional<Project> LibraryClient::load(const QString &idOrName, QString *error) const {
     const auto encoded = QString::fromUtf8(QUrl::toPercentEncoding(idOrName));
     auto object = getJson(QStringLiteral("/api/v1/projects/") + encoded, error);
-    if (!object) {
-        if (error != nullptr) error->clear();
-        for (auto project : list(error)) {
-            if (project.id == idOrName || project.archPackageName == idOrName ||
-                project.displayName == idOrName) {
-                return project;
-            }
-        }
-        if (error != nullptr && error->isEmpty()) *error = QStringLiteral("project not found");
-        return std::nullopt;
-    }
+    if (!object) return std::nullopt;
     auto project = projectFromObject(*this, *object, true);
     static_cast<void>(reconcileInstalled(project, nullptr));
     return project;
 }
 
 bool LibraryClient::save(Project &project, QString *error) const {
+    if (!completeProjectRequired(project, error)) return false;
     const auto patched = sendJson(QStringLiteral("PATCH"),
                                   QStringLiteral("/api/v1/projects/") + project.id,
                                   {{QStringLiteral("revision"), project.revision},
@@ -252,6 +277,7 @@ bool LibraryClient::deleteProject(const QString &id, QString *error) const {
 }
 
 bool LibraryClient::deleteProject(const Project &project, QString *error) const {
+    if (!completeProjectRequired(project, error)) return false;
     return deleteProject(project.id, error);
 }
 
@@ -307,6 +333,125 @@ std::optional<ImportResult> LibraryClient::importSource(const QString &sourcePat
     result.releaseId = result.releaseId.isEmpty() && !project->releases.isEmpty()
                            ? project->releases.last().id
                            : result.releaseId;
+    return result;
+}
+
+UpdateCheckResult LibraryClient::resolveGitHub(const QUrl &url, const QString &assetRegex,
+                                               const bool includePrereleases,
+                                               const PackageRelease *current,
+                                               QString *error) const {
+    QJsonObject body{{QStringLiteral("url"), url.toString()},
+                     {QStringLiteral("asset_regex"), assetRegex},
+                     {QStringLiteral("include_prereleases"), includePrereleases}};
+    if (current != nullptr) {
+        const auto providerRelease = current->acquisition.githubReleaseId > 0
+            ? current->acquisition.githubReleaseId : current->update.githubReleaseId;
+        body.insert(QStringLiteral("current_version"), current->debian.version);
+        body.insert(QStringLiteral("current_release_id"), providerRelease);
+        body.insert(QStringLiteral("current_prerelease"),
+                    current->acquisition.githubPrerelease);
+    }
+    const auto response = sendJson(QStringLiteral("POST"), QStringLiteral("/api/v1/github/resolve"),
+                                   body, error, 200);
+    if (!response) {
+        UpdateCheckResult result;
+        result.supported = true;
+        result.message = error == nullptr ? QStringLiteral("GitHub resolution failed") : *error;
+        return result;
+    }
+    return githubSourceFromObject(*response);
+}
+
+std::optional<QJsonObject> LibraryClient::inspectRepositoryKey(const QUrl &url,
+                                                               QString *error) const {
+    return sendJson(QStringLiteral("POST"),
+                    QStringLiteral("/api/v1/repository-keys/inspect"),
+                    {{QStringLiteral("url"), url.toString()}}, error, 200);
+}
+
+std::optional<GitHubImportResult> LibraryClient::importGitHub(
+    const QUrl &url, const QString &assetRegex, const bool includePrereleases,
+    const QString &existingProjectId, QString *error) const {
+    const auto accepted = sendJson(
+        QStringLiteral("POST"), QStringLiteral("/api/v1/github/imports"),
+        {{QStringLiteral("url"), url.toString()},
+         {QStringLiteral("asset_regex"), assetRegex},
+         {QStringLiteral("include_prereleases"), includePrereleases},
+         {QStringLiteral("existing_project_id"), existingProjectId}},
+        error, 202);
+    if (!accepted) return std::nullopt;
+    const auto job = waitForJob(accepted->value(QStringLiteral("job_id")).toString(), error);
+    if (!job || job->status != QStringLiteral("succeeded")) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = job ? job->error : QStringLiteral("GitHub import job failed");
+        }
+        return std::nullopt;
+    }
+    GitHubImportResult result;
+    result.imported.projectCreated = job->result.value(QStringLiteral("project_created")).toBool();
+    result.imported.duplicate = job->result.value(QStringLiteral("duplicate")).toBool();
+    result.imported.releaseId = job->result.value(QStringLiteral("release_id")).toString();
+    const auto projectId = job->result.value(QStringLiteral("project_id")).toString();
+    auto project = load(projectId, error);
+    if (!project) return std::nullopt;
+    result.imported.project = *project;
+    result.source = githubSourceFromObject(job->result.value(QStringLiteral("source")).toObject());
+    return result;
+}
+
+std::optional<ImportResult> LibraryClient::importRemoteUrl(
+    const QUrl &url, const QString &existingProjectId, const QString &version,
+    const QString &expectedSha256, QString *error) const {
+    const auto accepted = sendJson(
+        QStringLiteral("POST"), QStringLiteral("/api/v1/remote-imports"),
+        {{QStringLiteral("url"), url.toString()},
+         {QStringLiteral("existing_project_id"), existingProjectId},
+         {QStringLiteral("version"), version},
+         {QStringLiteral("expected_sha256"), expectedSha256}}, error, 202);
+    if (!accepted) return std::nullopt;
+    const auto job = waitForJob(accepted->value(QStringLiteral("job_id")).toString(), error);
+    if (!job || job->status != QStringLiteral("succeeded")) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = job ? job->error : QStringLiteral("remote import job failed");
+        }
+        return std::nullopt;
+    }
+    ImportResult result;
+    result.projectCreated = job->result.value(QStringLiteral("project_created")).toBool();
+    result.duplicate = job->result.value(QStringLiteral("duplicate")).toBool();
+    result.releaseId = job->result.value(QStringLiteral("release_id")).toString();
+    const auto project = load(job->result.value(QStringLiteral("project_id")).toString(), error);
+    if (!project) return std::nullopt;
+    result.project = *project;
+    return result;
+}
+
+std::optional<ImportResult> LibraryClient::importRepository(
+    const UpdateConfiguration &update, const QByteArray &trustedSigningKey,
+    const QString &signingKeySource, const QString &pinnedFingerprint,
+    QString *error) const {
+    const auto accepted = sendJson(
+        QStringLiteral("POST"), QStringLiteral("/api/v1/repository-imports"),
+        {{QStringLiteral("update"), update.toJson()},
+         {QStringLiteral("trusted_signing_key"),
+          QString::fromLatin1(trustedSigningKey.toBase64())},
+         {QStringLiteral("signing_key_source"), signingKeySource},
+         {QStringLiteral("pinned_fingerprint"), pinnedFingerprint}}, error, 202);
+    if (!accepted) return std::nullopt;
+    const auto job = waitForJob(accepted->value(QStringLiteral("job_id")).toString(), error);
+    if (!job || job->status != QStringLiteral("succeeded")) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = job ? job->error : QStringLiteral("repository import job failed");
+        }
+        return std::nullopt;
+    }
+    ImportResult result;
+    result.projectCreated = job->result.value(QStringLiteral("project_created")).toBool();
+    result.duplicate = job->result.value(QStringLiteral("duplicate")).toBool();
+    result.releaseId = job->result.value(QStringLiteral("release_id")).toString();
+    const auto project = load(job->result.value(QStringLiteral("project_id")).toString(), error);
+    if (!project) return std::nullopt;
+    result.project = *project;
     return result;
 }
 
@@ -382,6 +527,37 @@ std::optional<JobStatus> LibraryClient::startBuild(const QString &releaseId, QSt
     JobStatus job;
     job.id = accepted->value(QStringLiteral("job_id")).toString();
     job.status = QStringLiteral("queued");
+    return job;
+}
+
+std::optional<JobStatus> LibraryClient::startUpdateCheck(const QString &releaseId,
+                                                         const bool force,
+                                                         QString *error) const {
+    const auto accepted = sendJson(
+        QStringLiteral("POST"), QStringLiteral("/api/v1/update-checks"),
+        {{QStringLiteral("release_id"), releaseId}, {QStringLiteral("force"), force}},
+        error, 202);
+    if (!accepted) return std::nullopt;
+    JobStatus job;
+    job.id = accepted->value(QStringLiteral("job_id")).toString();
+    job.kind = QStringLiteral("update_check");
+    job.status = QStringLiteral("queued");
+    job.releaseId = releaseId;
+    return job;
+}
+
+std::optional<JobStatus> LibraryClient::startUpdatePreparation(const QString &releaseId,
+                                                               QString *error) const {
+    const auto accepted = sendJson(
+        QStringLiteral("POST"),
+        QStringLiteral("/api/v1/releases/") + releaseId + QStringLiteral("/prepare"),
+        {}, error, 202);
+    if (!accepted) return std::nullopt;
+    JobStatus job;
+    job.id = accepted->value(QStringLiteral("job_id")).toString();
+    job.kind = QStringLiteral("update_prepare");
+    job.status = QStringLiteral("queued");
+    job.releaseId = releaseId;
     return job;
 }
 
@@ -1004,6 +1180,7 @@ bool LibraryClient::synchronizeLifecycle(Project &project, PackageRelease &relea
 }
 
 bool LibraryClient::deleteRelease(Project &project, const QString &releaseId, QString *error) const {
+    if (!completeProjectRequired(project, error)) return false;
     const auto response = transport_.request(
         QStringLiteral("DELETE"), QStringLiteral("/api/v1/releases/") + releaseId);
     if (isError(response, error) || (response.status != 204 && response.status != 200)) {

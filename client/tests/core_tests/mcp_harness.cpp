@@ -6,7 +6,6 @@
 #include "core/domain_validation.hpp"
 #include "core/release_review.hpp"
 #include "core/payload_review.hpp"
-#include "mcp/permission_policy.hpp"
 #include "mcp/server.hpp"
 
 #include <QtTest>
@@ -175,10 +174,6 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                  .value(QStringLiteral("openWorldHint")).toBool(), true);
     QCOMPARE(signingKeyImport.value(QStringLiteral("annotations")).toObject()
                  .value(QStringLiteral("destructiveHint")).toBool(), true);
-    QVERIFY(pacsmith::mcp::PermissionPolicy::confirmationMessage(
-                QStringLiteral("import_repository_signing_key"),
-                QStringLiteral("Signal (signal-desktop-bin), release 8.24.1"))
-                .contains(QStringLiteral("Signal (signal-desktop-bin), release 8.24.1")));
     QVERIFY(findTool(QStringLiteral("import_github_release"))
                 .value(QStringLiteral("inputSchema")).toObject()
                 .value(QStringLiteral("properties")).toObject()
@@ -215,10 +210,6 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
     QCOMPARE(repositoryState.effectiveSoakSeconds, 604800);
     QVERIFY(!repositorySchema.value(QStringLiteral("properties")).toObject()
                  .contains(QStringLiteral("project")));
-    QVERIFY(pacsmith::mcp::PermissionPolicy::confirmationMessage(
-                QStringLiteral("configure_project_repository"),
-                QStringLiteral("ChatGPT (chatgpt-bin)"))
-                .contains(QStringLiteral("ChatGPT (chatgpt-bin)")));
     for (const auto &toolName : {QStringLiteral("prepare_release"),
                                  QStringLiteral("set_dependency_mapping"),
                                  QStringLiteral("start_build")}) {
@@ -228,16 +219,6 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         QVERIFY2(properties.contains(QStringLiteral("release_name")), qPrintable(toolName));
     }
 
-    QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("set_dependency_mapping")),
-             pacsmith::mcp::PermissionLevel::Routine);
-    QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("set_package_metadata")),
-             pacsmith::mcp::PermissionLevel::Routine);
-    QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("delete_project")),
-             pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
-    QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("reanalyze_release")),
-             pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
-    QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("write_pkgbuild")),
-             pacsmith::mcp::PermissionLevel::Routine);
     for (const auto &name : {QStringLiteral("set_library_settings"),
                              QStringLiteral("set_client_preferences"),
                              QStringLiteral("set_repository_configuration"),
@@ -248,19 +229,15 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                              QStringLiteral("revoke_remote_client"),
                              QStringLiteral("set_github_credential"),
                              QStringLiteral("delete_github_credential"),
-                             QStringLiteral("import_repository_signing_key")}) {
-        QCOMPARE(pacsmith::mcp::PermissionPolicy::level(name),
-                 pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
-        QString denied;
-        QVERIFY(!pacsmith::mcp::PermissionPolicy::canProceedToConfirmation(name, false, &denied));
-        QVERIFY(denied.contains(QStringLiteral("requires explicit PacSmith confirmation")));
+                             QStringLiteral("import_repository_signing_key"),
+                             QStringLiteral("reanalyze_release"),
+                             QStringLiteral("configure_project_repository"),
+                             QStringLiteral("promote_repository_package"),
+                             QStringLiteral("delete_release"),
+                             QStringLiteral("delete_project")}) {
+        const auto annotations = findTool(name).value(QStringLiteral("annotations")).toObject();
+        QVERIFY2(annotations.value(QStringLiteral("destructiveHint")).toBool(), qPrintable(name));
     }
-    QString error;
-    QVERIFY(!pacsmith::mcp::PermissionPolicy::canProceedToConfirmation(
-        QStringLiteral("delete_project"), false, &error));
-    QVERIFY(error.contains(QStringLiteral("requires explicit PacSmith confirmation")));
-    QVERIFY(pacsmith::mcp::PermissionPolicy::canProceedToConfirmation(
-        QStringLiteral("delete_project"), true, &error));
 }
 
 void CoreTests::reportsStructuredReleaseReviewIssues() {

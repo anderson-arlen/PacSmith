@@ -1,14 +1,12 @@
 #pragma once
 
 #include <QList>
-#include <QMap>
 #include <QString>
 #include <QStringList>
 #include <QTime>
 
 namespace pacsmith {
 
-enum class CredentialSource { Environment, Keyring, Age };
 enum class AppearanceMode { Auto, Light, Dark };
 
 struct AppearanceSettings {
@@ -36,7 +34,6 @@ struct HarnessProfile {
 };
 
 struct AppSettings {
-    QMap<QString, CredentialSource> credentialSources;
     AppearanceSettings appearance;
     BackgroundUpdateSettings updates;
     QList<HarnessProfile> harnessProfiles;
@@ -62,16 +59,12 @@ public:
     [[nodiscard]] bool setDefaultHarnessProfile(const QString &name,
                                                 QString *error = nullptr) const;
     [[nodiscard]] QString settingsPath() const;
-    [[nodiscard]] QString ageSecretsPath() const;
 
 private:
     QString directory_;
 };
 
-[[nodiscard]] QString credentialSourceName(CredentialSource source);
-[[nodiscard]] CredentialSource credentialSourceFromName(const QString &name);
 [[nodiscard]] QString appearanceModeName(AppearanceMode mode);
 [[nodiscard]] AppearanceMode appearanceModeFromName(const QString &name);
-[[nodiscard]] bool githubTokenUsesAge(const AppSettings &settings);
 
 } // namespace pacsmith

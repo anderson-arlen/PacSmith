@@ -23,6 +23,23 @@ void CoreTests::parsesChunkedServerEvents() {
     QCOMPARE(events.first().jobKind, QStringLiteral("build"));
     QCOMPARE(jobStatusMessage(events.first()), QStringLiteral("Building package Parsec…"));
     QVERIFY(!jobStatusMessage(events.first()).contains(QStringLiteral("opaque-id")));
+
+    const auto progress = parser.feed(
+        "event: change\ndata: {\"sequence\":5,\"topics\":[\"jobs\"],"
+        "\"project_id\":\"p2\",\"project_name\":\"Brave Web Browser\","
+        "\"job_id\":\"check-id\",\"job_kind\":\"update_check\","
+        "\"job_status\":\"running\",\"job_message\":\"Downloading signed APT release metadata…\","
+        "\"job_current\":2,\"job_total\":7,\"job_failed_items\":1,"
+        "\"job_paused_items\":2}\n\n");
+    QCOMPARE(progress.size(), 1);
+    QCOMPARE(progress.first().jobMessage,
+             QStringLiteral("Downloading signed APT release metadata…"));
+    QCOMPARE(progress.first().jobCurrent, 2);
+    QCOMPARE(progress.first().jobTotal, 7);
+    QCOMPARE(progress.first().jobFailedItems, 1);
+    QCOMPARE(progress.first().jobPausedItems, 2);
+    QCOMPARE(jobStatusMessage(progress.first()),
+             QStringLiteral("Downloading signed APT release metadata… (2/7)"));
 }
 
 void CoreTests::describesUnnamedServerJobsWithoutOpaqueIds() {

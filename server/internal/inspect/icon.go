@@ -95,7 +95,18 @@ func iconScore(candidate iconCandidate, references map[string]struct{}, packageN
 	default:
 		score += 1000
 	}
-	if match := iconDimension.FindStringSubmatch(candidate.path); match != nil {
+	if fileSuffix(candidate.path) == "png" && len(candidate.contents) >= 24 &&
+		bytes.HasPrefix(candidate.contents, pngSignature) {
+		width := int(binary.BigEndian.Uint32(candidate.contents[16:20]))
+		height := int(binary.BigEndian.Uint32(candidate.contents[20:24]))
+		if height < width {
+			width = height
+		}
+		if width > 512 {
+			width = 512
+		}
+		score += width
+	} else if match := iconDimension.FindStringSubmatch(candidate.path); match != nil {
 		width := atoi(match[1])
 		height := atoi(match[2])
 		if height < width {
@@ -147,8 +158,13 @@ func isDebIconCandidate(path string, size int64) bool {
 	if !isAnyIconCandidate(path, size) {
 		return false
 	}
-	return (strings.HasPrefix(path, "usr/share/icons/") && strings.Contains(path, "/apps/")) ||
-		strings.HasPrefix(path, "usr/share/pixmaps/")
+	if (strings.HasPrefix(path, "usr/share/icons/") && strings.Contains(path, "/apps/")) ||
+		strings.HasPrefix(path, "usr/share/pixmaps/") {
+		return true
+	}
+	name := strings.ToLower(fileStem(path))
+	return strings.HasPrefix(path, "opt/") &&
+		(strings.Contains(name, "icon") || strings.Contains(name, "logo"))
 }
 
 func isAnyIconCandidate(path string, size int64) bool {

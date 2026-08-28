@@ -42,8 +42,7 @@ bool sameHarnessProfiles(const QList<HarnessProfile> &left,
 }
 
 bool sameAppSettings(const AppSettings &left, const AppSettings &right) {
-    return left.credentialSources == right.credentialSources &&
-           sameBackgroundSettings(left.updates, right.updates) &&
+    return sameBackgroundSettings(left.updates, right.updates) &&
            sameHarnessProfiles(left.harnessProfiles, right.harnessProfiles) &&
            left.githubTokenConfigured == right.githubTokenConfigured &&
            left.debAssociationPrompted == right.debAssociationPrompted &&
@@ -76,11 +75,9 @@ QWidget *scrollablePage(QWidget *content, QWidget *parent) {
 
 } // namespace
 
-MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credentials,
-                       QWidget *parent)
+MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     : QMainWindow(parent), settingsStore_(settingsStore), appSettings_(settingsStore_.load()),
-      credentialStore_(credentials), buildService_(this),
-      installService_(this), signingKeyDownloadService_(this) {
+      buildService_(this), installService_(this), signingKeyDownloadService_(this) {
     setWindowTitle(QStringLiteral("PacSmith"));
     setAcceptDrops(true);
     clientSettingsWatcher_ = new QFileSystemWatcher(this);
@@ -115,20 +112,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         }
         reloadVisibleProjects(false);
     });
-    qRegisterMetaType<UpdateCheckResult>();
-    networkIoThread_.setObjectName(QStringLiteral("pacsmith-network-io"));
-    debDownloadService_ = new DebDownloadService;
-    directUrlUpdateService_ = new DirectUrlUpdateService;
-    aptUpdateService_ = new AptUpdateService;
-    rpmUpdateService_ = new RpmUpdateService;
-    githubUpdateService_ = new GitHubUpdateService;
-    debDownloadService_->moveToThread(&networkIoThread_);
-    directUrlUpdateService_->moveToThread(&networkIoThread_);
-    aptUpdateService_->moveToThread(&networkIoThread_);
-    rpmUpdateService_->moveToThread(&networkIoThread_);
-    githubUpdateService_->moveToThread(&networkIoThread_);
-    networkIoThread_.start();
-
     auto *githubAction = new QAction(QStringLiteral("GitHub Link…"), this);
     auto *packageFileAction = new QAction(QStringLiteral("Package File…"), this);
     auto *directUrlAction = new QAction(QStringLiteral("Direct Download URL…"), this);
@@ -665,74 +648,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             }));
     });
 
-    connect(debDownloadService_, &DebDownloadService::progress, this,
-            [this](const qint64 received, const qint64 total) {
-        preparationBytesReceived_ = received;
-        preparationBytesTotal_ = total;
-        if (downloadProgress_ != nullptr) {
-            if (total > 0) {
-                downloadProgress_->setRange(0, 1000);
-                downloadProgress_->setValue(static_cast<int>(std::clamp<qint64>(
-                    received * 1000 / total, 0, 1000)));
-                downloadProgress_->setLabelText(
-                    QStringLiteral("Downloading vendor artifact… %1 / %2 MiB\nYou may hide this window; the download will continue.")
-                        .arg(received / (1024 * 1024)).arg(total / (1024 * 1024)));
-            } else {
-                downloadProgress_->setRange(0, 0);
-                downloadProgress_->setLabelText(
-                    QStringLiteral("Downloading vendor artifact… %1 MiB\nYou may hide this window; the download will continue.")
-                        .arg(received / (1024 * 1024)));
-            }
-        }
-        statusBar()->showMessage(total > 0
-            ? QStringLiteral("Downloading vendor artifact: %1 / %2 MiB")
-                  .arg(received / (1024 * 1024)).arg(total / (1024 * 1024))
-            : QStringLiteral("Downloading vendor artifact: %1 MiB").arg(received / (1024 * 1024)));
-        if (!lastPreparationPublish_.isValid() || lastPreparationPublish_.elapsed() >= 150) {
-            publishPreparationActivity();
-            lastPreparationPublish_.restart();
-            updatePreparationIndicators();
-            updateUpdateCheckIndicators();
-        }
-    });
-    connect(debDownloadService_, &DebDownloadService::failed, this, [this](const QString &message) {
-        const auto projectId = preparingProjectId_;
-        pendingImportOptions_ = {};
-        resetPreparationState();
-        statusBar()->showMessage(QStringLiteral("Vendor artifact download failed"), 8000);
-        QMessageBox::critical(this, QStringLiteral("Could not prepare release"), message);
-        if (!projectId.isEmpty()) refreshProjectList(projectId);
-        populateOverview();
-    });
-    connect(debDownloadService_, &DebDownloadService::finished, this, [this](const QString &path) {
-        preparationPhase_ = QStringLiteral("Inspecting");
-        if (downloadProgress_ != nullptr) {
-            downloadProgress_->close();
-            downloadProgress_->deleteLater();
-            downloadProgress_ = nullptr;
-        }
-        updatePreparationIndicators();
-        publishPreparationActivity();
-        statusBar()->showMessage(QStringLiteral("Vendor artifact downloaded; importing release"));
-        pendingDownloadedImport_ = path;
-        importPackage(path);
-    });
-    connect(directUrlUpdateService_, &DirectUrlUpdateService::progressChanged, this,
-            [this](const QString &message) { updateCheckStatus_->setText(message); });
-    connect(directUrlUpdateService_, &DirectUrlUpdateService::downloadProgress, this,
-            [this](const qint64 received, const qint64 total) {
-                updateCheckStatus_->setText(
-                    total > 0
-                        ? QStringLiteral("Downloading remote artifact… %1 / %2 MiB")
-                              .arg(received / (1024 * 1024))
-                              .arg(total / (1024 * 1024))
-                        : QStringLiteral("Downloading remote artifact… %1 MiB")
-                              .arg(received / (1024 * 1024)));
-            });
-    connect(directUrlUpdateService_, &DirectUrlUpdateService::finished, this,
-            [this](const UpdateCheckResult &result) {
-                applyUpdateCheckResult(result, QStringLiteral("Direct URL"));
-            });
     connect(&signingKeyDownloadService_, &RepositoryKeyDownloadService::progress, this,
             [this](const qint64 received, const qint64 total) {
         if (signingKeyProgress_ == nullptr) return;
@@ -851,26 +766,17 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             statusBar()->showMessage(QStringLiteral("Repository signing key trusted and pinned"), 7000);
         }
     });
-    connect(aptUpdateService_, &AptUpdateService::progressChanged, this, [this](const QString &message) {
-        updateCheckStatus_->setText(message);
-    });
-    connect(aptUpdateService_, &AptUpdateService::finished, this, [this](const UpdateCheckResult &result) {
-        applyUpdateCheckResult(result, QStringLiteral("APT"));
-    });
-    connect(rpmUpdateService_, &RpmUpdateService::progressChanged, this, [this](const QString &message) {
-        updateCheckStatus_->setText(message);
-    });
-    connect(rpmUpdateService_, &RpmUpdateService::finished, this, [this](const UpdateCheckResult &result) {
-        applyUpdateCheckResult(result, QStringLiteral("RPM"));
-    });
-    connect(githubUpdateService_, &GitHubUpdateService::progressChanged, this,
-            [this](const QString &message) { updateCheckStatus_->setText(message); });
-    connect(githubUpdateService_, &GitHubUpdateService::finished, this,
-            [this](const UpdateCheckResult &result) {
-        applyUpdateCheckResult(result, QStringLiteral("GitHub"));
-    });
 
     statusBar()->setSizeGripEnabled(false);
+    updateCheckErrorsButton_ = new QPushButton(this);
+    updateCheckErrorsButton_->setVisible(false);
+    updateCheckErrorsButton_->setCursor(Qt::PointingHandCursor);
+    updateCheckErrorsButton_->setToolTip(QStringLiteral("Show failures from the last update check"));
+    statusBar()->addPermanentWidget(updateCheckErrorsButton_);
+    connect(updateCheckErrorsButton_, &QPushButton::clicked, this, [this] {
+        QMessageBox::warning(this, QStringLiteral("Update Check Errors"),
+                             updateCheckErrorDetails_);
+    });
     auto *connectionSlot = new QWidget(this);
     auto *connectionSlotLayout = new QHBoxLayout(connectionSlot);
     constexpr int kConnectionPad = 8;
@@ -1134,6 +1040,9 @@ void MainWindow::updateSectionReviewMarkers() {
     const bool lifecycleReview = !release.lifecycleScript.contents.isEmpty() &&
         (!release.lifecycleScript.validationPassed ||
          release.lifecycleScript.requiresAcknowledgement());
+    const bool updateAttention = release.update.lastCheckFailed ||
+        (release.state != ReleaseState::Built &&
+         release.update.lastAutomaticStatus == QStringLiteral("paused"));
     mark(EditorSection::SourceContents, pendingPayloadReviews(release) > 0);
     mark(EditorSection::SourceScripts, false);
     mark(EditorSection::ConfigDependencies, dependencyReview);
@@ -1142,6 +1051,7 @@ void MainWindow::updateSectionReviewMarkers() {
     mark(EditorSection::ConfigAppRun, release.installMapping.appRun.requiresReview());
     mark(EditorSection::ConfigDesktopEntries, desktopReview);
     mark(EditorSection::ConfigIcon, !release.installMapping.icon.isConfigured());
+    mark(EditorSection::ConfigUpdates, updateAttention);
 }
 
 void MainWindow::updateWorkbenchStageChrome() {
@@ -1305,10 +1215,8 @@ void MainWindow::placeRepositoryEditor() {
 }
 
 void MainWindow::syncUpdateCheckButtons() {
-    const bool busy = directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
-                      rpmUpdateService_->isRunning() ||
-                      githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
-                      importThread_ != nullptr;
+    const bool busy = updateCheckRunning_ || updateConfigurationSaveInFlight_ || serverImportRunning_ ||
+                      repositoryImportRunning_ || importThread_ != nullptr;
     bool allowed = false;
     if (!busy && project_ && updateEditorRelease() != nullptr && updateStrategy_ != nullptr) {
         const auto index = updateStrategy_->currentIndex();
@@ -1452,39 +1360,10 @@ void MainWindow::applyLibrarySettings(const LibrarySettings &settings) {
     settings.applyTo(appSettings_);
 }
 
-QString MainWindow::sessionCredential(const QString &name) const {
-    return sessionCredentials_.value(name);
-}
-
-void MainWindow::rememberSessionCredential(const QString &name, const QString &value) {
-    if (value.isEmpty()) sessionCredentials_.remove(name);
-    else sessionCredentials_.insert(name, value);
-}
-
 MainWindow::~MainWindow() {
     if (libraryEventStream_ != nullptr) libraryEventStream_->stop();
     ++projectLoadGeneration_;
     loadingProjectId_.clear();
-    if (networkIoThread_.isRunning()) {
-        shutdownNetworkService(debDownloadService_);
-        shutdownNetworkService(directUrlUpdateService_);
-        shutdownNetworkService(aptUpdateService_);
-        shutdownNetworkService(rpmUpdateService_);
-        shutdownNetworkService(githubUpdateService_);
-        networkIoThread_.quit();
-        networkIoThread_.wait();
-        return;
-    }
-    delete debDownloadService_;
-    delete directUrlUpdateService_;
-    delete aptUpdateService_;
-    delete rpmUpdateService_;
-    delete githubUpdateService_;
-    debDownloadService_ = nullptr;
-    directUrlUpdateService_ = nullptr;
-    aptUpdateService_ = nullptr;
-    rpmUpdateService_ = nullptr;
-    githubUpdateService_ = nullptr;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -1505,11 +1384,6 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         hide();
         return;
     }
-    if (aptUpdateService_->isRunning()) cancelOnServiceThread(*aptUpdateService_);
-    if (rpmUpdateService_->isRunning()) cancelOnServiceThread(*rpmUpdateService_);
-    if (githubUpdateService_->isRunning()) cancelOnServiceThread(*githubUpdateService_);
-    if (directUrlUpdateService_->isRunning()) cancelOnServiceThread(*directUrlUpdateService_);
-    if (debDownloadService_->isRunning()) cancelOnServiceThread(*debDownloadService_);
     QMainWindow::closeEvent(event);
 }
 

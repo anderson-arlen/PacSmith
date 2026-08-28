@@ -97,6 +97,28 @@ func TestEnvStoreGetOnly(t *testing.T) {
 	}
 }
 
+func TestUsableSecretServiceRequiresNonInteractiveWriteAndDelete(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "secrets")
+	files, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usableSecretService(ctx, files) {
+		t.Fatal("writable store was rejected")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("probe was not removed: %v", entries)
+	}
+	if usableSecretService(ctx, NewEnvStore()) {
+		t.Fatal("read-only store was accepted")
+	}
+}
+
 func TestLockedStoreDoesNotSwitchBackends(t *testing.T) {
 	ctx := context.Background()
 	fileDir := filepath.Join(t.TempDir(), "secrets")

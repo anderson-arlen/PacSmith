@@ -1,64 +1,7 @@
 #include "core_tests.hpp"
-
-#include "core/direct_url_update_service.hpp"
+#include "core/model.hpp"
 
 #include <QTest>
-
-void CoreTests::comparesDirectUrlValidators() {
-    using pacsmith::DirectUrlValidatorComparison;
-    using pacsmith::DirectUrlValidators;
-
-    const DirectUrlValidators stored{QStringLiteral("\"etag-a\""),
-                                     QStringLiteral("Mon, 24 Aug 2026 12:00:00 GMT"),
-                                     100, QStringLiteral("x-amz-version-id"),
-                                     QStringLiteral("version-a")};
-    auto remote = stored;
-    QCOMPARE(pacsmith::DirectUrlUpdateService::compareValidators(stored, remote),
-             DirectUrlValidatorComparison::Unchanged);
-
-    remote.etag = QStringLiteral("\"etag-b\"");
-    QCOMPARE(pacsmith::DirectUrlUpdateService::compareValidators(stored, remote),
-             DirectUrlValidatorComparison::Changed);
-
-    auto noEtagStored = stored;
-    auto noEtagRemote = stored;
-    noEtagStored.etag.clear();
-    noEtagRemote.etag.clear();
-    noEtagRemote.vendorValue = QStringLiteral("version-b");
-    QCOMPARE(pacsmith::DirectUrlUpdateService::compareValidators(
-                 noEtagStored, noEtagRemote),
-             DirectUrlValidatorComparison::Changed);
-
-    noEtagStored.vendorName.clear();
-    noEtagStored.vendorValue.clear();
-    noEtagRemote.vendorName.clear();
-    noEtagRemote.vendorValue.clear();
-    noEtagRemote.lastModified = noEtagStored.lastModified;
-    noEtagRemote.contentLength = 101;
-    QCOMPARE(pacsmith::DirectUrlUpdateService::compareValidators(
-                 noEtagStored, noEtagRemote),
-             DirectUrlValidatorComparison::Changed);
-
-    QCOMPARE(pacsmith::DirectUrlUpdateService::compareValidators(
-                 {}, DirectUrlValidators{QStringLiteral("\"new\""), {}, -1, {}, {}}),
-             DirectUrlValidatorComparison::NoCommonValidator);
-}
-
-void CoreTests::schedulesDirectUrlFullContentChecks() {
-    pacsmith::UpdateConfiguration update;
-    update.directUrlFullCheckIntervalHours = 24 * 7;
-    const auto now = QDateTime::fromString(
-        QStringLiteral("2026-08-25T12:00:00Z"), Qt::ISODate);
-    QVERIFY(pacsmith::DirectUrlUpdateService::fullContentCheckDue(update, now));
-
-    update.directUrlLastFullCheck = now.addDays(-6);
-    QVERIFY(!pacsmith::DirectUrlUpdateService::fullContentCheckDue(update, now));
-    update.directUrlLastFullCheck = now.addDays(-7);
-    QVERIFY(pacsmith::DirectUrlUpdateService::fullContentCheckDue(update, now));
-
-    update.directUrlFullCheckIntervalHours = 0;
-    QVERIFY(!pacsmith::DirectUrlUpdateService::fullContentCheckDue(update, now));
-}
 
 void CoreTests::persistsDirectUrlCheckState() {
     pacsmith::UpdateConfiguration update;

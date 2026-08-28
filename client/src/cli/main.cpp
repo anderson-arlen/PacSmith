@@ -1,9 +1,5 @@
-#include "core/apt_update_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
-#include "core/credential_store.hpp"
-#include "core/deb_download_service.hpp"
-#include "core/github_update_service.hpp"
 #include "core/managed_package.hpp"
 #include "core/payload_inspector.hpp"
 #include "core/payload_review.hpp"
@@ -14,10 +10,7 @@
 #include "core/daemon_control.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/repository_trust.hpp"
-#include "core/rpm_update_service.hpp"
 #include "core/terminal_install_service.hpp"
-#include "core/update_source.hpp"
-#include "core/update_check_runner.hpp"
 #include "cli/agent_integration.hpp"
 #include "cli/admin.hpp"
 #include "mcp/server.hpp"
@@ -25,7 +18,6 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
-#include <QEventLoop>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLocalSocket>
@@ -34,7 +26,6 @@
 #include <QTextStream>
 #include <QSet>
 #include <QTimer>
-#include <QTemporaryDir>
 #include <QUrl>
 
 #include <algorithm>
@@ -187,23 +178,8 @@ int runRepositoryAdd(const QStringList &arguments, pacsmith::LibraryClient &libr
         return 1;
     }
 
-    QTemporaryDir verificationDirectory;
-    if (!verificationDirectory.isValid()) {
-        errorStream << "error: could not create a temporary verification directory\n";
-        return 1;
-    }
-    QString importKeyError;
-    const auto key = pacsmith::RepositoryTrust::importUserKey(
-        std::filesystem::path(verificationDirectory.path().toUtf8().constData()),
-        keyContents, keyUrl.toString(), &importKeyError);
-    if (!key || key->fingerprints.isEmpty()) {
-        errorStream << "error: " << importKeyError << '\n';
-        return 1;
-    }
-    update.signingKeys = {*key};
-    update.aptSigningKeyring = key->relativePath;
-    update.trustedSigningFingerprint = trustedFingerprint.isEmpty()
-        ? key->fingerprints.first() : trustedFingerprint;
+    const auto pinned = trustedFingerprint.isEmpty()
+        ? inspection->fingerprints.first() : trustedFingerprint;
     if (rpm) {
         update.rpmCandidates.append(
             {update.url, update.rpmArchitecture, {keyUrl.toString()},
@@ -215,135 +191,56 @@ int runRepositoryAdd(const QStringList &arguments, pacsmith::LibraryClient &libr
              {update.aptArchitecture}, {}, QStringLiteral("command-line repository import")});
     }
 
-    pacsmith::PackageRelease probe;
-    probe.debian.package = packageName;
-    probe.debian.version = QStringLiteral("0");
-    probe.debian.architecture = rpm ? update.rpmArchitecture : update.aptArchitecture;
-    probe.update = update;
-    pacsmith::UpdateCheckResult checked;
-    QEventLoop repositoryLoop;
-    if (rpm) {
-        pacsmith::RpmUpdateService service;
-        QObject::connect(&service, &pacsmith::RpmUpdateService::progressChanged,
-                         [&errorStream](const QString &message) {
-            errorStream << message << '\n';
-        });
-        QObject::connect(&service, &pacsmith::RpmUpdateService::finished,
-                         [&checked, &repositoryLoop](const pacsmith::UpdateCheckResult &result) {
-            checked = result;
-            repositoryLoop.quit();
-        });
-        service.start(probe, std::filesystem::path(
-                                 verificationDirectory.path().toUtf8().constData()));
-        if (service.isRunning()) repositoryLoop.exec();
-    } else {
-        pacsmith::AptUpdateService service;
-        QObject::connect(&service, &pacsmith::AptUpdateService::progressChanged,
-                         [&errorStream](const QString &message) {
-            errorStream << message << '\n';
-        });
-        QObject::connect(&service, &pacsmith::AptUpdateService::finished,
-                         [&checked, &repositoryLoop](const pacsmith::UpdateCheckResult &result) {
-            checked = result;
-            repositoryLoop.quit();
-        });
-        service.start(probe, std::filesystem::path(
-                                 verificationDirectory.path().toUtf8().constData()));
-        if (service.isRunning()) repositoryLoop.exec();
-    }
-    if (!checked.success || !checked.signatureVerified || checked.downloadUrl.isEmpty() ||
-        checked.sha256.isEmpty()) {
-        errorStream << "error: " << checked.message << '\n';
-        return 1;
-    }
-
-    update.detectedVersion = checked.detectedVersion;
-    update.detectedFilename = checked.filename;
-    update.detectedSha256 = checked.sha256;
-    update.detectedUrl = checked.downloadUrl;
-    update.lastChecked = QDateTime::currentDateTimeUtc();
-    update.lastCheckMessage = checked.message;
-    update.signatureVerified = true;
-    const auto filename = QFileInfo(QUrl(checked.downloadUrl).path()).fileName().isEmpty()
-        ? QFileInfo(checked.filename).fileName()
-        : QFileInfo(QUrl(checked.downloadUrl).path()).fileName();
-    const auto target = pacsmith::defaultDownloadPath(
-        pacsmith::PkgbuildGenerator::sanitizePackageName(packageName),
-        pacsmith::PkgbuildGenerator::sanitizePackageName(checked.detectedVersion), filename);
-    pacsmith::DebDownloadService artifactDownloader;
-    QString downloadedPath;
-    QString downloadError;
-    QEventLoop downloadLoop;
-    QObject::connect(&artifactDownloader, &pacsmith::DebDownloadService::progress,
-                     [&errorStream](const qint64 received, const qint64 total) {
-        errorStream << "artifact " << received
-                    << (total > 0 ? QStringLiteral("/%1").arg(total) : QString{})
-                    << " bytes\r" << Qt::flush;
-    });
-    QObject::connect(&artifactDownloader, &pacsmith::DebDownloadService::finished,
-                     [&downloadedPath, &downloadLoop](const QString &path) {
-        downloadedPath = path;
-        downloadLoop.quit();
-    });
-    QObject::connect(&artifactDownloader, &pacsmith::DebDownloadService::failed,
-                     [&downloadError, &downloadLoop](const QString &message) {
-        downloadError = message;
-        downloadLoop.quit();
-    });
-    artifactDownloader.start(QUrl(checked.downloadUrl), checked.sha256,
-                             std::filesystem::path(target.toUtf8().constData()));
-    if (artifactDownloader.isRunning()) downloadLoop.exec();
-    errorStream << '\n';
-    if (downloadedPath.isEmpty()) {
-        errorStream << "error: " << downloadError << '\n';
-        return 1;
-    }
-
-    pacsmith::ImportOptions options;
-    options.version = checked.detectedVersion;
-    options.initialUpdate = update;
-    options.trustedSigningKey = keyContents;
-    options.trustedSigningKeySource = keyUrl.toString();
-    options.acquisition.kind = rpm ? pacsmith::AcquisitionKind::RpmRepository
-                                   : pacsmith::AcquisitionKind::AptRepository;
-    options.acquisition.canonicalIdentity = rpm
-        ? QStringLiteral("rpm:%1:%2:%3")
-              .arg(update.url.toLower(), update.rpmArchitecture.toLower(),
-                   update.rpmPackageName.toLower())
-        : QStringLiteral("apt:%1:%2:%3:%4:%5")
-              .arg(update.url.toLower(), update.aptSuite.toLower(),
-                   update.aptComponent.toLower(), update.aptArchitecture.toLower(),
-                   update.aptPackageName.toLower());
-    options.acquisition.originalUrl = checked.downloadUrl;
-    options.acquisition.publisherDigest = checked.sha256;
-    options.acquisition.publisherVerified = true;
     QString importError;
-    const auto imported = library.importSource(
-        std::filesystem::path(downloadedPath.toUtf8().constData()), options, &importError);
-    static_cast<void>(QFile::remove(downloadedPath));
+    const auto imported = library.importRepository(
+        update, keyContents, keyUrl.toString(), pinned, &importError);
     if (!imported) {
         errorStream << "error: " << importError << '\n';
         return 1;
     }
-    out << QString::fromUtf8(
-               library.releasePath(imported->project.id, imported->releaseId).string().c_str())
-        << '\n';
+    out << imported->project.id << '\t' << imported->releaseId << '\n';
     return 0;
 }
 
 int runCheck(pacsmith::LibraryClient &library, pacsmith::Project project, QTextStream &out,
              QTextStream &errorStream, pacsmith::BackgroundUpdateState *backgroundState = nullptr) {
-    const auto result =
-        pacsmith::UpdateCheckRunner::run(
-            library, std::move(project), errorStream, false, backgroundState);
-    if (result.prepared) {
-        out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
+    Q_UNUSED(backgroundState)
+    const auto *tracker = project.activeTrackingRelease();
+    if (tracker == nullptr) {
+        out << project.id << "\tpaused\tproject has no analyzed release to track\n";
+        return 0;
     }
-    if (result.built) {
-        out << result.projectId << "\tbuilt\t" << result.detectedVersion << '\n';
+    QString error;
+    const auto started = library.startUpdateCheck(tracker->id, false, &error);
+    if (!started) {
+        errorStream << "error: " << error << '\n';
+        return 1;
     }
-    out << result.projectId << '\t' << result.status << '\t' << result.message << '\n';
-    return result.exitCode;
+    const auto job = library.waitForJob(started->id, &error);
+    const auto log = library.jobLog(started->id, nullptr);
+    if (!log.isEmpty()) errorStream << log;
+    if (!job || job->status != QStringLiteral("succeeded")) {
+        errorStream << "error: " << (!error.isEmpty() ? error : job ? job->error
+                                                                : QStringLiteral("update check failed")) << '\n';
+        return 1;
+    }
+    int failed = 0;
+    for (const auto &value : job->result.value(QStringLiteral("checks")).toArray()) {
+        const auto checked = value.toObject();
+        const auto projectId = checked.value(QStringLiteral("project_id")).toString();
+        const auto version = checked.value(QStringLiteral("detected_version")).toString();
+        if (checked.value(QStringLiteral("prepared")).toBool()) {
+            out << projectId << "\tprepared\t" << version << '\n';
+        }
+        if (checked.value(QStringLiteral("built")).toBool()) {
+            out << projectId << "\tbuilt\t" << version << '\n';
+        }
+        const auto status = checked.value(QStringLiteral("status")).toString();
+        out << projectId << '\t' << status << '\t'
+            << checked.value(QStringLiteral("message")).toString() << '\n';
+        if (status == QStringLiteral("error")) ++failed;
+    }
+    return failed == 0 ? 0 : 1;
 }
 int runInstallSession(QCoreApplication &application, const QStringList &arguments,
                       QTextStream &out, QTextStream &errorStream) {
@@ -486,7 +383,7 @@ int main(int argc, char *argv[]) {
                "The server uses the same configured local Unix-socket or remote HTTPS/mTLS "
                "PacSmith connection as this CLI. JSON-RPC is written only to stdout; diagnostics "
                "use stderr. Sensitive system, trust, credential, publication, automation, and "
-               "destructive tools require MCP form elicitation and fail closed when unsupported. "
+               "destructive tools are marked for the MCP host's permission policy. "
                "`pacsmith plugin path` locates "
                "the portable Skill plus MCP bundle for harness installation.\n";
         return 0;
@@ -534,7 +431,6 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             QString assetRegex;
-            QString requestedTag;
             bool prerelease = false;
             for (int index = 3; index < arguments.size(); ++index) {
                 if (arguments.at(index) == QStringLiteral("--prerelease")) {
@@ -549,13 +445,11 @@ int main(int argc, char *argv[]) {
             }
             if (parts.size() >= 6 && parts.at(2) == QStringLiteral("releases") &&
                 parts.at(3) == QStringLiteral("download")) {
-                requestedTag = parts.at(4);
                 if (assetRegex.isEmpty()) {
                     assetRegex = QRegularExpression::escape(parts.mid(5).join(QLatin1Char('/')));
                 }
             } else if (parts.size() >= 5 && parts.at(2) == QStringLiteral("releases") &&
                        parts.at(3) == QStringLiteral("tag")) {
-                requestedTag = parts.mid(4).join(QLatin1Char('/'));
             }
             auto repositoryName = parts.at(1);
             if (repositoryName.endsWith(QStringLiteral(".git"))) repositoryName.chop(4);
@@ -572,105 +466,16 @@ int main(int argc, char *argv[]) {
                             << '\n';
                 return 1;
             }
-            pacsmith::PackageRelease probe;
-            probe.debian.version = QStringLiteral("0");
-            probe.update.strategy = pacsmith::UpdateStrategy::GitHubRelease;
-            probe.update.githubOwner = parts.at(0);
-            probe.update.githubRepository = parts.at(1);
-            if (probe.update.githubRepository.endsWith(QStringLiteral(".git"))) {
-                probe.update.githubRepository.chop(4);
-            }
-            probe.update.githubAssetRegex = assetRegex;
-            probe.update.githubIncludePrereleases = prerelease;
-            pacsmith::AppSettingsStore settingsStore;
-            const auto settings = settingsStore.load();
-            const auto source = settings.credentialSources.value(
-                QStringLiteral("github"), pacsmith::CredentialSource::Environment);
-            pacsmith::CredentialStore credentials(settingsStore.ageSecretsPath());
-            auto token = credentials.load(QStringLiteral("github"), source, nullptr).value_or(QString{});
-            if (token.isEmpty() && source == pacsmith::CredentialSource::Age) {
-                errorStream << "error: an age-stored GitHub PAT cannot be unlocked by non-interactive add; use the GUI or PACSMITH_GITHUB_TOKEN\n";
-                return 1;
-            }
-            pacsmith::GitHubUpdateService githubService;
-            pacsmith::UpdateCheckResult githubResult;
-            QEventLoop githubLoop;
-            QObject::connect(&githubService, &pacsmith::GitHubUpdateService::progressChanged,
-                             [&errorStream](const QString &message) { errorStream << message << '\n'; });
-            QObject::connect(&githubService, &pacsmith::GitHubUpdateService::finished,
-                             [&githubResult, &githubLoop](const pacsmith::UpdateCheckResult &result) {
-                githubResult = result;
-                githubLoop.quit();
-            });
-            githubService.start(probe, token, requestedTag);
-            token.fill(QChar::Null);
-            if (githubService.isRunning()) githubLoop.exec();
-            if (!githubResult.success || githubResult.downloadUrl.isEmpty()) {
-                errorStream << "error: " << githubResult.message << '\n';
-                if (!githubResult.availableAssets.isEmpty()) {
-                    errorStream << "release artifacts:\n";
-                    for (const auto &asset : githubResult.availableAssets) errorStream << "  " << asset << '\n';
-                }
-                return 1;
-            }
-            const auto projectId = pacsmith::PkgbuildGenerator::sanitizePackageName(
-                probe.update.githubRepository);
-            const auto releaseId = QStringLiteral("%1-%2")
-                .arg(githubResult.detectedVersion).arg(githubResult.assetId);
-            const auto target = pacsmith::defaultDownloadPath(
-                projectId, releaseId, githubResult.filename);
-            pacsmith::DebDownloadService downloader;
-            QString downloadedPath;
-            QString downloadError;
-            QEventLoop downloadLoop;
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::progress,
-                             [&errorStream](const qint64 received, const qint64 total) {
-                errorStream << "downloaded " << received << (total > 0 ? QStringLiteral("/%1").arg(total) : QString{})
-                            << " bytes\r" << Qt::flush;
-            });
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::finished,
-                             [&downloadedPath, &downloadLoop](const QString &path) {
-                downloadedPath = path;
-                downloadLoop.quit();
-            });
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::failed,
-                             [&downloadError, &downloadLoop](const QString &message) {
-                downloadError = message;
-                downloadLoop.quit();
-            });
-            downloader.start(QUrl(githubResult.downloadUrl), githubResult.sha256,
-                             std::filesystem::path(target.toUtf8().constData()));
-            if (downloader.isRunning()) downloadLoop.exec();
-            errorStream << '\n';
-            if (downloadedPath.isEmpty()) {
-                errorStream << "error: " << downloadError << '\n';
-                return 1;
-            }
-            pacsmith::ImportOptions options;
-            options.version = githubResult.detectedVersion;
-            options.githubAssetRegex = assetRegex;
-            options.githubIncludePrereleases = prerelease;
-            options.acquisition.kind = pacsmith::AcquisitionKind::GitHubRelease;
-            options.acquisition.canonicalIdentity = QStringLiteral("github:%1/%2")
-                .arg(probe.update.githubOwner, probe.update.githubRepository);
-            options.acquisition.originalUrl = githubResult.downloadUrl;
-            options.acquisition.githubOwner = probe.update.githubOwner;
-            options.acquisition.githubRepository = probe.update.githubRepository;
-            options.acquisition.githubReleaseId = githubResult.releaseId;
-            options.acquisition.githubPrerelease = githubResult.prerelease;
-            options.acquisition.githubAssetId = githubResult.assetId;
-            options.acquisition.githubTag = githubResult.tag;
-            options.acquisition.githubAssetName = githubResult.filename;
-            options.acquisition.publisherDigest = githubResult.publisherDigest;
             QString importError;
-            const auto imported = library.importSource(
-                std::filesystem::path(downloadedPath.toUtf8().constData()), options, &importError);
-            static_cast<void>(QFile::remove(downloadedPath));
+            const auto imported = library.importGitHub(remote, assetRegex, prerelease, {},
+                                                       &importError);
             if (!imported) {
                 errorStream << "error: " << importError << '\n';
                 return 1;
             }
-            out << QString::fromUtf8(library.releasePath(imported->project.id, imported->releaseId).string().c_str()) << '\n';
+            out << QString::fromUtf8(library.releasePath(imported->imported.project.id,
+                                                         imported->imported.releaseId)
+                                         .string().c_str()) << '\n';
             return 0;
         }
         if (remote.isValid() && remote.scheme() == QStringLiteral("https")) {
@@ -678,47 +483,13 @@ int main(int argc, char *argv[]) {
                 errorStream << "error: direct URL imports do not accept GitHub asset options\n";
                 return 1;
             }
-            const auto filename = QFileInfo(remote.path()).fileName().isEmpty()
-                ? QStringLiteral("vendor-artifact") : QFileInfo(remote.path()).fileName();
-            const auto target = pacsmith::defaultDownloadPath(
-                pacsmith::PkgbuildGenerator::sanitizePackageName(QFileInfo(filename).completeBaseName()),
-                QStringLiteral("direct"), filename);
-            pacsmith::DebDownloadService downloader;
-            QString downloadedPath;
-            QString downloadError;
-            QEventLoop downloadLoop;
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::finished,
-                             [&downloadedPath, &downloadLoop](const QString &path) {
-                downloadedPath = path;
-                downloadLoop.quit();
-            });
-            QObject::connect(&downloader, &pacsmith::DebDownloadService::failed,
-                             [&downloadError, &downloadLoop](const QString &message) {
-                downloadError = message;
-                downloadLoop.quit();
-            });
-            downloader.start(remote, {}, std::filesystem::path(target.toUtf8().constData()));
-            if (downloader.isRunning()) downloadLoop.exec();
-            if (downloadedPath.isEmpty()) {
-                errorStream << "error: " << downloadError << '\n';
-                return 1;
-            }
-            pacsmith::ImportOptions options;
-            options.acquisition.kind = pacsmith::AcquisitionKind::DirectUrl;
-            options.acquisition.canonicalIdentity =
-                remote.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment).toString();
-            options.acquisition.originalUrl = remote.toString();
             QString importError;
-            const auto imported = library.importSource(
-                std::filesystem::path(downloadedPath.toUtf8().constData()), options, &importError);
-            static_cast<void>(QFile::remove(downloadedPath));
+            const auto imported = library.importRemoteUrl(remote, {}, {}, {}, &importError);
             if (!imported) {
                 errorStream << "error: " << importError << '\n';
                 return 1;
             }
-            out << QString::fromUtf8(
-                       library.releasePath(imported->project.id, imported->releaseId).string().c_str())
-                << '\n';
+            out << imported->project.id << '\t' << imported->releaseId << '\n';
             return 0;
         }
         if (arguments.size() != 3) {
@@ -750,17 +521,34 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     if (command == QStringLiteral("check") && arguments.size() == 3 && arguments.at(2) == QStringLiteral("--all")) {
-        const auto batch = pacsmith::UpdateCheckRunner::runAll(library, errorStream);
-        for (const auto &result : batch.checks) {
-            if (result.prepared) {
-                out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
-            }
-            if (result.built) {
-                out << result.projectId << "\tbuilt\t" << result.detectedVersion << '\n';
-            }
-            out << result.projectId << '\t' << result.status << '\t' << result.message << '\n';
+        QString error;
+        const auto started = library.startUpdateCheck({}, false, &error);
+        if (!started) {
+            errorStream << "error: " << error << '\n';
+            return 1;
         }
-        return batch.exitCode;
+        const auto job = library.waitForJob(started->id, &error);
+        const auto log = library.jobLog(started->id, nullptr);
+        if (!log.isEmpty()) errorStream << log;
+        if (!job || job->status != QStringLiteral("succeeded")) {
+            errorStream << "error: " << (!error.isEmpty() ? error : job ? job->error
+                                                                    : QStringLiteral("update checks failed")) << '\n';
+            return 1;
+        }
+        for (const auto &value : job->result.value(QStringLiteral("checks")).toArray()) {
+            const auto checked = value.toObject();
+            const auto projectId = checked.value(QStringLiteral("project_id")).toString();
+            const auto version = checked.value(QStringLiteral("detected_version")).toString();
+            if (checked.value(QStringLiteral("prepared")).toBool()) {
+                out << projectId << "\tprepared\t" << version << '\n';
+            }
+            if (checked.value(QStringLiteral("built")).toBool()) {
+                out << projectId << "\tbuilt\t" << version << '\n';
+            }
+            out << projectId << '\t' << checked.value(QStringLiteral("status")).toString()
+                << '\t' << checked.value(QStringLiteral("message")).toString() << '\n';
+        }
+        return job->result.value(QStringLiteral("failed")).toInt() == 0 ? 0 : 1;
     }
     if (arguments.size() < 3) {
         errorStream << "error: " << command << " requires a project ID or name\n";

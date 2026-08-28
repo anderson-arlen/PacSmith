@@ -18,8 +18,12 @@ import (
 
 const (
 	KindImport                 = "import"
+	KindGitHubImport           = "github_import"
+	KindRemoteImport           = "remote_import"
+	KindRepositoryImport       = "repository_import"
 	KindBuild                  = "build"
 	KindUpdateCheck            = "update_check"
+	KindUpdatePrepare          = "update_prepare"
 	KindReanalyze              = "reanalyze"
 	KindRepositoryDistribution = "repository_distribution"
 )
@@ -27,22 +31,40 @@ const (
 var ErrNotFound = errors.New("job not found")
 
 type Job struct {
-	ID         string          `json:"id"`
-	Kind       string          `json:"kind"`
-	Status     string          `json:"status"`
-	ProjectID  string          `json:"project_id,omitempty"`
-	ProjectName string         `json:"project_name,omitempty"`
-	PackageName string         `json:"package_name,omitempty"`
-	ReleaseID  string          `json:"release_id,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	LogOffset  int64           `json:"log_offset"`
-	CreatedAt  string          `json:"created_at"`
-	StartedAt  string          `json:"started_at,omitempty"`
-	FinishedAt string          `json:"finished_at,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
+	ID          string          `json:"id"`
+	Kind        string          `json:"kind"`
+	Status      string          `json:"status"`
+	ProjectID   string          `json:"project_id,omitempty"`
+	ProjectName string          `json:"project_name,omitempty"`
+	PackageName string          `json:"package_name,omitempty"`
+	ReleaseID   string          `json:"release_id,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	LogOffset   int64           `json:"log_offset"`
+	CreatedAt   string          `json:"created_at"`
+	StartedAt   string          `json:"started_at,omitempty"`
+	FinishedAt  string          `json:"finished_at,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	Message     string          `json:"message,omitempty"`
+	Current     int             `json:"current,omitempty"`
+	Total       int             `json:"total,omitempty"`
+	FailedItems int             `json:"failed_items,omitempty"`
+	PausedItems int             `json:"paused_items,omitempty"`
 }
 
-type Handler func(ctx context.Context, job Job, payload json.RawMessage, log func(string)) (json.RawMessage, error)
+type Progress struct {
+	Message     string
+	ProjectID   string
+	ReleaseID   string
+	ProjectName string
+	PackageName string
+	Current     int
+	Total       int
+	FailedItems int
+	PausedItems int
+}
+
+type Handler func(ctx context.Context, job Job, payload json.RawMessage, log func(string),
+	progress func(Progress)) (json.RawMessage, error)
 
 type Manager struct {
 	DB            *sqlite.DB
@@ -96,13 +118,16 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) Enqueue(ctx context.Context, kind string, payload any, projectID, releaseID string) (Job, error) {
-	if kind == KindUpdateCheck || kind == KindRepositoryDistribution {
+	if kind == KindUpdateCheck || kind == KindUpdatePrepare || kind == KindRepositoryDistribution {
 		active, err := m.DB.Queries.ListActiveJobsByKind(ctx, kind)
 		if err != nil {
 			return Job{}, err
 		}
 		for _, existing := range active {
-			if kind == KindUpdateCheck && existing.ReleaseID.String == releaseID && releaseID != "" {
+			if kind == KindUpdateCheck && existing.ReleaseID.String == releaseID {
+				return jobFromRow(existing), nil
+			}
+			if kind == KindUpdatePrepare && existing.ReleaseID.String == releaseID {
 				return jobFromRow(existing), nil
 			}
 			if kind == KindRepositoryDistribution && existing.ProjectID.String == projectID && projectID != "" {
@@ -282,10 +307,33 @@ func (m *Manager) run(ctx context.Context, id string) {
 		_ = m.appendLog(id, text)
 	}
 	job := jobFromRow(row)
+	lastProgress := Progress{}
+	hasProgress := false
+	progressFn := func(progress Progress) {
+		lastProgress = progress
+		hasProgress = true
+		update := job
+		update.Status = "running"
+		update.Message = progress.Message
+		update.Current = progress.Current
+		update.Total = progress.Total
+		update.FailedItems = progress.FailedItems
+		update.PausedItems = progress.PausedItems
+		if progress.ProjectID != "" {
+			update.ProjectID = progress.ProjectID
+		}
+		if progress.ReleaseID != "" {
+			update.ReleaseID = progress.ReleaseID
+		}
+		update.ProjectName = progress.ProjectName
+		update.PackageName = progress.PackageName
+		update.LogOffset = m.logSize(id)
+		m.notify(update)
+	}
 	var result json.RawMessage
 	runErr := error(nil)
 	if m.Handle != nil {
-		result, runErr = m.Handle(jobCtx, job, json.RawMessage(row.PayloadJson), logFn)
+		result, runErr = m.Handle(jobCtx, job, json.RawMessage(row.PayloadJson), logFn, progressFn)
 	}
 	if result != nil {
 		m.mu.Lock()
@@ -316,7 +364,18 @@ func (m *Manager) run(ctx context.Context, id string) {
 		ID:         row.ID,
 	})
 	if updateErr == nil {
-		m.notify(jobFromRow(updated))
+		finishedJob := jobFromRow(updated)
+		if hasProgress {
+			finishedJob.Message = lastProgress.Message
+			finishedJob.Current = lastProgress.Current
+			finishedJob.Total = lastProgress.Total
+			finishedJob.FailedItems = lastProgress.FailedItems
+			finishedJob.PausedItems = lastProgress.PausedItems
+		}
+		if runErr != nil {
+			finishedJob.Message = errText
+		}
+		m.notify(finishedJob)
 	}
 }
 

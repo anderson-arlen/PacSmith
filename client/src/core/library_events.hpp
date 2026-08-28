@@ -22,6 +22,11 @@ struct ServerEvent {
     QString jobId;
     QString jobKind;
     QString jobStatus;
+    QString jobMessage;
+    int jobCurrent{0};
+    int jobTotal{0};
+    int jobFailedItems{0};
+    int jobPausedItems{0};
 };
 
 [[nodiscard]] QString jobStatusMessage(const ServerEvent &event);

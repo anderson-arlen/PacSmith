@@ -18,7 +18,7 @@ func TestManagerNotifiesJobTransitions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	manager, err := New(db, filepath.Join(t.TempDir(), "jobs"),
-		func(context.Context, Job, json.RawMessage, func(string)) (json.RawMessage, error) {
+		func(context.Context, Job, json.RawMessage, func(string), func(Progress)) (json.RawMessage, error) {
 			return nil, nil
 		})
 	if err != nil {
@@ -59,7 +59,7 @@ func TestRepositoryDistributionJobsAreDeduplicatedByProject(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	manager, err := New(db, filepath.Join(t.TempDir(), "jobs"),
-		func(context.Context, Job, json.RawMessage, func(string)) (json.RawMessage, error) {
+		func(context.Context, Job, json.RawMessage, func(string), func(Progress)) (json.RawMessage, error) {
 			close(started)
 			<-release
 			return nil, nil
@@ -95,4 +95,38 @@ func TestRepositoryDistributionJobsAreDeduplicatedByProject(t *testing.T) {
 		t.Fatalf("duplicate repository job ID = %q, want %q", second.ID, first.ID)
 	}
 	close(release)
+}
+
+func TestManagerPublishesStructuredProgress(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager, err := New(db, filepath.Join(t.TempDir(), "jobs"),
+		func(_ context.Context, _ Job, _ json.RawMessage, _ func(string), progress func(Progress)) (json.RawMessage, error) {
+			progress(Progress{Message: "Checking Brave", ProjectID: "brave", Current: 3, Total: 9})
+			return nil, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transitions := make(chan Job, 4)
+	manager.SetObserver(func(job Job) { transitions <- job })
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Stop)
+	if _, err := manager.Enqueue(ctx, KindUpdateCheck, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		<-transitions
+	}
+	progress := <-transitions
+	if progress.Status != "running" || progress.Message != "Checking Brave" ||
+		progress.ProjectID != "brave" || progress.Current != 3 || progress.Total != 9 {
+		t.Fatalf("progress event %+v", progress)
+	}
 }

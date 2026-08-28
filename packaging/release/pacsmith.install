@@ -1,0 +1,20 @@
+post_upgrade() {
+  local manager runtime uid user target
+
+  for manager in /run/user/[0-9]*/systemd/private; do
+    [[ -S "$manager" ]] || continue
+    runtime="${manager%/systemd/private}"
+    uid="${runtime##*/}"
+    user="$(/usr/bin/getent passwd "$uid" | /usr/bin/cut -d: -f1)"
+    [[ -n "$user" ]] || continue
+    target="${user}@.host"
+
+    if ! /usr/bin/systemctl --user --machine="$target" daemon-reload; then
+      printf 'warning: could not reload the systemd user manager for %s\n' "$user" >&2
+      continue
+    fi
+    if ! /usr/bin/systemctl --user --machine="$target" try-restart pacsmithd.service; then
+      printf 'warning: could not restart the running pacsmithd.service for %s\n' "$user" >&2
+    fi
+  done
+}

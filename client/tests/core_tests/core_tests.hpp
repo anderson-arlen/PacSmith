@@ -9,11 +9,7 @@ private slots:
     void parsesChunkedServerEvents();
     void ignoresMalformedServerEventsAndHeartbeats();
     void describesUnnamedServerJobsWithoutOpaqueIds();
-    void comparesDirectUrlValidators();
-    void schedulesDirectUrlFullContentChecks();
     void persistsDirectUrlCheckState();
-    void parsesRemoteGitHubImportUrls();
-    void rejectsUnsafeRemoteGitHubImportUrls();
     void parsesControlFields();
     void parsesMultilineControlFields();
     void prefersApplicationNameOverPackageDescription();
@@ -26,11 +22,8 @@ private slots:
     void validatesLifecycleScriptsAndContentAcknowledgement();
     void parsesAptSourceFormats();
     void comparesDebianVersions();
-    void parsesAptRepositoryMetadata();
     void extractsPayloadRpmRepositoryEvidence();
-    void parsesRpmRepositoryMetadata();
     void comparesRpmVersions();
-    void verifiesPinnedAptRepositorySignatures();
     void validatesRepositorySigningKeyUrls();
     void serializesImportedSigningKeyContents();
     void tracksContentSpecificPayloadDecisions();
@@ -49,10 +42,9 @@ private slots:
     void writesLoginAutostartDesktopEntry();
     void roundTripsBackgroundUpdateCheckActivity();
     void recountsAvailableUpdatesFromInstalledState();
-    void buildsSystemdCalendarSchedules();
-    void reportsOverdueBackgroundUpdateChecks();
     void persistsMultipleReleases();
     void selectsActiveTrackingRelease();
+    void ignoresStaleClonedUpdateFailure();
     void reportsInstalledUpdateStatus();
     void deletingUpdateReleaseClearsAvailableStatus();
     void dropsUnbuiltIntermediateUpdates();
@@ -66,8 +58,6 @@ private slots:
     void buildsNonInteractivePacmanArgumentsSafely();
     void buildsRebuildableMakepkgArguments();
     void validatesInstallSessionProtocol();
-    void encryptsCredentialsWithAge();
-    void usesInjectedGithubTokenWhenAgeIsLocked();
     void handlesProjectPaths();
     void detectsManualPkgbuildEdits();
     void roundTripsGuidedAndCustomPkgbuilds();
@@ -94,7 +84,6 @@ private slots:
     void acceptsStandardExternalAppImageRuntimeSymlinks();
     void acceptsExecutableSymlinkAppRun();
     void flagsAppRunFilenameDispatchForReview();
-    void selectsGitHubReleaseAssets();
     void sanitizesPackageNames_data();
     void sanitizesPackageNames();
     void translatesVersions_data();

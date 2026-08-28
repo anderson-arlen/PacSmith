@@ -6,6 +6,7 @@
 #include "core/model.hpp"
 #include "core/app_settings.hpp"
 #include "core/project_store/project_store.hpp"
+#include "core/update_source.hpp"
 
 #include <QJsonObject>
 #include <QList>
@@ -35,6 +36,11 @@ struct CredentialStatus {
     QString name;
     bool configured{false};
     QString backend;
+};
+
+struct GitHubImportResult {
+    ImportResult imported;
+    UpdateCheckResult source;
 };
 
 struct ListenSettings {
@@ -117,6 +123,22 @@ public:
     [[nodiscard]] std::optional<ImportResult> importSource(
         const QString &sourcePath, const ImportOptions &options = {},
         QString *error = nullptr) const;
+    [[nodiscard]] UpdateCheckResult resolveGitHub(
+        const QUrl &url, const QString &assetRegex = {}, bool includePrereleases = false,
+        const PackageRelease *current = nullptr, QString *error = nullptr) const;
+    [[nodiscard]] std::optional<QJsonObject> inspectRepositoryKey(
+        const QUrl &url, QString *error = nullptr) const;
+    [[nodiscard]] std::optional<GitHubImportResult> importGitHub(
+        const QUrl &url, const QString &assetRegex = {}, bool includePrereleases = false,
+        const QString &existingProjectId = {}, QString *error = nullptr) const;
+    [[nodiscard]] std::optional<ImportResult> importRemoteUrl(
+        const QUrl &url, const QString &existingProjectId = {},
+        const QString &version = {}, const QString &expectedSha256 = {},
+        QString *error = nullptr) const;
+    [[nodiscard]] std::optional<ImportResult> importRepository(
+        const UpdateConfiguration &update, const QByteArray &trustedSigningKey,
+        const QString &signingKeySource, const QString &pinnedFingerprint,
+        QString *error = nullptr) const;
     [[nodiscard]] std::optional<ImportResult> importSource(
         const std::filesystem::path &sourcePath, const ImportOptions &options = {},
         QString *error = nullptr) const;
@@ -168,6 +190,11 @@ public:
     [[nodiscard]] std::optional<JobStatus> startBuild(const QString &releaseId,
                                                       QString *error = nullptr,
                                                       bool automatic = false) const;
+    [[nodiscard]] std::optional<JobStatus> startUpdateCheck(
+        const QString &releaseId = {}, bool force = false,
+        QString *error = nullptr) const;
+    [[nodiscard]] std::optional<JobStatus> startUpdatePreparation(
+        const QString &releaseId, QString *error = nullptr) const;
     [[nodiscard]] std::optional<JobStatus> getJob(const QString &jobId,
                                                   QString *error = nullptr) const;
     [[nodiscard]] QList<JobStatus> activeJobs(const QString &kind,

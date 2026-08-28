@@ -41,6 +41,37 @@ void MainWindow::handleServerEvent(const ServerEvent &event) {
     const QSet<QString> topics(event.topics.cbegin(), event.topics.cend());
     emit serverTopicsChanged(event.topics);
     updateBuildJobStatus(event);
+    if (event.jobKind == QStringLiteral("update_check")) {
+        const bool active = event.jobStatus == QStringLiteral("queued") ||
+                            event.jobStatus == QStringLiteral("running");
+        const bool failed = event.jobStatus == QStringLiteral("failed") ||
+                            event.jobStatus == QStringLiteral("interrupted") ||
+                            event.jobFailedItems > 0 || event.jobPausedItems > 0;
+        const auto message = jobStatusMessage(event);
+        if (active) {
+            if (event.jobStatus == QStringLiteral("queued")) {
+                updateCheckErrorDetails_.clear();
+                updateCheckErrorsButton_->setVisible(false);
+            }
+            publishUpdateCheckActivity(true, event.projectId,
+                                       !event.projectName.isEmpty() ? event.projectName
+                                                                    : event.packageName,
+                                       message);
+        } else {
+            publishUpdateCheckActivity(false);
+            if (failed && !message.isEmpty()) {
+                updateCheckErrorDetails_ = message;
+                const int count = std::max(1, event.jobFailedItems + event.jobPausedItems);
+                updateCheckErrorsButton_->setText(count == 1 ? QStringLiteral("1 Update Issue")
+                                                              : QStringLiteral("%1 Update Issues").arg(count));
+                updateCheckErrorsButton_->setVisible(true);
+            } else if (event.jobStatus == QStringLiteral("succeeded")) {
+                updateCheckErrorDetails_.clear();
+                updateCheckErrorsButton_->setVisible(false);
+            }
+        }
+        emit updateCheckActivityChanged(message, active, failed);
+    }
     if (!event.jobId.isEmpty() && !event.jobStatus.isEmpty()) {
         if (!updateRepositoryDistributionStatus(event)) {
             const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
@@ -171,6 +202,10 @@ bool MainWindow::updateRepositoryDistributionStatus(const ServerEvent &event) {
 }
 
 void MainWindow::runEventRefresh() {
+    if (updateConfigurationSaveInFlight_) {
+        eventRefreshAgain_ = true;
+        return;
+    }
     if (eventRefreshInFlight_) {
         eventRefreshAgain_ = true;
         return;
@@ -200,13 +235,24 @@ void MainWindow::runEventRefresh() {
         }
     });
     const auto config = library_.config();
-    watcher->setFuture(QtConcurrent::run([config, topics, projectIds, fullRefresh] {
+    const auto selectedProjectId = project_ ? project_->id : QString{};
+    watcher->setFuture(QtConcurrent::run([config, topics, projectIds, fullRefresh,
+                                          selectedProjectId] {
         EventRefreshResult result;
         result.topics = topics;
         result.fullRefresh = fullRefresh;
         LibraryClient client(config);
         if (fullRefresh) {
             result.projects = client.list(&result.error);
+            const auto selected = std::find_if(
+                result.projects.begin(), result.projects.end(),
+                [&selectedProjectId](const Project &candidate) {
+                    return candidate.id == selectedProjectId;
+                });
+            if (result.error.isEmpty() && selected != result.projects.end()) {
+                auto loaded = client.load(selectedProjectId, &result.error);
+                if (loaded) *selected = std::move(*loaded);
+            }
             return result;
         }
         QStringList errors;
@@ -232,6 +278,21 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
                                     const bool fullRefresh) {
     if (!error.isEmpty()) {
         statusBar()->showMessage(error, 8000);
+        return;
+    }
+    const bool containsSavingProject = updateConfigurationSaveInFlight_ &&
+        (fullRefresh || missingProjectIds.contains(updateConfigurationSaveProjectId_) ||
+         std::any_of(projects.cbegin(), projects.cend(), [this](const Project &candidate) {
+             return candidate.id == updateConfigurationSaveProjectId_;
+         }));
+    if (containsSavingProject) {
+        pendingEventTopics_.unite(topics);
+        if (fullRefresh) {
+            pendingFullEventRefresh_ = true;
+        } else {
+            pendingEventProjectIds_.insert(updateConfigurationSaveProjectId_);
+        }
+        eventRefreshAgain_ = true;
         return;
     }
     auto removedIds = missingProjectIds;
@@ -262,7 +323,8 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
         projectStale_ = true;
         showExternalChange(deleted);
     }
-    const bool preserveSelected = projectStale_ || ((deleted || externalChange) && hasDraft);
+    const bool preserveSelected = projectStale_ ||
+        (hasDraft && (fullRefresh || deleted || externalChange));
     const auto updateState = BackgroundUpdateStateStore::load();
     QSignalBlocker blocker(projectList_);
     for (const auto &projectId : removedIds) {
@@ -274,7 +336,7 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
         const auto cached = projectCache_.constFind(candidate.id);
         const bool listItemChanged = cached == projectCache_.cend() ||
                                      projectListStateDiffers(cached.value(), candidate);
-        if (fullRefresh && project_ && project_->id == candidate.id &&
+        if (fullRefresh && preserveSelected && project_ && project_->id == candidate.id &&
             hydratedProjectIds_.contains(candidate.id)) {
             auto hydrated = *project_;
             hydrated.installedVersion = candidate.installedVersion;
@@ -283,7 +345,8 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
             projectCache_.insert(candidate.id, std::move(hydrated));
         } else {
             projectCache_.insert(candidate.id, candidate);
-            if (!fullRefresh) hydratedProjectIds_.insert(candidate.id);
+            if (candidate.summaryOnly) hydratedProjectIds_.remove(candidate.id);
+            else hydratedProjectIds_.insert(candidate.id);
         }
         if (listItemChanged) updateProjectListItem(candidate, updateState);
     }
@@ -441,6 +504,15 @@ bool MainWindow::hasUnsavedProjectDraft() const {
 }
 
 bool MainWindow::ensureCurrentProjectWritable() {
+    if (project_ && project_->summaryOnly) {
+        const auto projectId = project_->id;
+        hydratedProjectIds_.remove(projectId);
+        loadProjectInteractively(projectId);
+        QMessageBox::warning(
+            this, QStringLiteral("Loading package"),
+            QStringLiteral("PacSmith is loading the complete package before changes can be saved."));
+        return false;
+    }
     if (!projectStale_) return true;
     QMessageBox::warning(
         this, QStringLiteral("Reload required"),

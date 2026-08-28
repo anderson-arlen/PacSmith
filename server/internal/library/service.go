@@ -69,12 +69,30 @@ func (s *Service) ListProjectSummaries(ctx context.Context) ([]Project, error) {
 		}
 		for _, release := range releases {
 			summary := releaseSummary(release)
+			attachReleaseUpdateHealthSummary(&summary, release.BodyJson)
 			attachReleaseIconSummary(&summary, release.BodyJson, iconArtifacts[release.ID])
 			project.Releases = append(project.Releases, summary)
 		}
 		out = append(out, project)
 	}
 	return out, nil
+}
+
+func attachReleaseUpdateHealthSummary(release *Release, bodyJSON string) {
+	var body struct {
+		Update map[string]any `json:"update"`
+	}
+	if json.Unmarshal([]byte(bodyJSON), &body) != nil || len(body.Update) == 0 {
+		return
+	}
+	update := map[string]any{}
+	for _, key := range []string{"strategy", "lastChecked", "lastCheckMessage", "lastCheckFailed",
+		"lastAutomaticStatus", "lastAutomaticMessage"} {
+		if value, ok := body.Update[key]; ok {
+			update[key] = value
+		}
+	}
+	release.Document["update"] = update
 }
 
 func attachReleaseIconSummary(release *Release, bodyJSON, artifactID string) {

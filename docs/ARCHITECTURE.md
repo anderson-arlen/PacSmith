@@ -10,24 +10,24 @@ The client/server rewrite is in place for library ownership. `pacsmithd` stores 
 
 PacSmith has no built-in LLM provider integration. An external harness owns conversation, model authentication, history, screenshots/files, and web access. PacSmith exposes its existing domain and API through a portable Agent Plugin containing `pacsmith mcp` and its Agent Skill.
 
-Still on the C++ client, by design: libalpm installed-package queries and `pkexec pacman`. Still not daemon-owned: scheduled upstream update polling (CLI/GUI `check` still uses in-process APT/RPM/GitHub helpers). Physical testing remains for the GUI, polkit install, linger plus the systemd user unit, Secret Service, and mTLS fingerprint enrollment UX.
+Still on the C++ client, by design: libalpm installed-package queries, explicit local `pkexec pacman`, file selection/upload, and interactive signing-key fingerprint review. All upstream polling, authenticated downloads, signature/checksum verification, artifact inspection, preparation, and builds are daemon-owned. Physical testing remains for the GUI, polkit install, linger plus the systemd user unit, Secret Service, and mTLS fingerprint enrollment UX.
 
 ## Repository layout
 
 ```text
-client/     C++/Qt GUI, CLI, and the transitional in-process core
+client/     C++/Qt GUI, CLI, HTTP protocol types, and host-local operations
 server/     Go pacsmithd module (library owner)
 docs/       architecture and implementation plan
 packaging/  whole-product release packaging
 ```
 
-The two trees are separate programs with separate toolchains. They share one HTTP API, not a source tree. `pacsmith_core` remains under `client/` until library-side work has been ported to `server/`; new library features go to `pacsmithd`, not back into that C++ core.
+The two trees are separate programs with separate toolchains. They share one HTTP API, not a source tree. `pacsmith_core` contains protocol models, presentation helpers, and host-local behavior; new library features go to `pacsmithd`, not back into the C++ client.
 
 ## Ownership boundary
 
 `pacsmithd` owns the PacSmith library.
 
-The GUI, CLI, and MCP server MUST NOT directly read or write library storage. Persisted library operations always go through `pacsmithd`, including projects, releases, source and update configuration, update-check evidence, dependency mappings, artifact ingestion, package inspection, preparation, builds, editable build files, jobs, server-side credentials, client registration, and client authorization/revocation. The normal client-side update checker may contact the configured upstream source, but records discoveries and imports artifacts only through the authenticated PacSmith API.
+The GUI, CLI, and MCP server MUST NOT directly read or write library storage or contact package-update sources on the library's behalf. Persisted library operations always go through `pacsmithd`, including projects, releases, source and update configuration, upstream polling, update-check evidence, dependency mappings, remote downloads, artifact ingestion, package inspection, preparation, builds, editable build files, jobs, server-side credentials, client registration, and client authorization/revocation.
 
 There is no in-process local shortcut that invokes a second implementation of library logic. Local and remote management are the same product: the same HTTP API, handlers, authorization/service layer, storage, and artifact-transfer path.
 
@@ -100,7 +100,7 @@ Do not invent a separate local RPC protocol.
 
 Artifacts are part of the API. Server filesystem paths are never given to clients. Uploads and downloads are streamed; large files are not loaded fully into RAM.
 
-Remote artifact creation is also part of the MCP domain surface. `import_github_release` accepts a GitHub repository, tagged release, or exact release-asset URL and uses PacSmith's GitHub selector, downloader, digest verification, and normal import pipeline. `import_direct_url` applies the same owned acquisition pipeline to another first-party HTTPS URL and can target an existing project with an explicit version and publisher SHA-256. `import_repository_signing_key` is the GUI Fetch & Review path for a vendor APT/RPM signing key: PacSmith downloads the first-party OpenPGP key, inspects its fingerprint, elicits confirmation, and pins it. Agents never need to create a local staging file with an external downloader. Ambiguous GitHub inputs return visible asset names and require an asset rule that selects exactly one non-sidecar artifact.
+Remote artifact creation is also part of the MCP domain surface. `import_github_release` accepts a GitHub repository, tagged release, or exact release-asset URL and uses PacSmith's GitHub selector, downloader, digest verification, and normal import pipeline. `import_direct_url` applies the same owned acquisition pipeline to another first-party HTTPS URL and can target an existing project with an explicit version and publisher SHA-256. `import_repository_signing_key` is marked destructive for host authorization, then PacSmith downloads the first-party OpenPGP key, validates and records its fingerprint, and pins it. Agents never need to create a local staging file with an external downloader. Ambiguous GitHub inputs return visible asset names and require an asset rule that selects exactly one non-sidecar artifact.
 
 Manual monitoring treats the person as the release-discovery source. The GUI's Versions tab accepts a local artifact or direct HTTPS URL; MCP provides the corresponding `import_artifact` and `import_direct_url` operations. Both paths can target an existing project, override a missing vendor version, and require an optional publisher SHA-256. A URL is acquisition provenance for that release, not an update-discovery strategy, so the project remains on Manual monitoring. After that boundary, manual releases use the ordinary immutable artifact inspection, configuration carry-forward, review, build, retention, and publication pipeline.
 
@@ -171,7 +171,7 @@ Repository channel existence is server-owned: unstable always exists, while stab
 
 ## Jobs and background work
 
-Long-running library work (update checks, downloads, inspection, preparation, and builds) uses a modest server-side job model. A command may return `202 Accepted` with a `job_id`. Job status and incremental logs remain cursor-polled over HTTP. Authenticated clients keep an SSE connection to `GET /api/v1/events` for metadata-only invalidations, then fetch current state through the ordinary API. Package scripts in evidence are untrusted.
+Long-running library work (update checks, downloads, inspection, preparation, and builds) uses a modest server-side job model. A command may return `202 Accepted` with a `job_id`. Job status and incremental logs remain cursor-polled over HTTP. Authenticated clients keep an SSE connection to `GET /api/v1/events` for metadata invalidations and structured live job progress. Update events identify the current project, release, phase, batch position, failed-check count, paused-automation count, and human-readable outcome so every client can render the same daemon-owned work without implementing it locally; persisted state is still refetched through the ordinary API. Package scripts in evidence are untrusted.
 
 On daemon restart: queued work may resume where sensible; actively running jobs generally become interrupted/failed; update polling is rescheduled. Do not magically resume an interrupted `makepkg` unless an operation is explicitly designed for it. Simultaneous clients must not race duplicate update checks.
 
@@ -212,11 +212,11 @@ The daemon must restart and do background work without an encryption passphrase.
 
 `SecretStore` supports:
 
-- **Secret Service** (preferred when a usable non-interactive freedesktop Secret Service is available)
+- **Secret Service** (preferred when a temporary write/delete probe succeeds without a prompt)
 - **Local protected file** (`0700` / `0600`) as an explicit Unix-account fallback
 - **Environment** as a read-only source for injected deployment secrets
 
-The selected backend is persisted. If Secret Service later becomes unavailable, secret operations fail clearly. There is no silent plaintext downgrade. Changing backend is an explicit administrative action.
+On first initialization, failure of that non-interactive Secret Service probe selects the protected file store. The selected backend is then persisted. If Secret Service later becomes unavailable, secret operations fail clearly; there is no silent plaintext downgrade after credentials may already exist. Changing backend is an explicit administrative action.
 
 Clients may set, replace, delete, and query **status** of named credentials (`configured`, `backend`). There is no API that returns stored secret values.
 
@@ -299,7 +299,7 @@ As the library port proceeds, tables should include approximately: `projects`, `
 
 ## Source analysis and trust
 
-This behavior currently lives in C++ (`SourceAnalyzer`, `DebAnalyzer`, `RpmAnalyzer`, `PathSafety`, `PayloadInspector`, `LifecycleValidator`, repository trust helpers). It must be preserved or improved when ported to Go. Do not simplify away the checks.
+The authoritative implementation lives in the Go daemon's inspection, recipe, and update-check services. Some C++ equivalents remain for protocol/presentation compatibility and regression fixtures, but clients do not run them as a library shortcut. Do not simplify away the checks.
 
 `SourceAnalyzer` detects type from bytes. ELF magic selects the standalone executable analyzer; an `ar` archive is passed to strict DEB validation; RPM lead magic selects the bounded RPM header parser; other supported containers are opened through libarchive and classified as an Arch package only when a valid `.PKGINFO` is present. File extensions are hints, not the trust decision.
 
@@ -333,13 +333,13 @@ Guided builds use `makepkg --force --nodeps`: those recipes unpack prebuilt vend
 
 Persisted strategies: Manual, Direct URL, APT repository, RPM repository, GitHub Releases. Acquisition identity is immutable release provenance and is never repurposed as a future-download setting.
 
-Direct URL checks are artifact-format agnostic. PacSmith first probes HTTP metadata and compares ETag, Last-Modified plus Content-Length, or explicitly supported object-generation headers. A stable validator avoids downloading the artifact. A changed or unavailable validator triggers a complete download when the project’s full-content interval permits it; SHA-256, never the validator, decides whether the bytes are new. Servers without usable validators are identified in the GUI, where full-content checks can be scheduled daily, weekly, monthly, or manually. A manually requested check always runs immediately. Changed bytes then enter the ordinary untrusted-artifact inspection path to establish their package type and version.
+Direct URL checks are artifact-format agnostic and run inside `pacsmithd`. The daemon first probes HTTP metadata and compares ETag, Last-Modified plus Content-Length, or explicitly supported object-generation headers. A stable validator avoids downloading the artifact. A changed or unavailable validator triggers a complete download when the project’s full-content interval permits it; SHA-256, never the validator, decides whether the bytes are new. Servers without usable validators are identified in the GUI, where full-content checks can be scheduled daily, weekly, monthly, or manually. A manually requested check always runs immediately. Changed bytes then enter the daemon's ordinary untrusted-artifact inspection path to establish their package type and version.
 
-A signed APT or RPM repository may be the first acquisition source. Checks require a project-local public key and pinned signer fingerprint. APT verifies clear-signed `InRelease` or detached `Release.gpg` with `gpgv`, rejects a valid signature from any non-pinned key, selects Packages indexes only from the signed Release SHA-256 table, and caps response/decompression sizes. RPM checks verify `repodata/repomd.xml.asc`, the primary metadata checksum recorded in signed `repomd.xml`, and the package SHA-256 in primary metadata.
+A signed APT or RPM repository may be the first acquisition source. Checks require a project-local public key and pinned signer fingerprint. APT verifies clear-signed `InRelease` or detached `Release.gpg` with `gpgv`, rejects a valid signature from any non-pinned key, selects Packages indexes only from the signed Release SHA-256 table, and caps response/decompression sizes. RPM checks verify `repodata/repomd.xml.asc` and the primary metadata checksum recorded in signed `repomd.xml`. A package SHA-256 from primary metadata is used directly. For valid legacy `sha`/SHA-1 or SHA-512 package checksums, PacSmith downloads an available update during discovery, verifies the signed package checksum, and records the locally computed SHA-256 used by the rest of the artifact pipeline.
 
 GitHub uses the public REST API with an optional PAT. Drafts are ignored; prereleases are opt-in except when the user imported a tagged prerelease URL. A user-visible regular expression must full-match exactly one asset. When GitHub exposes a `sha256:` digest it is verified; otherwise the release is explicitly unsigned and PacSmith records the locally computed hash.
 
-In the GUI, discovery and preparation stay separate states. Automatic preparation is a library policy executed by `pacsmithd`, not a second client-side downloader.
+In the GUI, discovery and preparation stay separate states. `pacsmithd` owns the persistent daily/weekly schedule and can poll, discover, prepare, and perform a deterministic review-free build while no client is running. The GUI, CLI, and MCP submit or observe jobs and render their results; they do not implement alternate pollers or downloaders. An `ai` auto-build policy still pauses at evidence requiring an external harness, because harness profiles and interactive model authority are client-owned rather than daemon credentials.
 
 ## External agent integration
 
@@ -366,11 +366,11 @@ Tools are typed, domain-oriented projections of normal PacSmith operations. They
 
 Detailed payload inspection also stays behind this boundary. An MCP client selects an exact path from the release's immutable payload inventory; `pacsmithd` reads that member from its retained source artifact and returns bounded text or static ELF evidence plus file identity and archive metadata. The client receives evidence, not an extracted package or a path into server storage, so this works identically over a local socket and remote mTLS.
 
-Tool annotations describe read-only, destructive, idempotent, and open-world behavior. They are advisory. Custom PKGBUILD writes are routine because those recipes execute only inside the rootless Podman build environment. A central PacSmith permission policy requires MCP form elicitation for destructive project/release deletion, resetting a release through reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login autostart, remote listener/client trust, and credential changes. The client response must explicitly accept and set the confirmation field. A client without form elicitation fails closed and the user must use a compatible client or perform the operation directly through PacSmith.
+Tool annotations describe read-only, destructive, idempotent, and open-world behavior. The MCP host owns authorization and may remember an “always allow” decision. Destructive project/release deletion, reset reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login autostart, remote listener/client trust, and credential changes all carry `destructiveHint`. PacSmith does not add a second form-elicitation round trip after the host authorizes the tool. Custom PKGBUILD writes remain routine because those recipes execute only inside the rootless Podman build environment.
 
-Every mutating project and release tool input uses human-readable project/package names and release versions from `list_projects`. UUIDs remain available to read tools as stable lookup identifiers, but are not the sole target shown to a person in a harness preflight. Sensitive operations also use the server-verified names in PacSmith's elicitation prompt.
+Every mutating project and release tool input uses human-readable project/package names and release versions from `list_projects`. UUIDs remain available to read tools as stable lookup identifiers, but are not the sole target shown to a person in the host's permission prompt.
 
-Routine recipe edits do not trigger confirmation spam, including replacing a Custom PKGBUILD that can execute only in the rootless container runner. Deletion, trust/system changes, and published repository state retain the fail-closed confirmation boundary. PacSmith does not expose package installation or repository bootstrap/trust installation through MCP. The constrained `pacsmith install <project>` CLI is the host-local installation boundary: it accepts no arbitrary package path, resolves a retained PacSmith artifact, uses sudo in the current TTY by default, and supports explicit `--polkit` for graphical callers.
+Routine recipe edits do not trigger confirmation spam, including replacing a Custom PKGBUILD that can execute only in the rootless container runner. Deletion, trust/system changes, and published repository state are marked destructive for host authorization. PacSmith does not expose package installation or repository bootstrap/trust installation through MCP. The constrained `pacsmith install <project>` CLI is the host-local installation boundary: it accepts no arbitrary package path, resolves a retained PacSmith artifact, uses sudo in the current TTY by default, and supports explicit `--polkit` for graphical callers.
 
 Automatic preparation remains deterministic:
 
@@ -387,7 +387,7 @@ The per-project automatic-build policy controls what follows preparation. `Never
 
 The default install is the Arch package from GitHub releases (`PREFIX=/usr`). Executables use `$PREFIX/bin`. Desktop integration uses `$PREFIX/share/applications`. The daemon unit is a systemd user unit at `$PREFIX/share/systemd/user` (`/usr/lib/systemd/user` in the package) and is managed with `systemctl --user`. It runs as whichever account enables it; there is no dedicated `pacsmith` system user.
 
-`make install` is the development path: current-user scoped under `~/.local`, and it may enable `pacsmithd.service` for that user. It does not enable lingering.
+`make install` is the development path: current-user scoped under `~/.local`, and it restarts `pacsmithd.service` only when it is already running. The first local client launch enables and starts an inactive daemon. Arch package upgrades likewise restart active PacSmith user daemons without starting inactive ones. Neither path enables lingering.
 
 A headless library host enables lingering for the library-owning account, then the user unit, then `pacsmith server listen on` (or the GUI Library tab) to opt into HTTPS/mTLS. Remote clients do not run a local daemon. Encrypted home directories that are unavailable at boot will also block a lingering user manager until that home is unlocked. Headless linger usually has no Secret Service; first init should pin the file backend.
 

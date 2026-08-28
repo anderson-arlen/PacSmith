@@ -1,7 +1,6 @@
 #include "core/model.hpp"
 
-#include "core/apt_repository.hpp"
-#include "core/rpm_repository.hpp"
+#include "core/package_version.hpp"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -819,6 +818,9 @@ QJsonObject UpdateConfiguration::toJson() const {
             {QStringLiteral("detectedUrl"), detectedUrl},
             {QStringLiteral("lastChecked"), dateToString(lastChecked)},
             {QStringLiteral("lastCheckMessage"), lastCheckMessage},
+            {QStringLiteral("lastCheckFailed"), lastCheckFailed},
+            {QStringLiteral("lastAutomaticStatus"), lastAutomaticStatus},
+            {QStringLiteral("lastAutomaticMessage"), lastAutomaticMessage},
             {QStringLiteral("signatureVerified"), signatureVerified},
             {QStringLiteral("directUrlEtag"), directUrlEtag},
             {QStringLiteral("directUrlLastModified"), directUrlLastModified},
@@ -861,6 +863,9 @@ UpdateConfiguration UpdateConfiguration::fromJson(const QJsonObject &object) {
     result.detectedUrl = object.value(QStringLiteral("detectedUrl")).toString();
     result.lastChecked = dateFromString(object.value(QStringLiteral("lastChecked")));
     result.lastCheckMessage = object.value(QStringLiteral("lastCheckMessage")).toString();
+    result.lastCheckFailed = object.value(QStringLiteral("lastCheckFailed")).toBool();
+    result.lastAutomaticStatus = object.value(QStringLiteral("lastAutomaticStatus")).toString();
+    result.lastAutomaticMessage = object.value(QStringLiteral("lastAutomaticMessage")).toString();
     result.signatureVerified = object.value(QStringLiteral("signatureVerified")).toBool();
     result.directUrlEtag = object.value(QStringLiteral("directUrlEtag")).toString();
     result.directUrlLastModified = object.value(QStringLiteral("directUrlLastModified")).toString();
@@ -1139,6 +1144,22 @@ const PackageRelease *Project::activeTrackingRelease() const {
     return newest;
 }
 
+const PackageRelease *Project::updateHealthRelease() const {
+    const auto *tracker = activeTrackingRelease();
+    const auto *newest = newestRelease();
+    if (newest == nullptr) return tracker;
+    const bool newestNeedsAttention = newest->update.lastCheckFailed ||
+        (newest->state != ReleaseState::Built &&
+         newest->update.lastAutomaticStatus == QStringLiteral("paused"));
+    if (!newestNeedsAttention || newest == tracker) return tracker;
+    if (tracker != nullptr && tracker->update.lastChecked.isValid() &&
+        (!newest->update.lastChecked.isValid() ||
+         newest->update.lastChecked < tracker->update.lastChecked)) {
+        return tracker;
+    }
+    return newest;
+}
+
 bool Project::hasAvailableUpdate() const {
     const auto *installed = installedRelease();
     if (installedVersion.isEmpty() || installed == nullptr) return false;
@@ -1183,6 +1204,7 @@ Project Project::fromJson(const QJsonObject &object) {
     Project result;
     result.formatVersion = object.value(QStringLiteral("formatVersion")).toInt(4);
     result.revision = object.value(QStringLiteral("revision")).toInteger(1);
+    result.summaryOnly = object.value(QStringLiteral("summaryOnly")).toBool();
     result.id = object.value(QStringLiteral("id")).toString();
     result.displayName = object.value(QStringLiteral("displayName")).toString();
     result.archPackageName = object.value(QStringLiteral("archPackageName")).toString();

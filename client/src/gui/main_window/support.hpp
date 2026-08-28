@@ -10,11 +10,9 @@
 #include <QHash>
 #include <QIcon>
 #include <QList>
-#include <QMetaObject>
 #include <QString>
 #include <QStringList>
 #include <QStyle>
-#include <QThread>
 #include <QUrl>
 
 #include <functional>
@@ -30,36 +28,6 @@ class QWidget;
 
 namespace pacsmith::gui {
 
-template <typename Service, typename Function>
-void onServiceThread(Service &service, Function &&function) {
-    QMetaObject::invokeMethod(&service, std::forward<Function>(function));
-}
-
-template <typename Service>
-void cancelOnServiceThread(Service &service) {
-    if (service.thread() == QThread::currentThread()) {
-        service.cancel();
-        return;
-    }
-    QMetaObject::invokeMethod(&service, [&service] { service.cancel(); },
-                              Qt::BlockingQueuedConnection);
-}
-
-template <typename Service>
-void shutdownNetworkService(Service *&service) {
-    if (service == nullptr) return;
-    cancelOnServiceThread(*service);
-    service->deleteLater();
-    service = nullptr;
-}
-
-template <typename Service>
-Service *networkServiceOnThread(QThread &thread) {
-    auto *service = new Service;
-    service->moveToThread(&thread);
-    return service;
-}
-
 constexpr int projectSubtitleRole = Qt::UserRole + 1;
 constexpr int projectVisualStateRole = Qt::UserRole + 2;
 constexpr int projectCheckingRole = Qt::UserRole + 3;
@@ -68,7 +36,7 @@ constexpr int projectRepositoryEnabledRole = Qt::UserRole + 5;
 constexpr int projectRepositoryBusyRole = Qt::UserRole + 6;
 constexpr int sectionBaseLabelRole = Qt::UserRole + 1;
 
-enum class ProjectVisualState { NotInstalled, Current, UpdateAvailable, Attention, Preparing };
+enum class ProjectVisualState { NotInstalled, Current, UpdateAvailable, Warning, Attention, Preparing };
 
 struct GitHubRuleChoice {
     QString expression;

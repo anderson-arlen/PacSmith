@@ -74,6 +74,7 @@ public:
                 border = darkTheme ? QColor(70, 205, 108) : QColor(31, 145, 66);
                 break;
             case ProjectVisualState::UpdateAvailable:
+            case ProjectVisualState::Warning:
             case ProjectVisualState::Attention:
                 background = darkTheme ? QColor(107, 75, 0) : QColor(255, 235, 184);
                 border = darkTheme ? QColor(255, 190, 48) : QColor(180, 112, 0);
@@ -154,6 +155,7 @@ private:
         switch (state) {
         case ProjectVisualState::Current: color = QColor(32, 145, 70); break;
         case ProjectVisualState::UpdateAvailable: color = QColor(196, 126, 0); break;
+        case ProjectVisualState::Warning: color = QColor(224, 155, 24); break;
         case ProjectVisualState::Attention: color = QColor(190, 48, 48); break;
         case ProjectVisualState::Preparing: color = QColor(35, 125, 185); break;
         case ProjectVisualState::NotInstalled: color = QColor(105, 112, 120); break;
@@ -183,6 +185,7 @@ private:
             painter->drawLine(center.x(), center.y() - 4, center.x() - 3, center.y() - 1);
             painter->drawLine(center.x(), center.y() - 4, center.x() + 3, center.y() - 1);
             break;
+        case ProjectVisualState::Warning:
         case ProjectVisualState::Attention:
             painter->drawLine(center.x(), center.y() - 4, center.x(), center.y() + 1);
             painter->drawPoint(center.x(), center.y() + 4);

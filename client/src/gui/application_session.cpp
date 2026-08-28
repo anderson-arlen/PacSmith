@@ -2,7 +2,6 @@
 
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
-#include "core/credential_store.hpp"
 #include "core/library_client.hpp"
 #include "core/library_events.hpp"
 #include "gui/appearance.hpp"
@@ -13,10 +12,9 @@
 #include <QColor>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDir>
-#include <QFileInfo>
 #include <QFutureWatcher>
 #include <QIcon>
+#include <QJsonArray>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QProcess>
@@ -25,6 +23,7 @@
 #include <QtConcurrent>
 
 #include <algorithm>
+#include <optional>
 
 namespace pacsmith::gui {
 namespace {
@@ -44,20 +43,81 @@ QIcon trayStatusIcon(const int availableUpdates, const QColor &foreground,
     return renderTrayStatusIcon(mask, availableUpdates, foreground, activityFrame);
 }
 
-QString pacsmithCliPath() {
-    auto program = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith"));
-    if (!QFileInfo::exists(program)) program = QStandardPaths::findExecutable(QStringLiteral("pacsmith"));
-    return program;
+struct UpdateCensusResult {
+    QList<Project> projects;
+    QString error;
+};
+
+struct UpdateRequestResult {
+    std::optional<JobStatus> job;
+    QString error;
+};
+
+QString updateCompletionMessage(const JobStatus &job) {
+    const auto checks = job.result.value(QStringLiteral("checks")).toArray();
+    int available = 0;
+    int built = 0;
+    QStringList failures;
+    QStringList paused;
+    for (const auto &value : checks) {
+        const auto check = value.toObject();
+        if (check.value(QStringLiteral("update_available")).toBool()) ++available;
+        if (check.value(QStringLiteral("built")).toBool()) ++built;
+        auto name = check.value(QStringLiteral("project_name")).toString();
+        if (name.isEmpty()) name = check.value(QStringLiteral("package_name")).toString();
+        if (name.isEmpty()) name = check.value(QStringLiteral("project_id")).toString();
+        if (name.isEmpty()) name = QStringLiteral("Unknown package");
+        if (check.value(QStringLiteral("status")).toString() != QStringLiteral("error")) continue;
+        auto message = check.value(QStringLiteral("message")).toString().trimmed();
+        if (message.isEmpty()) {
+            message = QStringLiteral("update check failed without an error message");
+        }
+        failures.append(QStringLiteral("• %1 — %2").arg(name, message));
+    }
+    for (const auto &value : checks) {
+        const auto check = value.toObject();
+        if (check.value(QStringLiteral("automatic_status")).toString() !=
+            QStringLiteral("paused")) continue;
+        auto name = check.value(QStringLiteral("project_name")).toString();
+        if (name.isEmpty()) name = check.value(QStringLiteral("package_name")).toString();
+        if (name.isEmpty()) name = check.value(QStringLiteral("project_id")).toString();
+        if (name.isEmpty()) name = QStringLiteral("Unknown package");
+        auto message = check.value(QStringLiteral("automatic_message")).toString().trimmed();
+        if (message.isEmpty()) message = QStringLiteral("automatic handling paused without a reason");
+        paused.append(QStringLiteral("• %1 — %2").arg(name, message));
+    }
+    if (!failures.isEmpty() || !paused.isEmpty()) {
+        auto summary = QStringLiteral("Update check finished: %1 update(s) found; %2 built automatically")
+                           .arg(available).arg(built);
+        if (!failures.isEmpty()) {
+            summary += QStringLiteral("; %1 check(s) failed.\nFailed checks:\n%2")
+                           .arg(failures.size()).arg(failures.join(QLatin1Char('\n')));
+        } else {
+            summary += QLatin1Char('.');
+        }
+        if (!paused.isEmpty()) {
+            summary += QStringLiteral("\nAutomatic handling paused:\n%1")
+                           .arg(paused.join(QLatin1Char('\n')));
+        }
+        return summary;
+    }
+    if (available > 0) {
+        return QStringLiteral("Update check finished: %1 update(s) found; %2 built automatically.")
+            .arg(available).arg(built);
+    }
+    return built > 0
+        ? QStringLiteral("Update check finished: all vendor versions are current; %1 prepared update(s) built automatically.")
+              .arg(built)
+        : QStringLiteral("Update check finished: all eligible packages are current.");
 }
 
 }
 
-ApplicationSession::ApplicationSession(AppSettingsStore &settingsStore, CredentialStore &credentials,
-                                       QObject *parent)
-    : QObject(parent), settingsStore_(settingsStore), credentials_(credentials) {
+ApplicationSession::ApplicationSession(AppSettingsStore &settingsStore, QObject *parent)
+    : QObject(parent), settingsStore_(settingsStore) {
     connect(&server_, &GuiInstanceServer::activated, this, &ApplicationSession::showWorkbench);
     connect(&server_, &GuiInstanceServer::checkRequested, this, [this] {
-        runBackgroundCheck(CheckKind::Manual);
+        runBackgroundCheck();
     });
     connect(&server_, &GuiInstanceServer::trayRequested, this, &ApplicationSession::refreshTray);
     connect(&server_, &GuiInstanceServer::projectsReloadRequested, this, [this] {
@@ -71,8 +131,6 @@ ApplicationSession::ApplicationSession(AppSettingsStore &settingsStore, Credenti
         trayActivityFrame_ = (trayActivityFrame_ + 1) % 8;
         refreshTray();
     });
-    checkTimer_.setSingleShot(true);
-    connect(&checkTimer_, &QTimer::timeout, this, [this] { runBackgroundCheck(CheckKind::Scheduled); });
 }
 
 ApplicationSession::~ApplicationSession() = default;
@@ -110,37 +168,61 @@ void ApplicationSession::start(const bool startHidden, const QString &importPath
     });
     const auto connection = ConnectionConfig::load();
     activeJobs->setFuture(QtConcurrent::run([connection] {
-        return LibraryClient(connection).activeJobs(QStringLiteral("build"));
+        LibraryClient client(connection);
+        auto jobs = client.activeJobs(QStringLiteral("build"));
+        jobs.append(client.activeJobs(QStringLiteral("update_check")));
+        jobs.append(client.activeJobs(QStringLiteral("update_prepare")));
+        return jobs;
     }));
     if (!startHidden || !importPath.isEmpty()) showWorkbench(importPath);
-    QTimer::singleShot(0, this, [this] {
-        runBackgroundCheck(CheckKind::IfOverdue);
-        scheduleNextCheck();
-    });
 }
 
 void ApplicationSession::handleServerEvent(const ServerEvent &event) {
-    if (event.jobKind != QStringLiteral("build") || event.jobId.isEmpty()) return;
+    if (event.jobId.isEmpty()) return;
     const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
                           event.jobStatus == QStringLiteral("failed") ||
                           event.jobStatus == QStringLiteral("interrupted");
-    if (finished) {
-        activeBuildJobs_.remove(event.jobId);
-    } else if (event.jobStatus == QStringLiteral("queued") ||
-               event.jobStatus == QStringLiteral("running")) {
-        auto name = !event.projectName.isEmpty() ? event.projectName : event.packageName;
-        if (name.isEmpty()) name = QStringLiteral("package");
-        activeBuildJobs_.insert(event.jobId, name);
+    const bool active = event.jobStatus == QStringLiteral("queued") ||
+                        event.jobStatus == QStringLiteral("running");
+    if (event.jobKind == QStringLiteral("build")) {
+        if (finished) {
+            activeBuildJobs_.remove(event.jobId);
+        } else if (active) {
+            auto name = !event.projectName.isEmpty() ? event.projectName : event.packageName;
+            if (name.isEmpty()) name = QStringLiteral("package");
+            activeBuildJobs_.insert(event.jobId, name);
+        }
+    } else if (event.jobKind == QStringLiteral("update_check")) {
+        if (finished) {
+            activeUpdateJobs_.remove(event.jobId);
+            refreshUpdateCensus();
+        } else if (active) {
+            activeUpdateJobs_.insert(event.jobId, jobStatusMessage(event));
+        }
+    } else if (event.jobKind == QStringLiteral("update_prepare")) {
+        if (finished) {
+            activePreparationJobs_.remove(event.jobId);
+            refreshUpdateCensus();
+        } else if (active) {
+            auto name = !event.projectName.isEmpty() ? event.projectName : event.packageName;
+            activePreparationJobs_.insert(event.jobId, name);
+        }
+    } else {
+        return;
     }
-    if (activeBuildJobs_.isEmpty()) trayAnimation_.stop();
-    else if (!trayAnimation_.isActive()) trayAnimation_.start();
+    if (activeBuildJobs_.isEmpty() && activeUpdateJobs_.isEmpty() &&
+        activePreparationJobs_.isEmpty() && !updateRequestInFlight_) {
+        trayAnimation_.stop();
+    } else if (!trayAnimation_.isActive()) {
+        trayAnimation_.start();
+    }
     refreshTray();
 }
 
 void ApplicationSession::showWorkbench(const QString &importPath) {
     const bool created = window_ == nullptr;
     if (created) {
-        window_ = std::make_unique<MainWindow>(settingsStore_, credentials_);
+        window_ = std::make_unique<MainWindow>(settingsStore_);
         window_->resize(1180, 760);
         window_->setWindowIcon(applicationIcon());
     }
@@ -165,7 +247,7 @@ void ApplicationSession::setupTray() {
     trayMenu_->addSeparator();
     auto *exitAction = trayMenu_->addAction(QStringLiteral("Quit"));
     connect(openAction, &QAction::triggered, this, [this] { showWorkbench(); });
-    connect(checkAction, &QAction::triggered, this, [this] { runBackgroundCheck(CheckKind::Manual); });
+    connect(checkAction, &QAction::triggered, this, &ApplicationSession::runBackgroundCheck);
     connect(exitAction, &QAction::triggered, this, &ApplicationSession::quitSession);
 
     tray_ = std::make_unique<QSystemTrayIcon>();
@@ -188,12 +270,6 @@ void ApplicationSession::refreshTray() {
     const bool wantTray = trayWanted() && trayAvailable;
     if (window_ != nullptr) window_->setKeepRunningInTray(wantTray);
     QApplication::setQuitOnLastWindowClosed(!wantTray);
-    if (settings.updates.enabled) {
-        runBackgroundCheck(CheckKind::IfOverdue);
-        if (!checkTimer_.isActive()) scheduleNextCheck();
-    } else {
-        checkTimer_.stop();
-    }
     if (!wantTray) {
         if (tray_ != nullptr) tray_->hide();
         return;
@@ -206,10 +282,12 @@ void ApplicationSession::refreshTray() {
     // Use the persisted census. Reloading every project here would parse
     // release.json and shell out to pacman -Q on the GUI thread every 5s.
     const auto availableUpdates = current.availableUpdates;
-    const auto checking = current.checking;
-    const auto preparing = !current.preparingProjectId.isEmpty();
+    const auto checking = current.checking || updateRequestInFlight_ || !activeUpdateJobs_.isEmpty();
+    const auto preparing = !current.preparingProjectId.isEmpty() ||
+                           !activePreparationJobs_.isEmpty();
     const auto foreground = trayIconColor(settings.appearance.trayTheme);
-    const auto activityFrame = activeBuildJobs_.isEmpty() ? -1 : trayActivityFrame_;
+    const auto activityFrame = activeBuildJobs_.isEmpty() && !checking && !preparing
+        ? -1 : trayActivityFrame_;
     if (lastTrayBadge_ != availableUpdates || lastTrayChecking_ != checking ||
         lastTrayPreparing_ != preparing || lastTrayColor_ != foreground.rgba() ||
         lastTrayActivityFrame_ != activityFrame) {
@@ -225,106 +303,90 @@ void ApplicationSession::refreshTray() {
         names.removeDuplicates();
         names.sort(Qt::CaseInsensitive);
         tray_->setToolTip(QStringLiteral("PacSmith is building %1").arg(names.join(QStringLiteral(", "))));
-    } else tray_->setToolTip(preparing
-        ? (current.preparingProjectName.isEmpty()
+    } else {
+        const auto updateMessages = activeUpdateJobs_.values();
+        const auto checkingMessage = !updateMessages.isEmpty() && !updateMessages.constFirst().isEmpty()
+            ? updateMessages.constFirst() : current.message;
+        const auto serverPreparationNames = activePreparationJobs_.values();
+        const auto preparingName = !current.preparingProjectName.isEmpty()
+            ? current.preparingProjectName
+            : serverPreparationNames.isEmpty() ? QString{} : serverPreparationNames.constFirst();
+        tray_->setToolTip(preparing
+        ? (preparingName.isEmpty()
                ? QStringLiteral("PacSmith is downloading an update")
                : QStringLiteral("PacSmith is downloading an update for %1")
-                     .arg(current.preparingProjectName))
-        : checking ? QStringLiteral("PacSmith is checking for updates")
+                     .arg(preparingName))
+        : checking ? (checkingMessage.isEmpty() ? QStringLiteral("PacSmith is checking for updates")
+                                                : checkingMessage)
         : availableUpdates > 0 ? QStringLiteral("PacSmith: %1 update(s) available").arg(availableUpdates)
                                : QStringLiteral("PacSmith: packages are current"));
+    }
     tray_->setVisible(true);
     if (window_ != nullptr && (checking || preparing)) {
         window_->noteBackgroundCheckStarted();
     }
 }
 
-void ApplicationSession::scheduleNextCheck() {
-    const auto settings = settingsStore_.load();
-    if (!settings.updates.enabled) {
-        checkTimer_.stop();
-        return;
-    }
-    const auto next = BackgroundUpdateManager::nextScheduledOccurrence(settings.updates);
-    auto milliseconds = QDateTime::currentDateTime().msecsTo(next);
-    if (milliseconds < 1000) milliseconds = 1000;
-    if (milliseconds > 24 * 60 * 60 * 1000LL) milliseconds = 24 * 60 * 60 * 1000LL;
-    checkTimer_.start(static_cast<int>(milliseconds));
-}
-
-void ApplicationSession::runBackgroundCheck(const bool onlyIfOverdue) {
-    runBackgroundCheck(onlyIfOverdue ? CheckKind::IfOverdue : CheckKind::Manual);
-}
-
-void ApplicationSession::runBackgroundCheck(const CheckKind kind) {
-    const auto settings = settingsStore_.load();
-    if (kind != CheckKind::Manual && !settings.updates.enabled) return;
-    if (checkProcess_ != nullptr) return;
-    const auto updateState = BackgroundUpdateStateStore::load();
-    if (updateState.checking) return;
-    if (kind == CheckKind::IfOverdue &&
-        !BackgroundUpdateManager::isOverdue(settings.updates, updateState.lastRun)) {
-        return;
-    }
-    const auto program = pacsmithCliPath();
-    if (program.isEmpty()) {
-        if (tray_ != nullptr) {
-            tray_->showMessage(QStringLiteral("PacSmith"),
-                               QStringLiteral("Could not find the pacsmith command to check for updates."));
-        }
-        return;
-    }
-    checkProcess_ = new QProcess(this);
-    checkProcess_->setProgram(program);
-    checkProcess_->setArguments({QStringLiteral("check"), QStringLiteral("--all")});
-    const auto source = settings.credentialSources.value(QStringLiteral("github"),
-                                                         CredentialSource::Environment);
-    checkProcess_->setProcessEnvironment(credentials_.environmentWithGithubToken(source));
-    auto pendingState = BackgroundUpdateStateStore::load();
-    pendingState.checking = true;
-    BackgroundUpdateStateStore::claimActivity(pendingState);
-    pendingState.message = QStringLiteral("Checking for updates");
-    static_cast<void>(BackgroundUpdateStateStore::save(pendingState));
-    connect(checkProcess_, &QProcess::finished, this, [this] {
-        if (checkProcess_ != nullptr) {
-            checkProcess_->deleteLater();
-            checkProcess_ = nullptr;
-        }
-        auto finishedState = BackgroundUpdateStateStore::load();
-        if (finishedState.checking || !finishedState.preparingProjectId.isEmpty()) {
-            finishedState.checking = false;
-            BackgroundUpdateStateStore::clearActivityOwner(finishedState);
-            finishedState.checkingProjectId.clear();
-            finishedState.checkingProjectName.clear();
-            finishedState.preparingProjectId.clear();
-            finishedState.preparingProjectName.clear();
-            finishedState.preparationPhase.clear();
-            finishedState.preparationBytesReceived = 0;
-            finishedState.preparationBytesTotal = -1;
-            static_cast<void>(BackgroundUpdateStateStore::save(finishedState));
-        }
-        if (window_ != nullptr) window_->reloadVisibleProjects();
-        scheduleNextCheck();
+void ApplicationSession::refreshUpdateCensus() {
+    if (updateCensusInFlight_) return;
+    updateCensusInFlight_ = true;
+    auto *watcher = new QFutureWatcher<UpdateCensusResult>(this);
+    connect(watcher, &QFutureWatcher<UpdateCensusResult>::finished, this, [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        updateCensusInFlight_ = false;
+        if (!result.error.isEmpty()) return;
+        static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(result.projects));
         refreshTray();
     });
-    connect(checkProcess_, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart) return;
-        if (checkProcess_ == nullptr) return;
-        checkProcess_->deleteLater();
-        checkProcess_ = nullptr;
-        auto failedState = BackgroundUpdateStateStore::load();
-        failedState.checking = false;
-        BackgroundUpdateStateStore::clearActivityOwner(failedState);
-        failedState.checkingProjectId.clear();
-        failedState.checkingProjectName.clear();
-        static_cast<void>(BackgroundUpdateStateStore::save(failedState));
-        if (tray_ != nullptr) {
-            tray_->showMessage(QStringLiteral("PacSmith"),
-                               QStringLiteral("Could not start an update check."));
+    const auto connection = ConnectionConfig::load();
+    watcher->setFuture(QtConcurrent::run([connection] {
+        UpdateCensusResult result;
+        result.projects = LibraryClient(connection).list(&result.error);
+        return result;
+    }));
+}
+
+void ApplicationSession::runBackgroundCheck() {
+    if (updateRequestInFlight_ || !activeUpdateJobs_.isEmpty()) return;
+    updateRequestInFlight_ = true;
+    if (!trayAnimation_.isActive()) trayAnimation_.start();
+    if (tray_ != nullptr) {
+        tray_->showMessage(QStringLiteral("PacSmith"),
+                           QStringLiteral("Update check requested from the library daemon."));
+    }
+    refreshTray();
+    auto *watcher = new QFutureWatcher<UpdateRequestResult>(this);
+    connect(watcher, &QFutureWatcher<UpdateRequestResult>::finished, this, [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        updateRequestInFlight_ = false;
+        const bool succeeded = result.job && result.job->status == QStringLiteral("succeeded");
+        if (!succeeded && tray_ != nullptr) {
+            auto message = !result.error.isEmpty() ? result.error
+                : result.job && !result.job->error.isEmpty() ? result.job->error
+                                                            : QStringLiteral("Update check failed");
+            tray_->showMessage(QStringLiteral("PacSmith"), message);
+        } else if (succeeded && tray_ != nullptr) {
+            tray_->showMessage(QStringLiteral("PacSmith"), updateCompletionMessage(*result.job));
         }
+        if (succeeded) refreshUpdateCensus();
         if (window_ != nullptr) window_->reloadVisibleProjects();
+        if (activeBuildJobs_.isEmpty() && activeUpdateJobs_.isEmpty() &&
+            activePreparationJobs_.isEmpty()) {
+            trayAnimation_.stop();
+        }
+        refreshTray();
     });
-    checkProcess_->start();
+    const auto connection = ConnectionConfig::load();
+    watcher->setFuture(QtConcurrent::run([connection] {
+        UpdateRequestResult result;
+        LibraryClient client(connection);
+        const auto started = client.startUpdateCheck({}, false, &result.error);
+        if (!started) return result;
+        result.job = client.waitForJob(started->id, &result.error);
+        return result;
+    }));
     if (window_ != nullptr) window_->noteBackgroundCheckStarted();
 }
 

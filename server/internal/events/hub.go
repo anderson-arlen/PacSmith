@@ -6,15 +6,20 @@ import (
 )
 
 type Event struct {
-	Sequence    uint64   `json:"sequence"`
-	Topics      []string `json:"topics"`
-	ProjectID   string   `json:"project_id,omitempty"`
-	ProjectName string   `json:"project_name,omitempty"`
-	PackageName string   `json:"package_name,omitempty"`
-	ReleaseID   string   `json:"release_id,omitempty"`
-	JobID       string   `json:"job_id,omitempty"`
-	JobKind     string   `json:"job_kind,omitempty"`
-	JobStatus   string   `json:"job_status,omitempty"`
+	Sequence       uint64   `json:"sequence"`
+	Topics         []string `json:"topics"`
+	ProjectID      string   `json:"project_id,omitempty"`
+	ProjectName    string   `json:"project_name,omitempty"`
+	PackageName    string   `json:"package_name,omitempty"`
+	ReleaseID      string   `json:"release_id,omitempty"`
+	JobID          string   `json:"job_id,omitempty"`
+	JobKind        string   `json:"job_kind,omitempty"`
+	JobStatus      string   `json:"job_status,omitempty"`
+	JobMessage     string   `json:"job_message,omitempty"`
+	JobCurrent     int      `json:"job_current,omitempty"`
+	JobTotal       int      `json:"job_total,omitempty"`
+	JobFailedItems int      `json:"job_failed_items,omitempty"`
+	JobPausedItems int      `json:"job_paused_items,omitempty"`
 }
 
 type Subscription struct {

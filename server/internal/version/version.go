@@ -18,4 +18,8 @@ var Capabilities = []string{
 	"repo",
 	"events",
 	"discoveries",
+	"github",
+	"update-checks",
+	"remote-imports",
+	"repository-key-inspection",
 }

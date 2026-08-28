@@ -2,6 +2,8 @@ package secret
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -54,11 +56,22 @@ func Open(ctx context.Context, db *sqlite.DB, secretsDir string) (*Opened, error
 
 func chooseBackend(ctx context.Context) string {
 	ss := NewSecretServiceStore()
-	_, err := ss.Exists(ctx, "pacsmith.init")
-	if err == nil || errors.Is(err, ErrNotFound) {
+	if usableSecretService(ctx, ss) {
 		return BackendSecretService
 	}
 	return BackendFile
+}
+
+func usableSecretService(ctx context.Context, store Store) bool {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return false
+	}
+	probe := "pacsmith.backend-probe-" + hex.EncodeToString(random)
+	if err := store.Set(ctx, probe, []byte("probe")); err != nil {
+		return false
+	}
+	return store.Delete(ctx, probe) == nil
 }
 
 func openBackend(secretsDir, backend string) (Store, error) {

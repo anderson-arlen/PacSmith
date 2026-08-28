@@ -1,11 +1,9 @@
 #pragma once
 
-#include "core/model.hpp"
-
+#include <QDateTime>
 #include <QMetaType>
 #include <QString>
-
-#include <memory>
+#include <QStringList>
 
 namespace pacsmith {
 
@@ -36,18 +34,6 @@ struct UpdateCheckResult {
     bool prerelease{false};
     QStringList availableAssets;
     QStringList matchingAssets;
-};
-
-class UpdateSource {
-public:
-    virtual ~UpdateSource() = default;
-    [[nodiscard]] virtual UpdateStrategy strategy() const noexcept = 0;
-    [[nodiscard]] virtual UpdateCheckResult check(const PackageRelease &release) const = 0;
-};
-
-class UpdateSourceFactory final {
-public:
-    [[nodiscard]] static std::unique_ptr<UpdateSource> create(UpdateStrategy strategy);
 };
 
 } // namespace pacsmith

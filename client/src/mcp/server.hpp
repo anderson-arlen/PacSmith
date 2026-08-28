@@ -17,17 +17,12 @@ public:
 private:
     QJsonObject handleRequest(const QJsonObject &request);
     QJsonObject callTool(const QJsonValue &id, const QJsonObject &params);
-    bool confirm(const QString &toolName, const QString &target, QString *error);
-    bool confirm(const QString &toolName, const QString &target, const QString &message,
-                 QString *error);
     bool writeMessage(const QJsonObject &message);
     std::optional<QJsonObject> readMessage();
 
     LibraryClient library_;
     bool initialized_{false};
-    bool elicitationSupported_{false};
     QString protocolVersion_{QStringLiteral("2025-11-25")};
-    quint64 serverRequestId_{0};
 };
 
 } // namespace pacsmith::mcp

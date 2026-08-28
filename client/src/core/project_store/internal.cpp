@@ -2,7 +2,6 @@
 
 #include "core/release_review.hpp"
 
-#include "core/apt_repository.hpp"
 #include "core/apt_sources.hpp"
 #include "core/deb_analyzer.hpp"
 #include "core/dependency_parser.hpp"

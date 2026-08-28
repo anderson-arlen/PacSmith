@@ -361,6 +361,9 @@ struct UpdateConfiguration {
     QString detectedUrl;
     QDateTime lastChecked;
     QString lastCheckMessage;
+    bool lastCheckFailed{false};
+    QString lastAutomaticStatus;
+    QString lastAutomaticMessage;
     bool signatureVerified{false};
     QString directUrlEtag;
     QString directUrlLastModified;
@@ -535,6 +538,7 @@ struct ProjectRepository {
 struct Project {
     int formatVersion{5};
     qint64 revision{1};
+    bool summaryOnly{false};
     QString id;
     QString displayName;
     QString archPackageName;
@@ -565,6 +569,7 @@ struct Project {
     // analyzed release. Installed-package ownership remains a separate decision.
     [[nodiscard]] PackageRelease *activeTrackingRelease();
     [[nodiscard]] const PackageRelease *activeTrackingRelease() const;
+    [[nodiscard]] const PackageRelease *updateHealthRelease() const;
     // True when a retained vendor version is newer than the PacSmith release
     // currently installed through pacman. Last-check detections do not count
     // until that version exists as a project release again.

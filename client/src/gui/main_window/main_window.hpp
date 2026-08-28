@@ -1,17 +1,11 @@
 #pragma once
 
-#include "core/apt_update_service.hpp"
 #include "core/app_settings.hpp"
 #include "core/background_updates.hpp"
-#include "core/credential_store.hpp"
-#include "core/deb_download_service.hpp"
-#include "core/direct_url_update_service.hpp"
-#include "core/github_update_service.hpp"
 #include "core/process_services.hpp"
 #include "core/library_client.hpp"
 #include "core/library_events.hpp"
 #include "core/repository_key_download_service.hpp"
-#include "core/rpm_update_service.hpp"
 
 #include <QHash>
 #include <QElapsedTimer>
@@ -57,8 +51,7 @@ class CommandProgressDialog;
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 public:
-    MainWindow(AppSettingsStore &settingsStore, CredentialStore &credentials,
-               QWidget *parent = nullptr);
+    explicit MainWindow(AppSettingsStore &settingsStore, QWidget *parent = nullptr);
     ~MainWindow() override;
     void importPackage(const QString &path);
     void activateExistingSession(const QString &importPath = {});
@@ -69,6 +62,7 @@ public:
 signals:
     void clientSettingsReloaded();
     void serverTopicsChanged(const QStringList &topics);
+    void updateCheckActivityChanged(const QString &message, bool active, bool failed);
 
 protected:
     [[nodiscard]] QSize minimumSizeHint() const override;
@@ -148,6 +142,8 @@ private:
                                const QUrl &signingKeyUrl,
                                const QByteArray &signingKeyContents = {},
                                const QString &signingKeySource = {});
+    void finishServerArtifactImport(const ImportResult &result, bool applyRetention,
+                                    const QString &successMessage);
     void showProjectDashboard();
     void showReleaseWorkbench(const QString &releaseId);
     void showReleaseWorkbenchAtFirstAttention(const QString &releaseId);
@@ -268,9 +264,14 @@ private:
     void dependencyEdited(int row, int column);
     void dependencyDispositionChanged(int row, int index);
     void scriptFindingDispositionChanged(int row, int index);
-    bool saveUpdateConfiguration();
+    void saveUpdateConfiguration();
+    void saveUpdateConfigurationThen(std::function<void(bool)> completed);
+    void startUpdateCheckRequest(const QString &projectId, const QString &releaseId,
+                                 const QString &projectName);
+    void setUpdateCheckStatus(const QString &message, bool failed = false,
+                              bool warning = false);
+    void updateMonitoringAttention();
     void startUpdateCheck();
-    void applyUpdateCheckResult(const UpdateCheckResult &result, const QString &sourceName);
     void applyRetentionCleanup();
     void startBuild(bool installWhenSuccessful = false, bool automatic = false);
     void pollBuildJob();
@@ -302,18 +303,16 @@ private:
     [[nodiscard]] bool listActivityInProgress() const;
     [[nodiscard]] bool canShowUpdateCheckStatus() const;
     void publishUpdateCheckActivity(bool running, const QString &projectId = {},
-                                    const QString &projectName = {});
+                                    const QString &projectName = {},
+                                    const QString &message = {});
     void publishPreparationActivity();
     void clearPublishedPreparationActivity(const QString &projectId);
-    void startListDownloadActivity(const QString &projectId, const QString &releaseId = {});
     [[nodiscard]] QString displayNameForProject(const QString &projectId) const;
     void resetPreparationState();
     void beginGitHubImport(const QUrl &url);
     void continueGitHubImport(const QString &owner, const QString &repository,
                               const QString &assetRegex, bool includePrereleases,
                               const QString &requestedTag = {});
-    void downloadGitHubAsset(const PackageRelease &probe,
-                             const UpdateCheckResult &result);
     [[nodiscard]] QString selectedDashboardReleaseId() const;
     void showSettings();
     void showConnectionDialog();
@@ -321,11 +320,8 @@ private:
     void refreshConnectionStatus(std::function<void()> completed);
     void applyLibrarySettings(const LibrarySettings &settings);
     void reloadClientSettings();
-    [[nodiscard]] QString sessionCredential(const QString &name) const;
-    void rememberSessionCredential(const QString &name, const QString &value);
     void startReanalysis();
     void askExternalHarness();
-    bool unlockAgeCredentials();
     void importSigningKey();
     void downloadSigningKey();
     [[nodiscard]] PackageRelease *currentRelease();
@@ -355,8 +351,6 @@ private:
     bool projectStale_{false};
     bool pendingExternalDeletion_{false};
     std::optional<Project> pendingExternalProject_;
-    QHash<QString, QString> sessionCredentials_;
-    CredentialStore &credentialStore_;
     std::optional<Project> project_;
     QHash<QString, Project> projectCache_;
     QSet<QString> hydratedProjectIds_;
@@ -366,8 +360,10 @@ private:
     bool projectListRefreshInFlight_{false};
     bool projectDeleteInFlight_{false};
     QString currentReleaseId_;
-    QString updateCheckReleaseId_;
-    bool updateCheckFromWorkbench_{false};
+    bool updateCheckRunning_{false};
+    bool updateConfigurationSaveInFlight_{false};
+    QString updateConfigurationSaveProjectId_;
+    QString updateConfigurationSaveReleaseId_;
     BuildService buildService_;
     InstallService installService_;
     bool installPreparationInFlight_{false};
@@ -383,13 +379,7 @@ private:
     QTimer *buildPollTimer_{nullptr};
     bool buildPollInFlight_{false};
     bool buildFinishInFlight_{false};
-    QThread networkIoThread_;
-    DebDownloadService *debDownloadService_{nullptr};
-    DirectUrlUpdateService *directUrlUpdateService_{nullptr};
     RepositoryKeyDownloadService signingKeyDownloadService_;
-    AptUpdateService *aptUpdateService_{nullptr};
-    RpmUpdateService *rpmUpdateService_{nullptr};
-    GitHubUpdateService *githubUpdateService_{nullptr};
     bool keepRunningInTray_{false};
     bool populating_{false};
     bool switchingConfigurationMode_{false};
@@ -417,6 +407,7 @@ private:
     QSet<QString> repositoryDependencyChecksPending_;
     bool repositoryCatalogLoaded_{false};
     bool repositoryImportRunning_{false};
+    bool serverImportRunning_{false};
     quint64 repositoryLoadGeneration_{0};
     bool repositoryOperationInFlight_{false};
 
@@ -429,9 +420,11 @@ private:
     QProgressBar *projectListProgress_{nullptr};
     QPushButton *refreshProjectListButton_{nullptr};
     QPushButton *deleteProjectButton_{nullptr};
+    QPushButton *updateCheckErrorsButton_{nullptr};
     QPushButton *connectionButton_{nullptr};
     QTimer *connectionStatusTimer_{nullptr};
     bool connectionStatusInFlight_{false};
+    QString updateCheckErrorDetails_;
     QLabel *projectTitle_{nullptr};
     QLabel *projectSubtitle_{nullptr};
     QStackedWidget *rightStack_{nullptr};
@@ -610,7 +603,6 @@ private:
     QListWidget *historyList_{nullptr};
     QString pendingPackageOperation_;
     bool installAfterSuccessfulBuild_{false};
-    QString pendingDownloadedImport_;
     ImportOptions pendingImportOptions_;
     QHash<int, SectionLocation> sectionLocations_;
 };

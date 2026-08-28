@@ -44,10 +44,6 @@ AppSettings AppSettingsStore::load(QString *error) const {
         return result;
     }
     const auto object = document.object();
-    const auto credentials = object.value(QStringLiteral("credentialSources")).toObject();
-    for (auto iterator = credentials.constBegin(); iterator != credentials.constEnd(); ++iterator) {
-        result.credentialSources.insert(iterator.key(), credentialSourceFromName(iterator.value().toString()));
-    }
     const auto appearance = object.value(QStringLiteral("appearance")).toObject();
     result.appearance.interfaceTheme =
         appearanceModeFromName(appearance.value(QStringLiteral("interfaceTheme")).toString());
@@ -65,9 +61,7 @@ AppSettings AppSettingsStore::load(QString *error) const {
     result.updates.automaticallyPrepare = updates.value(QStringLiteral("automaticallyPrepare")).toBool(false);
     result.updates.retentionVersions =
         std::max(-1, updates.value(QStringLiteral("retentionVersions")).toInt(2));
-    result.githubTokenConfigured = object.value(QStringLiteral("githubTokenConfigured")).toBool(false) ||
-                                   (!object.contains(QStringLiteral("githubTokenConfigured")) &&
-                                    result.credentialSources.contains(QStringLiteral("github")));
+    result.githubTokenConfigured = object.value(QStringLiteral("githubTokenConfigured")).toBool(false);
     for (const auto &value : object.value(QStringLiteral("harnessProfiles")).toArray()) {
         const auto profileObject = value.toObject();
         HarnessProfile profile;
@@ -89,10 +83,6 @@ bool AppSettingsStore::save(const AppSettings &settings, QString *error) const {
     if (!QDir{}.mkpath(directory_)) {
         if (error != nullptr) *error = QStringLiteral("Could not create PacSmith's configuration directory");
         return false;
-    }
-    QJsonObject credentials;
-    for (auto iterator = settings.credentialSources.cbegin(); iterator != settings.credentialSources.cend(); ++iterator) {
-        credentials.insert(iterator.key(), credentialSourceName(iterator.value()));
     }
     const QJsonObject appearance{
         {QStringLiteral("interfaceTheme"), appearanceModeName(settings.appearance.interfaceTheme)},
@@ -117,8 +107,7 @@ bool AppSettingsStore::save(const AppSettings &settings, QString *error) const {
     }
     const QJsonObject onboarding{{QStringLiteral("debAssociationPrompted"), settings.debAssociationPrompted},
                                  {QStringLiteral("selfTrackingPrompted"), settings.selfTrackingPrompted}};
-    const QJsonObject object{{QStringLiteral("formatVersion"), 6},
-                             {QStringLiteral("credentialSources"), credentials},
+    const QJsonObject object{{QStringLiteral("formatVersion"), 7},
                              {QStringLiteral("githubTokenConfigured"), settings.githubTokenConfigured},
                              {QStringLiteral("appearance"), appearance},
                              {QStringLiteral("updates"), updates},
@@ -211,27 +200,8 @@ bool AppSettingsStore::setDefaultHarnessProfile(const QString &name, QString *er
     return save(settings, error);
 }
 
-QString AppSettingsStore::ageSecretsPath() const {
-    return QDir(directory_).filePath(QStringLiteral("secrets.age"));
-}
-
 QString AppSettingsStore::settingsPath() const {
     return QDir(directory_).filePath(QStringLiteral("settings.json"));
-}
-
-QString credentialSourceName(const CredentialSource source) {
-    switch (source) {
-    case CredentialSource::Keyring: return QStringLiteral("keyring");
-    case CredentialSource::Age: return QStringLiteral("age");
-    case CredentialSource::Environment: return QStringLiteral("environment");
-    }
-    return QStringLiteral("environment");
-}
-
-CredentialSource credentialSourceFromName(const QString &name) {
-    if (name == QStringLiteral("keyring")) return CredentialSource::Keyring;
-    if (name == QStringLiteral("age")) return CredentialSource::Age;
-    return CredentialSource::Environment;
 }
 
 QString appearanceModeName(const AppearanceMode mode) {
@@ -247,12 +217,6 @@ AppearanceMode appearanceModeFromName(const QString &name) {
     if (name == QStringLiteral("light")) return AppearanceMode::Light;
     if (name == QStringLiteral("dark")) return AppearanceMode::Dark;
     return AppearanceMode::Auto;
-}
-
-bool githubTokenUsesAge(const AppSettings &settings) {
-    return settings.githubTokenConfigured &&
-           settings.credentialSources.value(QStringLiteral("github"), CredentialSource::Environment) ==
-               CredentialSource::Age;
 }
 
 } // namespace pacsmith

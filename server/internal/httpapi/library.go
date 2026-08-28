@@ -44,6 +44,14 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 func encodeProjectSummary(project library.Project, settings *repo.Settings) map[string]any {
 	out := encodeProject(project)
+	out["summaryOnly"] = true
+	if releases, ok := out["releases"].([]map[string]any); ok {
+		for _, release := range releases {
+			// Older clients do not understand summaryOnly. A poisoned revision makes
+			// an accidental write fail with a conflict instead of replacing omitted fields.
+			release["revision"] = int64(-1)
+		}
+	}
 	prefix := ""
 	if settings != nil {
 		prefix = settings.PackageNamePrefix

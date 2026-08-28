@@ -43,7 +43,7 @@ void MainWindow::updateDashboardActions() {
     const bool installed = project_ && !project_->installedVersion.isEmpty();
     if (submitReleaseButton_ != nullptr) {
         submitReleaseButton_->setEnabled(project_ && importThread_ == nullptr &&
-                                         !debDownloadService_->isRunning());
+                                         !serverImportRunning_ && !repositoryImportRunning_);
     }
     if (projectBuildOutputButton_ != nullptr) projectBuildOutputButton_->setVisible(false);
     if (projectBuildCancelButton_ != nullptr) projectBuildCancelButton_->setVisible(false);
@@ -94,7 +94,7 @@ void MainWindow::updateDashboardActions() {
     } else if (tracker->state == ReleaseState::Discovered) {
         projectPrimaryButton_->setVisible(true);
         projectPrimaryButton_->setText(QStringLiteral("Download & Prepare"));
-        projectPrimaryButton_->setEnabled(!debDownloadService_->isRunning() &&
+        projectPrimaryButton_->setEnabled(!serverImportRunning_ && !repositoryImportRunning_ &&
                                           importThread_ == nullptr);
     } else {
         projectPrimaryButton_->setVisible(false);
@@ -426,9 +426,7 @@ void MainWindow::updateUpdateCheckIndicators() {
     const auto updateState = BackgroundUpdateStateStore::load();
     QString checkingId = updateState.checkingProjectId;
     QString checkingName = updateState.checkingProjectName;
-    const bool inProcess = directUrlUpdateService_->isRunning() ||
-                           aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
-                           githubUpdateService_->isRunning();
+    const bool inProcess = updateCheckRunning_;
     if (checkingId.isEmpty() && inProcess && project_) {
         checkingId = project_->id;
         checkingName = project_->displayName.isEmpty() ? project_->archPackageName
@@ -459,7 +457,9 @@ void MainWindow::updateUpdateCheckIndicators() {
         const bool itemPreparing = prepareBusy && projectId == preparingId;
         const bool itemChecking = checking && projectId == checkingId && !itemPreparing;
         const bool itemBuilding = !buildActivityForProject(projectId).isEmpty();
-        const bool itemBusy = itemPreparing || itemChecking || itemBuilding;
+        const bool itemSaving = updateConfigurationSaveInFlight_ &&
+                                projectId == updateConfigurationSaveProjectId_;
+        const bool itemBusy = itemPreparing || itemChecking || itemBuilding || itemSaving;
         if (item->data(projectCheckingRole).toBool() != itemBusy) {
             item->setData(projectCheckingRole, itemBusy);
         }
@@ -469,9 +469,11 @@ void MainWindow::updateUpdateCheckIndicators() {
         statusBar()->showMessage(downloadStatusText(preparingName, phase, received, total));
     } else if (checkBusy && canShowUpdateCheckStatus()) {
         updateCheckStatusActive_ = true;
-        statusBar()->showMessage(checkingName.isEmpty()
-                                     ? QStringLiteral("Checking for updates…")
-                                     : QStringLiteral("Checking %1 for updates…").arg(checkingName));
+        statusBar()->showMessage(!updateState.message.isEmpty()
+                                     ? updateState.message
+                                     : checkingName.isEmpty()
+                                         ? QStringLiteral("Checking for updates…")
+                                         : QStringLiteral("Checking %1 for updates…").arg(checkingName));
     } else if (!checkBusy && updateCheckStatusActive_) {
         updateCheckStatusActive_ = false;
         if (!prepareBusy && canShowUpdateCheckStatus()) {
@@ -489,15 +491,11 @@ void MainWindow::syncActivityTimer() {
         return;
     }
     if (preparationSpinnerTimer_->isActive()) preparationSpinnerTimer_->stop();
-    if (updateCheckStatusActive_) updateUpdateCheckIndicators();
+    updateUpdateCheckIndicators();
 }
 
 bool MainWindow::updateCheckInProgress() const {
-    if (directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
-        rpmUpdateService_->isRunning() ||
-        githubUpdateService_->isRunning()) {
-        return true;
-    }
+    if (updateCheckRunning_) return true;
     return BackgroundUpdateStateStore::load().checking;
 }
 
@@ -505,11 +503,8 @@ bool MainWindow::listActivityInProgress() const {
     if (!preparingProjectId_.isEmpty()) return true;
     if (!activeBuildJobs_.isEmpty() || buildInProgress()) return true;
     if (!repositoryDistributionJobs_.isEmpty()) return true;
-    if (directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
-        rpmUpdateService_->isRunning() ||
-        githubUpdateService_->isRunning()) {
-        return true;
-    }
+    if (updateConfigurationSaveInFlight_) return true;
+    if (updateCheckRunning_) return true;
     const auto updateState = BackgroundUpdateStateStore::load();
     return updateState.checking || !updateState.preparingProjectId.isEmpty();
 }
@@ -520,16 +515,16 @@ bool MainWindow::canShowUpdateCheckStatus() const {
 }
 
 void MainWindow::publishUpdateCheckActivity(const bool running, const QString &projectId,
-                                            const QString &projectName) {
+                                            const QString &projectName, const QString &message) {
     auto updateState = BackgroundUpdateStateStore::load();
     if (running) {
         updateState.checking = true;
         BackgroundUpdateStateStore::claimActivity(updateState);
         updateState.checkingProjectId = projectId;
         updateState.checkingProjectName = projectName;
-        updateState.message = projectName.isEmpty()
-            ? QStringLiteral("Checking for updates")
-            : QStringLiteral("Checking %1 for updates").arg(projectName);
+        updateState.message = !message.isEmpty() ? message
+            : projectName.isEmpty() ? QStringLiteral("Checking for updates")
+                                    : QStringLiteral("Checking %1 for updates").arg(projectName);
         static_cast<void>(BackgroundUpdateStateStore::save(updateState));
         syncActivityTimer();
         updateUpdateCheckIndicators();
@@ -595,22 +590,6 @@ void MainWindow::clearPublishedPreparationActivity(const QString &projectId) {
     updateState.preparationBytesTotal = -1;
     if (!updateState.checking) BackgroundUpdateStateStore::clearActivityOwner(updateState);
     static_cast<void>(BackgroundUpdateStateStore::save(updateState));
-}
-
-void MainWindow::startListDownloadActivity(const QString &projectId, const QString &releaseId) {
-    if (projectId.isEmpty()) return;
-    const bool known = (project_ && project_->id == projectId) || projectCache_.contains(projectId);
-    if (!known) return;
-    preparingProjectId_ = projectId;
-    preparingReleaseId_ = releaseId;
-    preparationPhase_ = QStringLiteral("Downloading");
-    preparationBytesReceived_ = 0;
-    preparationBytesTotal_ = -1;
-    lastPreparationPublish_.invalidate();
-    publishPreparationActivity();
-    syncActivityTimer();
-    updatePreparationIndicators();
-    updateUpdateCheckIndicators();
 }
 
 void MainWindow::noteBackgroundCheckStarted() {
@@ -690,13 +669,15 @@ void MainWindow::setProjectListBusy(const bool busy, const QString &message) {
 void MainWindow::refreshProjectList(const QString &selectId,
                                     std::function<void(bool)> completed) {
     const auto generation = ++projectListRefreshGeneration_;
+    const auto selectedProjectId = selectId.isEmpty() && project_ ? project_->id : selectId;
+    const bool preserveCurrent = hasUnsavedProjectDraft();
     setProjectListBusy(true, QStringLiteral("Refreshing…"));
     const auto refreshingMessage = QStringLiteral("Refreshing packages…");
     statusBar()->showMessage(refreshingMessage);
     const auto config = library_.config();
     auto *watcher = new QFutureWatcher<ProjectListRefreshResult>(this);
     connect(watcher, &QFutureWatcher<ProjectListRefreshResult>::finished, this,
-            [this, watcher, generation, selectId, refreshingMessage,
+            [this, watcher, generation, selectedProjectId, preserveCurrent, refreshingMessage,
              completed = std::move(completed)]() mutable {
         auto result = watcher->result();
         watcher->deleteLater();
@@ -718,14 +699,24 @@ void MainWindow::refreshProjectList(const QString &selectId,
             return;
         }
         if (statusBar()->currentMessage() == refreshingMessage) statusBar()->clearMessage();
-        applyProjectList(std::move(result.projects), selectId);
+        applyProjectList(std::move(result.projects), selectedProjectId, {}, preserveCurrent);
         if (completed) completed(true);
         resumeEventRefresh();
     });
-    watcher->setFuture(QtConcurrent::run([config] {
+    watcher->setFuture(QtConcurrent::run([config, selectedProjectId] {
         LibraryClient client(config);
         ProjectListRefreshResult result;
         result.projects = client.list(&result.error);
+        const auto selected = std::find_if(
+            result.projects.begin(), result.projects.end(),
+            [&selectedProjectId](const Project &candidate) {
+                return candidate.id == selectedProjectId;
+            });
+        if (result.error.isEmpty() && !selectedProjectId.isEmpty() &&
+            selected != result.projects.end()) {
+            auto loaded = client.load(selectedProjectId, &result.error);
+            if (loaded) *selected = std::move(*loaded);
+        }
         return result;
     }));
 }
@@ -742,6 +733,7 @@ void MainWindow::updateProjectListItem(const Project &project,
                                        const BackgroundUpdateState &updateState) {
     const auto *release = project.activeTrackingRelease();
     if (release == nullptr) release = project.newestRelease();
+    const auto *healthRelease = project.updateHealthRelease();
     auto visualState = ProjectVisualState::NotInstalled;
     QString statusDescription = QStringLiteral("Not installed");
     if (!project.installedVersion.isEmpty()) {
@@ -757,6 +749,15 @@ void MainWindow::updateProjectListItem(const Project &project,
             statusDescription = QStringLiteral("Installed and up to date");
         }
     }
+    if (healthRelease != nullptr && (healthRelease->update.lastCheckFailed ||
+                                     (healthRelease->update.lastAutomaticStatus == QStringLiteral("paused") &&
+                                      healthRelease->state != ReleaseState::Built))) {
+        visualState = healthRelease->update.lastCheckFailed
+            ? ProjectVisualState::Attention : ProjectVisualState::Warning;
+        statusDescription = healthRelease->update.lastCheckFailed
+            ? QStringLiteral("Last update check failed")
+            : QStringLiteral("Automatic update handling paused");
+    }
     const bool checking = project.id == updateState.checkingProjectId && updateState.checking &&
                           project.id != preparingProjectId_ &&
                           project.id != updateState.preparingProjectId;
@@ -764,6 +765,10 @@ void MainWindow::updateProjectListItem(const Project &project,
                            project.id == updateState.preparingProjectId;
     const bool repositoryBusy = repositoryDistributionJobProjects_.values().contains(project.id);
     const auto repositoryName = repositoryPackageName(project);
+    const bool updateCheckFailed = healthRelease != nullptr && healthRelease->update.lastCheckFailed;
+    const bool automaticHandlingPaused = healthRelease != nullptr &&
+        healthRelease->state != ReleaseState::Built &&
+        healthRelease->update.lastAutomaticStatus == QStringLiteral("paused");
     auto *item = projectListItem(project.id);
     if (item == nullptr) {
         item = new QListWidgetItem;
@@ -781,9 +786,15 @@ void MainWindow::updateProjectListItem(const Project &project,
     item->setText(project.displayName);
     item->setIcon(projectIcon(library_, project));
     item->setData(Qt::UserRole, project.id);
-    item->setData(projectSubtitleRole, repositoryName);
+    item->setData(projectSubtitleRole,
+                  updateCheckFailed ? QStringLiteral("Update check failed · %1").arg(repositoryName)
+                  : automaticHandlingPaused
+                      ? QStringLiteral("Automatic handling paused · %1").arg(repositoryName)
+                      : repositoryName);
     item->setData(projectVisualStateRole, static_cast<int>(visualState));
-    item->setData(projectCheckingRole, checking || preparing);
+    const bool savingUpdateConfiguration = updateConfigurationSaveInFlight_ &&
+                                           project.id == updateConfigurationSaveProjectId_;
+    item->setData(projectCheckingRole, checking || preparing || savingUpdateConfiguration);
     item->setData(projectRepositoryEnabledRole, project.repository.publish);
     item->setData(projectRepositoryBusyRole, repositoryBusy);
     QStringList tooltip{
@@ -800,6 +811,14 @@ void MainWindow::updateProjectListItem(const Project &project,
     };
     if (release != nullptr && !release->debian.version.isEmpty()) {
         tooltip.insert(3, QStringLiteral("Latest known release: %1").arg(release->debian.version));
+    }
+    if (updateCheckFailed) {
+        tooltip.append(QStringLiteral("Last update check failed: %1")
+                           .arg(healthRelease->update.lastCheckMessage));
+    }
+    if (automaticHandlingPaused) {
+        tooltip.append(QStringLiteral("Automatic handling paused: %1")
+                           .arg(healthRelease->update.lastAutomaticMessage));
     }
     item->setToolTip(tooltip.join(QLatin1Char('\n')));
     projectList_->viewport()->update(projectList_->visualItemRect(item));
@@ -819,14 +838,18 @@ void MainWindow::applyProjectList(QList<Project> projects, const QString &select
     projectCache_.clear();
     projectCache_.reserve(projects.size());
     for (const auto &project : projects) {
-        if (project_ && project_->id == project.id && hydratedProjectIds_.contains(project.id)) {
+        if (preserveCurrent && project_ && project_->id == project.id &&
+            hydratedProjectIds_.contains(project.id)) {
             auto hydrated = *project_;
             hydrated.installedVersion = project.installedVersion;
             hydrated.installedReleaseId = project.installedReleaseId;
             hydrated.externallyInstalled = project.externallyInstalled;
             projectCache_.insert(project.id, std::move(hydrated));
+            hydratedProjectIds_.insert(project.id);
         } else {
             projectCache_.insert(project.id, project);
+            if (project.summaryOnly) hydratedProjectIds_.remove(project.id);
+            else hydratedProjectIds_.insert(project.id);
         }
     }
     const auto updateState = BackgroundUpdateStateStore::load();
@@ -1191,9 +1214,7 @@ void MainWindow::updateDeleteButton() {
     }
     const bool busy = projectListRefreshInFlight_ || projectDeleteInFlight_ ||
                       buildInProgress() || packageOperationInProgress() ||
-                      directUrlUpdateService_->isRunning() ||
-                      aptUpdateService_->isRunning() || rpmUpdateService_->isRunning() ||
-                      githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
+                      updateCheckRunning_ || serverImportRunning_ || repositoryImportRunning_ ||
                       importThread_ != nullptr;
     if (reanalyzeButton_ != nullptr) {
         reanalyzeButton_->setEnabled(currentRelease() != nullptr &&
@@ -1224,9 +1245,7 @@ void MainWindow::deleteCurrentProject() {
         return;
     }
     if (buildInProgress() || packageOperationInProgress() ||
-        directUrlUpdateService_->isRunning() || aptUpdateService_->isRunning() ||
-        rpmUpdateService_->isRunning() ||
-        githubUpdateService_->isRunning() || debDownloadService_->isRunning() ||
+        updateCheckRunning_ || serverImportRunning_ || repositoryImportRunning_ ||
         importThread_ != nullptr) {
         QMessageBox::warning(this, QStringLiteral("Project is busy"),
                              QStringLiteral("Wait for the current operation to finish before deleting the project."));
@@ -1408,6 +1427,9 @@ void MainWindow::populateOverview() {
                                                                            : QStringLiteral("GitHub"),
             preparing ? QStringLiteral("Processing…")
             : release.state == ReleaseState::Discovered ? QStringLiteral("Not prepared")
+                : release.state != ReleaseState::Built &&
+                        release.update.lastAutomaticStatus == QStringLiteral("paused")
+                    ? QStringLiteral("Auto-build paused")
                 : reviewCount == 0 ? QStringLiteral("Ready")
                                    : QStringLiteral("%1 item(s)").arg(reviewCount),
             QString::number(release.builds.size()),
@@ -1458,6 +1480,10 @@ void MainWindow::populateOverview() {
                       QStringLiteral("✓ PKGBUILD present"),
                       currentRelease()->update.strategy == UpdateStrategy::Manual
                           ? QStringLiteral("○ Automatic update source not configured")
+                      : currentRelease()->state != ReleaseState::Built &&
+                                currentRelease()->update.lastAutomaticStatus == QStringLiteral("paused")
+                          ? QStringLiteral("⚠ Automatic handling paused: %1")
+                                .arg(currentRelease()->update.lastAutomaticMessage)
                       : currentRelease()->update.strategy == UpdateStrategy::DirectUrl
                           ? currentRelease()->update.lastChecked.isValid()
                               ? QStringLiteral("✓ Direct URL checked: %1")

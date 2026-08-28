@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,10 +35,26 @@ func TestJobEventsIncludeHumanReadablePackageIdentity(t *testing.T) {
 	server.publishJob(jobs.Job{
 		ID: "opaque-job-id", Kind: jobs.KindBuild, Status: "running",
 		ProjectID: "opaque-project-id", ReleaseID: "opaque-release-id",
+		Message: "Building package", Current: 2, Total: 5,
 	})
 	got := <-subscription.C
 	if got.JobKind != jobs.KindBuild || got.JobStatus != "running" ||
-		got.ProjectName != "Parsec" || got.PackageName != "parsec-bin" {
+		got.ProjectName != "Parsec" || got.PackageName != "parsec-bin" ||
+		got.JobMessage != "Building package" || got.JobCurrent != 2 || got.JobTotal != 5 {
 		t.Fatalf("job event %+v", got)
+	}
+}
+
+func TestReleaseMutationEventsTellConnectedClientsToRefresh(t *testing.T) {
+	hub := events.New()
+	subscription := hub.Subscribe()
+	defer subscription.Cancel()
+	server := &Server{Config: Config{Events: hub}}
+	request := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/releases/release-from-mcp/configuration", nil)
+	server.publishMutation(request)
+	got := <-subscription.C
+	if got.ReleaseID != "release-from-mcp" || len(got.Topics) != 1 || got.Topics[0] != "projects" {
+		t.Fatalf("release mutation event %+v", got)
 	}
 }

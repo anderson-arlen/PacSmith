@@ -389,6 +389,27 @@ func TestReadPayloadFile(t *testing.T) {
 	}
 }
 
+func TestSelectsLargestVendorBundleIcon(t *testing.T) {
+	png := func(size uint32) []byte {
+		contents := make([]byte, 24)
+		copy(contents, pngSignature)
+		binary.BigEndian.PutUint32(contents[16:20], size)
+		binary.BigEndian.PutUint32(contents[20:24], size)
+		return contents
+	}
+	candidates := []iconCandidate{
+		{path: "opt/vendor/product_logo_16.png", contents: png(16)},
+		{path: "opt/vendor/product_logo_256.png", contents: png(256)},
+	}
+	if !isDebIconCandidate(candidates[0].path, int64(len(candidates[0].contents))) {
+		t.Fatal("vendor-bundled PNG should be considered as a DEB icon")
+	}
+	selected := selectBestIcon(candidates, map[string]struct{}{"vendor": {}}, "vendor")
+	if selected == nil || selected.path != candidates[1].path {
+		t.Fatalf("selected icon = %+v, want %q", selected, candidates[1].path)
+	}
+}
+
 func TestVSCodePostinstAptRepository(t *testing.T) {
 	script := MaintainerScript{
 		Name: "postinst",

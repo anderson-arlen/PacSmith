@@ -12,6 +12,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
 	"github.com/anderson-arlen/pacsmith/server/internal/events"
+	githubapi "github.com/anderson-arlen/pacsmith/server/internal/github"
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
 	"github.com/anderson-arlen/pacsmith/server/internal/listen"
@@ -19,6 +20,7 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 	"github.com/anderson-arlen/pacsmith/server/internal/secret"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
+	"github.com/anderson-arlen/pacsmith/server/internal/updatecheck"
 	"github.com/anderson-arlen/pacsmith/server/internal/version"
 )
 
@@ -43,6 +45,8 @@ type Config struct {
 	ApplyRepo   func(listen.Config) error
 	RepoBound   func() []string
 	Events      *events.Hub
+	GitHub      *githubapi.Service
+	Updates     *updatecheck.Service
 }
 
 type Server struct {
@@ -80,6 +84,13 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/releases/{id}/files/{name}", server.deleteReleaseFile)
 	mux.HandleFunc("PUT /api/v1/releases/{id}/icon", server.putReleaseIcon)
 	mux.HandleFunc("POST /api/v1/imports", server.createImport)
+	mux.HandleFunc("POST /api/v1/github/resolve", server.resolveGitHub)
+	mux.HandleFunc("POST /api/v1/github/imports", server.createGitHubImport)
+	mux.HandleFunc("POST /api/v1/remote-imports", server.createRemoteImport)
+	mux.HandleFunc("POST /api/v1/repository-imports", server.createRepositoryImport)
+	mux.HandleFunc("POST /api/v1/repository-keys/inspect", server.inspectRepositoryKey)
+	mux.HandleFunc("POST /api/v1/update-checks", server.createUpdateCheck)
+	mux.HandleFunc("POST /api/v1/releases/{id}/prepare", server.prepareDiscoveredUpdate)
 	mux.HandleFunc("POST /api/v1/releases/{id}/reanalyze", server.reanalyze)
 	mux.HandleFunc("POST /api/v1/releases/{id}/builds", server.createBuild)
 	mux.HandleFunc("GET /api/v1/jobs", server.listActiveJobs)
@@ -131,7 +142,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 		r = r.WithContext(auth.WithPrincipal(r.Context(), principal))
-		if !isMutation(r.Method) {
+		if !publishesMutation(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -155,6 +166,13 @@ func (w *statusResponseWriter) WriteHeader(status int) {
 
 func isMutation(method string) bool {
 	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+}
+
+func publishesMutation(request *http.Request) bool {
+	return isMutation(request.Method) &&
+		!(request.Method == http.MethodPost &&
+			(request.URL.Path == "/api/v1/github/resolve" ||
+				request.URL.Path == "/api/v1/repository-keys/inspect"))
 }
 
 func (s *Server) principalFor(r *http.Request) auth.Principal {

@@ -16,10 +16,8 @@
 #include "core/payload_review.hpp"
 #include "core/package_artifact.hpp"
 #include "core/background_updates.hpp"
-#include "core/github_update_service.hpp"
 #include "core/path_safety.hpp"
 #include "core/managed_package.hpp"
-#include "gui/age_unlock.hpp"
 #include "gui/command_progress_dialog.hpp"
 #include "gui/desktop_entry_highlighter.hpp"
 #include "gui/gui_instance.hpp"
@@ -60,7 +58,6 @@
 #include <QHBoxLayout>
 #include <QHostInfo>
 #include <QIcon>
-#include <QEventLoop>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -108,6 +105,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTimeEdit>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -116,7 +114,6 @@
 #include <QThread>
 #include <QThreadPool>
 #include <QTimer>
-#include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QUrl>
