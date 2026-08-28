@@ -127,6 +127,9 @@ runuser -u builder -- bash -lc 'cd /build && makepkg --printsrcinfo > .SRCINFO'
 mapfile -t dependencies < <(
   awk -F ' = ' '/^[[:space:]]*(make|check)?depends(_[^ ]+)? = / { value=$2; sub(/[<>=].*$/, "", value); print value }' /build/.SRCINFO | sort -u
 )
+# The bind-mounted cache is private to the daemon user, so the image's
+# sandbox-only alpm UID cannot traverse it. The later builder remains unable to write it.
+sed -i '/^[[:space:]]*DownloadUser[[:space:]]*=/d' /etc/pacman.conf
 pacman -Syu --needed --noconfirm ccache "${dependencies[@]}"
 runuser -u builder -- env \
   PATH=/usr/lib/ccache/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \

@@ -45,7 +45,8 @@ func TestPodmanBuildArgumentsConfineCustomBuild(t *testing.T) {
 		"src=/work/cache/ccache/project-1,dst=/cache/ccache,rw",
 		"src=/work/cache/sources/project-1,dst=/cache/sources,rw",
 		"src=/work/cache/pacman,dst=/var/cache/pacman/pkg,rw",
-		defaultBuildImage, "makepkg --printsrcinfo", "pacman -Syu --needed --noconfirm",
+		defaultBuildImage, "makepkg --printsrcinfo", "DownloadUser",
+		"pacman -Syu --needed --noconfirm",
 		"makepkg --force --noconfirm",
 	} {
 		if !strings.Contains(joined, required) {

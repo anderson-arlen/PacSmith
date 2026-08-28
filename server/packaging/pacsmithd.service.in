@@ -10,7 +10,9 @@ ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/pacsmithd
 Restart=on-failure
 RestartSec=3
 UMask=0077
-NoNewPrivileges=true
+# Rootless Podman needs the newuidmap/newgidmap file capabilities while setting
+# up its user namespace. Builds enable no-new-privileges inside the container.
+NoNewPrivileges=false
 RuntimeDirectory=pacsmith
 RuntimeDirectoryMode=0700
 
