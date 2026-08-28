@@ -24,6 +24,11 @@ struct ArtifactImportTask {
     QString error;
 };
 
+struct RemoteImportCompletionTask {
+    std::optional<JobStatus> job;
+    QString error;
+};
+
 } // namespace
 
 void MainWindow::chooseImport() {
@@ -413,28 +418,76 @@ void MainWindow::importPackage(const QString &path) {
         pendingImportOptions_ = {};
         serverImportRunning_ = true;
         auto *progress = new QProgressDialog(
-            QStringLiteral("The PacSmith daemon is downloading and inspecting the vendor artifact…"),
-            QString{}, 0, 0, this);
+            QStringLiteral("Connecting to the vendor download…"),
+            QStringLiteral("Cancel"), 0, 0, this);
         progress->setWindowTitle(QStringLiteral("Importing Direct Download"));
-        progress->setWindowModality(Qt::WindowModal);
-        progress->setCancelButton(nullptr);
+        progress->setWindowModality(Qt::NonModal);
         progress->setMinimumDuration(0);
+        progress->setAutoClose(false);
+        progress->setAutoReset(false);
         progress->show();
         auto *watcher = new QFutureWatcher<ArtifactImportTask>(this);
         connect(watcher, &QFutureWatcher<ArtifactImportTask>::finished, this,
                 [this, watcher, progress, submittedManualRelease = !existingProjectId.isEmpty()] {
             const auto task = watcher->result();
             watcher->deleteLater();
-            progress->close();
-            progress->deleteLater();
-            serverImportRunning_ = false;
             if (!task.result) {
+                progress->close();
+                progress->deleteLater();
+                serverImportRunning_ = false;
                 QMessageBox::critical(this, QStringLiteral("Direct download import failed"),
                                       task.error);
                 return;
             }
-            finishServerArtifactImport(*task.result, submittedManualRelease,
-                                       QStringLiteral("Vendor artifact downloaded and inspected by pacsmithd"));
+            remoteImportJobId_ = task.result->jobId;
+            preparingProjectId_ = task.result->project.id;
+            preparingReleaseId_ = task.result->releaseId;
+            preparationPhase_ = QStringLiteral("Downloading");
+            preparationBytesReceived_ = 0;
+            preparationBytesTotal_ = -1;
+            downloadProgress_ = progress;
+            connect(progress, &QProgressDialog::canceled, this,
+                    [config = library_.config(), jobId = remoteImportJobId_] {
+                QThreadPool::globalInstance()->start([config, jobId] {
+                    LibraryClient client(config);
+                    QString ignored;
+                    static_cast<void>(client.cancelJob(jobId, &ignored));
+                });
+            });
+            refreshProjectList(preparingProjectId_);
+            updatePreparationIndicators();
+            updateDashboardActions();
+            const auto config = library_.config();
+            auto *completion = new QFutureWatcher<RemoteImportCompletionTask>(this);
+            connect(completion, &QFutureWatcher<RemoteImportCompletionTask>::finished, this,
+                    [this, completion, result = *task.result, submittedManualRelease] {
+                const auto completed = completion->result();
+                completion->deleteLater();
+                const bool succeeded = completed.job &&
+                    completed.job->status == QStringLiteral("succeeded");
+                const auto error = !completed.error.isEmpty() ? completed.error
+                    : completed.job ? completed.job->error : QString{};
+                resetPreparationState();
+                serverImportRunning_ = false;
+                if (succeeded) {
+                    finishServerArtifactImport(
+                        result, submittedManualRelease,
+                        QStringLiteral("Vendor artifact downloaded and inspected by pacsmithd"));
+                } else {
+                    refreshProjectList(result.project.id);
+                    statusBar()->showMessage(
+                        error.isEmpty() ? QStringLiteral("Direct download import stopped")
+                                        : QStringLiteral("Direct download import stopped: %1").arg(error),
+                        10000);
+                }
+                updateDashboardActions();
+            });
+            completion->setFuture(QtConcurrent::run([config, jobId = remoteImportJobId_] {
+                RemoteImportCompletionTask completed;
+                LibraryClient client(config);
+                completed.job = client.waitForJob(jobId, &completed.error);
+                return completed;
+            }));
         });
         const auto config = library_.config();
         watcher->setFuture(QtConcurrent::run(

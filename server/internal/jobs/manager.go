@@ -31,24 +31,25 @@ const (
 var ErrNotFound = errors.New("job not found")
 
 type Job struct {
-	ID          string          `json:"id"`
-	Kind        string          `json:"kind"`
-	Status      string          `json:"status"`
-	ProjectID   string          `json:"project_id,omitempty"`
-	ProjectName string          `json:"project_name,omitempty"`
-	PackageName string          `json:"package_name,omitempty"`
-	ReleaseID   string          `json:"release_id,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	LogOffset   int64           `json:"log_offset"`
-	CreatedAt   string          `json:"created_at"`
-	StartedAt   string          `json:"started_at,omitempty"`
-	FinishedAt  string          `json:"finished_at,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Message     string          `json:"message,omitempty"`
-	Current     int             `json:"current,omitempty"`
-	Total       int             `json:"total,omitempty"`
-	FailedItems int             `json:"failed_items,omitempty"`
-	PausedItems int             `json:"paused_items,omitempty"`
+	ID              string          `json:"id"`
+	Kind            string          `json:"kind"`
+	Status          string          `json:"status"`
+	ProjectID       string          `json:"project_id,omitempty"`
+	ProjectName     string          `json:"project_name,omitempty"`
+	PackageName     string          `json:"package_name,omitempty"`
+	ReleaseID       string          `json:"release_id,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	LogOffset       int64           `json:"log_offset"`
+	CreatedAt       string          `json:"created_at"`
+	StartedAt       string          `json:"started_at,omitempty"`
+	FinishedAt      string          `json:"finished_at,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	Message         string          `json:"message,omitempty"`
+	Current         int64           `json:"current,omitempty"`
+	Total           int64           `json:"total,omitempty"`
+	FailedItems     int64           `json:"failed_items,omitempty"`
+	PausedItems     int64           `json:"paused_items,omitempty"`
+	ProjectAttached bool            `json:"-"`
 }
 
 type Progress struct {
@@ -57,10 +58,10 @@ type Progress struct {
 	ReleaseID   string
 	ProjectName string
 	PackageName string
-	Current     int
-	Total       int
-	FailedItems int
-	PausedItems int
+	Current     int64
+	Total       int64
+	FailedItems int64
+	PausedItems int64
 }
 
 type Handler func(ctx context.Context, job Job, payload json.RawMessage, log func(string),
@@ -312,22 +313,30 @@ func (m *Manager) run(ctx context.Context, id string) {
 	progressFn := func(progress Progress) {
 		lastProgress = progress
 		hasProgress = true
-		update := job
-		update.Status = "running"
-		update.Message = progress.Message
-		update.Current = progress.Current
-		update.Total = progress.Total
-		update.FailedItems = progress.FailedItems
-		update.PausedItems = progress.PausedItems
+		projectAttached := !row.ProjectID.Valid && progress.ProjectID != ""
+		projectID := row.ProjectID
+		releaseID := row.ReleaseID
 		if progress.ProjectID != "" {
-			update.ProjectID = progress.ProjectID
+			projectID = nullString(progress.ProjectID)
 		}
 		if progress.ReleaseID != "" {
-			update.ReleaseID = progress.ReleaseID
+			releaseID = nullString(progress.ReleaseID)
 		}
+		updated, err := m.DB.Queries.UpdateJob(jobCtx, sqlcdb.UpdateJobParams{
+			Status: "running", Error: "", LogOffset: m.logSize(id),
+			StartedAt: row.StartedAt, FinishedAt: sql.NullString{},
+			ProjectID: projectID, ReleaseID: releaseID,
+			Message: progress.Message, Current: progress.Current, Total: progress.Total,
+			FailedItems: progress.FailedItems, PausedItems: progress.PausedItems, ID: row.ID,
+		})
+		if err != nil {
+			return
+		}
+		row = updated
+		update := jobFromRow(updated)
+		update.ProjectAttached = projectAttached
 		update.ProjectName = progress.ProjectName
 		update.PackageName = progress.PackageName
-		update.LogOffset = m.logSize(id)
 		m.notify(update)
 	}
 	var result json.RawMessage
@@ -354,14 +363,19 @@ func (m *Manager) run(ctx context.Context, id string) {
 	}
 	offset := m.logSize(id)
 	updated, updateErr := m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
-		Status:     status,
-		Error:      errText,
-		LogOffset:  offset,
-		StartedAt:  sql.NullString{String: started, Valid: true},
-		FinishedAt: sql.NullString{String: finished, Valid: true},
-		ProjectID:  row.ProjectID,
-		ReleaseID:  row.ReleaseID,
-		ID:         row.ID,
+		Status:      status,
+		Error:       errText,
+		LogOffset:   offset,
+		StartedAt:   sql.NullString{String: started, Valid: true},
+		FinishedAt:  sql.NullString{String: finished, Valid: true},
+		ProjectID:   row.ProjectID,
+		ReleaseID:   row.ReleaseID,
+		Message:     lastProgress.Message,
+		Current:     lastProgress.Current,
+		Total:       lastProgress.Total,
+		FailedItems: lastProgress.FailedItems,
+		PausedItems: lastProgress.PausedItems,
+		ID:          row.ID,
 	})
 	if updateErr == nil {
 		finishedJob := jobFromRow(updated)
@@ -407,16 +421,21 @@ func (m *Manager) logPath(id string) string {
 
 func jobFromRow(row sqlcdb.Job) Job {
 	return Job{
-		ID:         row.ID,
-		Kind:       row.Kind,
-		Status:     row.Status,
-		ProjectID:  row.ProjectID.String,
-		ReleaseID:  row.ReleaseID.String,
-		Error:      row.Error,
-		LogOffset:  row.LogOffset,
-		CreatedAt:  row.CreatedAt,
-		StartedAt:  row.StartedAt.String,
-		FinishedAt: row.FinishedAt.String,
+		ID:          row.ID,
+		Kind:        row.Kind,
+		Status:      row.Status,
+		ProjectID:   row.ProjectID.String,
+		ReleaseID:   row.ReleaseID.String,
+		Error:       row.Error,
+		LogOffset:   row.LogOffset,
+		CreatedAt:   row.CreatedAt,
+		StartedAt:   row.StartedAt.String,
+		FinishedAt:  row.FinishedAt.String,
+		Message:     row.Message,
+		Current:     row.Current,
+		Total:       row.Total,
+		FailedItems: row.FailedItems,
+		PausedItems: row.PausedItems,
 	}
 }
 

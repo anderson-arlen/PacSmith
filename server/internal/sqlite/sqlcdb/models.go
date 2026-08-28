@@ -54,6 +54,11 @@ type Job struct {
 	PayloadJson string         `json:"payload_json"`
 	Error       string         `json:"error"`
 	LogOffset   int64          `json:"log_offset"`
+	Message     string         `json:"message"`
+	Current     int64          `json:"current"`
+	Total       int64          `json:"total"`
+	FailedItems int64          `json:"failed_items"`
+	PausedItems int64          `json:"paused_items"`
 	CreatedAt   string         `json:"created_at"`
 	StartedAt   sql.NullString `json:"started_at"`
 	FinishedAt  sql.NullString `json:"finished_at"`

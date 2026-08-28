@@ -409,18 +409,29 @@ std::optional<ImportResult> LibraryClient::importRemoteUrl(
          {QStringLiteral("version"), version},
          {QStringLiteral("expected_sha256"), expectedSha256}}, error, 202);
     if (!accepted) return std::nullopt;
-    const auto job = waitForJob(accepted->value(QStringLiteral("job_id")).toString(), error);
-    if (!job || job->status != QStringLiteral("succeeded")) {
+    const auto jobId = accepted->value(QStringLiteral("job_id")).toString();
+    std::optional<JobStatus> job;
+    for (int attempt = 0; attempt < 12000; ++attempt) {
+        job = getJob(jobId, error);
+        if (!job) return std::nullopt;
+        if (!job->projectId.isEmpty() || job->status == QStringLiteral("failed") ||
+            job->status == QStringLiteral("interrupted")) {
+            break;
+        }
+        QThread::msleep(50);
+    }
+    if (!job || job->projectId.isEmpty()) {
         if (error != nullptr && error->isEmpty()) {
-            *error = job ? job->error : QStringLiteral("remote import job failed");
+            *error = job && !job->error.isEmpty()
+                ? job->error : QStringLiteral("remote import did not create a project");
         }
         return std::nullopt;
     }
     ImportResult result;
-    result.projectCreated = job->result.value(QStringLiteral("project_created")).toBool();
-    result.duplicate = job->result.value(QStringLiteral("duplicate")).toBool();
-    result.releaseId = job->result.value(QStringLiteral("release_id")).toString();
-    const auto project = load(job->result.value(QStringLiteral("project_id")).toString(), error);
+    result.projectCreated = existingProjectId.isEmpty();
+    result.releaseId = job->releaseId;
+    result.jobId = jobId;
+    const auto project = load(job->projectId, error);
     if (!project) return std::nullopt;
     result.project = *project;
     return result;
@@ -569,8 +580,15 @@ std::optional<JobStatus> LibraryClient::getJob(const QString &jobId, QString *er
     job.kind = object->value(QStringLiteral("kind")).toString();
     job.status = object->value(QStringLiteral("status")).toString();
     job.projectId = object->value(QStringLiteral("project_id")).toString();
+    job.projectName = object->value(QStringLiteral("project_name")).toString();
+    job.packageName = object->value(QStringLiteral("package_name")).toString();
     job.releaseId = object->value(QStringLiteral("release_id")).toString();
     job.error = object->value(QStringLiteral("error")).toString();
+    job.message = object->value(QStringLiteral("message")).toString();
+    job.current = object->value(QStringLiteral("current")).toInteger();
+    job.total = object->value(QStringLiteral("total")).toInteger();
+    job.failedItems = object->value(QStringLiteral("failed_items")).toInteger();
+    job.pausedItems = object->value(QStringLiteral("paused_items")).toInteger();
     job.result = object->value(QStringLiteral("result")).toObject();
     return job;
 }
@@ -591,6 +609,11 @@ QList<JobStatus> LibraryClient::activeJobs(const QString &kind, QString *error) 
         job.packageName = value.value(QStringLiteral("package_name")).toString();
         job.releaseId = value.value(QStringLiteral("release_id")).toString();
         job.error = value.value(QStringLiteral("error")).toString();
+        job.message = value.value(QStringLiteral("message")).toString();
+        job.current = value.value(QStringLiteral("current")).toInteger();
+        job.total = value.value(QStringLiteral("total")).toInteger();
+        job.failedItems = value.value(QStringLiteral("failed_items")).toInteger();
+        job.pausedItems = value.value(QStringLiteral("paused_items")).toInteger();
         job.result = value.value(QStringLiteral("result")).toObject();
         result.append(std::move(job));
     }

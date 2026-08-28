@@ -72,9 +72,11 @@ void MainWindow::updateDashboardActions() {
         projectBuildOutputButton_->setEnabled(building);
     }
     if (projectBuildCancelButton_ != nullptr) {
-        projectBuildCancelButton_->setVisible(building);
-        projectBuildCancelButton_->setEnabled(building);
-        projectBuildCancelButton_->setText(QStringLiteral("Cancel Build"));
+        const bool importRunning = preparing && !remoteImportJobId_.isEmpty();
+        projectBuildCancelButton_->setVisible(building || importRunning);
+        projectBuildCancelButton_->setEnabled(building || importRunning);
+        projectBuildCancelButton_->setText(importRunning ? QStringLiteral("Cancel Import")
+                                                         : QStringLiteral("Cancel Build"));
     }
     if (building) {
         projectPrimaryButton_->setVisible(true);
@@ -608,6 +610,7 @@ void MainWindow::resetPreparationState() {
     if (!projectId.isEmpty()) clearPublishedPreparationActivity(projectId);
     preparingProjectId_.clear();
     preparingReleaseId_.clear();
+    remoteImportJobId_.clear();
     preparationSourceReleaseId_.clear();
     automaticPreparationBuild_ = false;
     preparationPhase_.clear();

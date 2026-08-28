@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,11 +93,12 @@ func (s *Service) InspectRepositoryKey(ctx context.Context, rawURL string) (Repo
 	}, nil
 }
 
-func (s *Service) ImportDirectURL(ctx context.Context, request DirectImportRequest,
-	log func(string)) (library.ImportResult, error) {
+func (s *Service) ImportDirectURL(ctx context.Context, request DirectImportRequest, jobID string,
+	log func(string), reporters ...func(Progress)) (result library.ImportResult, resultErr error) {
 	if log == nil {
 		log = func(string) {}
 	}
+	report := progressReporter(reporters)
 	parsed, err := url.Parse(strings.TrimSpace(request.URL))
 	if err != nil || validateHTTPURL(parsed) != nil || parsed.Scheme != "https" || parsed.Fragment != "" {
 		return library.ImportResult{}, fmt.Errorf("Direct artifact URL must be HTTPS without credentials or a fragment")
@@ -104,14 +106,6 @@ func (s *Service) ImportDirectURL(ctx context.Context, request DirectImportReque
 	expectedSHA256 := strings.ToLower(strings.TrimSpace(request.ExpectedSHA256))
 	if expectedSHA256 != "" && !sha256Pattern.MatchString(expectedSHA256) {
 		return library.ImportResult{}, fmt.Errorf("expected SHA256 must contain 64 hexadecimal characters")
-	}
-	log("Downloading vendor artifact…\n")
-	record, err := s.downloadArtifact(ctx, parsed, filepath.Base(parsed.Path), "vendor")
-	if err != nil {
-		return library.ImportResult{}, err
-	}
-	if expectedSHA256 != "" && expectedSHA256 != record.SHA256 {
-		return library.ImportResult{}, fmt.Errorf("downloaded artifact SHA256 does not match the expected digest")
 	}
 	canonical := *parsed
 	canonical.RawQuery = ""
@@ -121,11 +115,67 @@ func (s *Service) ImportDirectURL(ctx context.Context, request DirectImportReque
 		"originalUrl": parsed.String(), "publisherDigest": expectedSHA256,
 		"publisherVerified": expectedSHA256 != "",
 	})
+	started := library.ImportResult{}
+	projectName := ""
+	packageName := ""
+	defer func() {
+		if resultErr == nil || started.ReleaseID == "" {
+			return
+		}
+		status := "failed"
+		if errors.Is(resultErr, context.Canceled) {
+			status = "canceled"
+		}
+		_ = s.Library.FinishPendingImport(context.Background(), started.ReleaseID,
+			status, resultErr.Error())
+	}()
+	log("Downloading vendor artifact…\n")
+	record, err := s.downloadArtifact(ctx, parsed, filepath.Base(parsed.Path), "vendor",
+		downloadObserver{
+			Started: func(info downloadInfo) error {
+				started, err = s.Library.BeginPendingImport(ctx, library.PendingImportRequest{
+					JobID: jobID, ExistingProjectID: request.ExistingProjectID,
+					Version: request.Version, Filename: info.Filename,
+					CanonicalIdentity: canonical.String(), SourceURL: parsed.String(),
+					Acquisition: acquisition, ContentLength: info.ContentLength,
+					Received: info.Received,
+				})
+				if err != nil {
+					return err
+				}
+				if project, projectErr := s.Library.GetProject(ctx, started.ProjectID); projectErr == nil {
+					projectName = project.DisplayName
+					packageName = project.ArchPackageName
+				}
+				report(Progress{Message: "Downloading " + info.Filename,
+					ProjectID: started.ProjectID, ReleaseID: started.ReleaseID,
+					ProjectName: projectName, PackageName: packageName,
+					Current: info.Received, Total: info.ContentLength})
+				return nil
+			},
+			Progress: func(info downloadInfo) {
+				report(Progress{Message: "Downloading " + info.Filename,
+					ProjectID: started.ProjectID, ReleaseID: started.ReleaseID,
+					ProjectName: projectName, PackageName: packageName,
+					Current: info.Received, Total: info.ContentLength})
+			},
+		})
+	if err != nil {
+		return library.ImportResult{}, err
+	}
+	if expectedSHA256 != "" && expectedSHA256 != record.SHA256 {
+		return library.ImportResult{}, fmt.Errorf("downloaded artifact SHA256 does not match the expected digest")
+	}
+	log("Inspecting vendor artifact…\n")
+	report(Progress{Message: "Inspecting vendor artifact", ProjectID: started.ProjectID,
+		ReleaseID: started.ReleaseID, ProjectName: projectName, PackageName: packageName,
+		Current: record.SizeBytes, Total: record.SizeBytes})
 	return s.Library.ImportArtifact(ctx, library.ImportRequest{
-		ArtifactID: record.ID, ExistingProjectID: request.ExistingProjectID,
+		ArtifactID: record.ID, ExistingProjectID: started.ProjectID,
 		Version: request.Version, ExpectedSHA256: expectedSHA256,
 		AcquisitionKind: "direct-url", CanonicalIdentity: canonical.String(),
-		Acquisition: acquisition,
+		Acquisition: acquisition, PendingReleaseID: started.ReleaseID,
+		PendingProjectCreated: started.ProjectCreated,
 	})
 }
 

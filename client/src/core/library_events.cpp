@@ -67,10 +67,10 @@ void SseParser::dispatch(QList<ServerEvent> &events) {
         event.jobKind = object.value(QStringLiteral("job_kind")).toString();
         event.jobStatus = object.value(QStringLiteral("job_status")).toString();
         event.jobMessage = object.value(QStringLiteral("job_message")).toString();
-        event.jobCurrent = object.value(QStringLiteral("job_current")).toInt();
-        event.jobTotal = object.value(QStringLiteral("job_total")).toInt();
-        event.jobFailedItems = object.value(QStringLiteral("job_failed_items")).toInt();
-        event.jobPausedItems = object.value(QStringLiteral("job_paused_items")).toInt();
+        event.jobCurrent = object.value(QStringLiteral("job_current")).toInteger();
+        event.jobTotal = object.value(QStringLiteral("job_total")).toInteger();
+        event.jobFailedItems = object.value(QStringLiteral("job_failed_items")).toInteger();
+        event.jobPausedItems = object.value(QStringLiteral("job_paused_items")).toInteger();
         events.append(std::move(event));
     }
     eventName_.clear();

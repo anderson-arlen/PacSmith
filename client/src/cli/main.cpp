@@ -489,7 +489,8 @@ int main(int argc, char *argv[]) {
                 errorStream << "error: " << importError << '\n';
                 return 1;
             }
-            out << imported->project.id << '\t' << imported->releaseId << '\n';
+            out << imported->project.id << '\t' << imported->releaseId << '\t'
+                << imported->jobId << '\n';
             return 0;
         }
         if (arguments.size() != 3) {

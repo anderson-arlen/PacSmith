@@ -515,6 +515,8 @@ type ImportRequest struct {
 	Update                   json.RawMessage `json:"update"`
 	TrustedSigningKey        string          `json:"trusted_signing_key"`
 	TrustedSigningKeySource  string          `json:"trusted_signing_key_source"`
+	PendingReleaseID         string          `json:"pending_release_id"`
+	PendingProjectCreated    bool            `json:"pending_project_created"`
 }
 
 type ImportResult struct {
@@ -611,16 +613,50 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 		}
 	}
 
-	existing, err := s.DB.Queries.GetReleaseByProjectSHA256(ctx, sqlcdb.GetReleaseByProjectSHA256Params{
-		ProjectID:    project.ID,
-		SourceSha256: record.SHA256,
-	})
-	foundExisting := err == nil
-	if foundExisting && existing.State != "discovered" {
+	var existing sqlcdb.Release
+	foundExisting := false
+	if req.PendingReleaseID != "" {
+		existing, err = s.DB.Queries.GetRelease(ctx, req.PendingReleaseID)
+		if err == nil && existing.ProjectID != project.ID {
+			return ImportResult{}, fmt.Errorf("%w: pending release does not belong to project", ErrInvalid)
+		}
+		foundExisting = err == nil
+	} else {
+		existing, err = s.DB.Queries.GetReleaseByProjectSHA256(ctx, sqlcdb.GetReleaseByProjectSHA256Params{
+			ProjectID: project.ID, SourceSha256: record.SHA256,
+		})
+		foundExisting = err == nil
+	}
+	if foundExisting && existing.State != "discovered" && existing.State != "preparing" {
 		return ImportResult{ProjectID: project.ID, ReleaseID: existing.ID, Duplicate: true}, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return ImportResult{}, err
+	}
+
+	if req.PendingProjectCreated {
+		pkg := recipe.SanitizePackageName(analysis.Metadata.Package)
+		if pkg == "" {
+			pkg = strings.TrimSuffix(project.ArchPackageName, "-bin")
+		}
+		displayName := preferredName(analysis)
+		if displayName == "" {
+			displayName = project.DisplayName
+		}
+		vendorName := analysis.Metadata.Maintainer
+		if vendorName == "" {
+			vendorName = project.VendorName
+		}
+		project, err = s.DB.Queries.UpdateProject(ctx, sqlcdb.UpdateProjectParams{
+			DisplayName: displayName, ArchPackageName: pkg + "-bin", VendorName: vendorName,
+			SourceIdentity: project.SourceIdentity, IconArtifactID: project.IconArtifactID,
+			IconSha256: project.IconSha256, HistoryJson: project.HistoryJson,
+			AutoBuildPolicy: project.AutoBuildPolicy, CompileCachePolicy: project.CompileCachePolicy,
+			ModifiedAt: nowUTC(), ID: project.ID, Revision: project.Revision,
+		})
+		if err != nil {
+			return ImportResult{}, err
+		}
 	}
 
 	releaseID := uuid.NewString()
@@ -758,7 +794,7 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 	return ImportResult{
 		ProjectID:      project.ID,
 		ReleaseID:      release.ID,
-		ProjectCreated: created,
+		ProjectCreated: created || req.PendingProjectCreated,
 	}, nil
 }
 

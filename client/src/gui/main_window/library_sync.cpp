@@ -41,6 +41,41 @@ void MainWindow::handleServerEvent(const ServerEvent &event) {
     const QSet<QString> topics(event.topics.cbegin(), event.topics.cend());
     emit serverTopicsChanged(event.topics);
     updateBuildJobStatus(event);
+    if (event.jobKind == QStringLiteral("remote_import") &&
+        (remoteImportJobId_.isEmpty() || event.jobId == remoteImportJobId_) &&
+        !event.projectId.isEmpty()) {
+        if (remoteImportJobId_.isEmpty()) remoteImportJobId_ = event.jobId;
+        serverImportRunning_ = event.jobStatus == QStringLiteral("queued") ||
+                               event.jobStatus == QStringLiteral("running");
+        preparingProjectId_ = event.projectId;
+        preparingReleaseId_ = event.releaseId;
+        preparationPhase_ = event.jobMessage.startsWith(QStringLiteral("Inspecting"))
+            ? QStringLiteral("Inspecting") : QStringLiteral("Downloading");
+        preparationBytesReceived_ = event.jobCurrent;
+        preparationBytesTotal_ = event.jobTotal;
+        if (downloadProgress_ != nullptr) {
+            downloadProgress_->setLabelText(
+                downloadActivityText(preparationPhase_, preparationBytesReceived_,
+                                     preparationBytesTotal_));
+            if (preparationBytesTotal_ > 0) {
+                const auto receivedMiB = preparationBytesReceived_ / (1024 * 1024);
+                const auto totalMiB = std::max<qint64>(1, preparationBytesTotal_ / (1024 * 1024));
+                downloadProgress_->setRange(0, static_cast<int>(std::min<qint64>(totalMiB, INT_MAX)));
+                downloadProgress_->setValue(
+                    static_cast<int>(std::min<qint64>(receivedMiB, totalMiB)));
+            }
+        }
+        updatePreparationIndicators();
+        updateDashboardActions();
+        const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
+                              event.jobStatus == QStringLiteral("failed") ||
+                              event.jobStatus == QStringLiteral("interrupted");
+        if (finished && downloadProgress_ == nullptr) {
+            const auto projectId = preparingProjectId_;
+            resetPreparationState();
+            refreshProjectList(projectId);
+        }
+    }
     if (event.jobKind == QStringLiteral("update_check")) {
         const bool active = event.jobStatus == QStringLiteral("queued") ||
                             event.jobStatus == QStringLiteral("running");
@@ -61,7 +96,7 @@ void MainWindow::handleServerEvent(const ServerEvent &event) {
             publishUpdateCheckActivity(false);
             if (failed && !message.isEmpty()) {
                 updateCheckErrorDetails_ = message;
-                const int count = std::max(1, event.jobFailedItems + event.jobPausedItems);
+                const qint64 count = std::max<qint64>(1, event.jobFailedItems + event.jobPausedItems);
                 updateCheckErrorsButton_->setText(count == 1 ? QStringLiteral("1 Update Issue")
                                                               : QStringLiteral("%1 Update Issues").arg(count));
                 updateCheckErrorsButton_->setVisible(true);
@@ -150,11 +185,18 @@ void MainWindow::restoreActiveBuildJobs() {
             event.projectName = job.projectName;
             event.packageName = job.packageName;
             event.releaseId = job.releaseId;
-            updateBuildJobStatus(event);
+            if (job.kind == QStringLiteral("build")) {
+                updateBuildJobStatus(event);
+            } else {
+                handleServerEvent(event);
+            }
         }
     });
     watcher->setFuture(QtConcurrent::run([config] {
-        return LibraryClient(config).activeJobs(QStringLiteral("build"));
+        LibraryClient client(config);
+        auto jobs = client.activeJobs(QStringLiteral("build"));
+        jobs.append(client.activeJobs(QStringLiteral("remote_import")));
+        return jobs;
     }));
 }
 

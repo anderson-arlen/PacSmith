@@ -63,8 +63,8 @@ type Progress struct {
 	ReleaseID   string
 	ProjectName string
 	PackageName string
-	Current     int
-	Total       int
+	Current     int64
+	Total       int64
 }
 
 type checkTarget struct {

@@ -18,6 +18,7 @@ struct ImportResult {
     QString releaseId;
     bool projectCreated{false};
     bool duplicate{false};
+    QString jobId;
 };
 
 struct ImportOptions {

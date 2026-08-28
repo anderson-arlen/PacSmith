@@ -16,10 +16,10 @@ type Event struct {
 	JobKind        string   `json:"job_kind,omitempty"`
 	JobStatus      string   `json:"job_status,omitempty"`
 	JobMessage     string   `json:"job_message,omitempty"`
-	JobCurrent     int      `json:"job_current,omitempty"`
-	JobTotal       int      `json:"job_total,omitempty"`
-	JobFailedItems int      `json:"job_failed_items,omitempty"`
-	JobPausedItems int      `json:"job_paused_items,omitempty"`
+	JobCurrent     int64    `json:"job_current,omitempty"`
+	JobTotal       int64    `json:"job_total,omitempty"`
+	JobFailedItems int64    `json:"job_failed_items,omitempty"`
+	JobPausedItems int64    `json:"job_paused_items,omitempty"`
 }
 
 type Subscription struct {

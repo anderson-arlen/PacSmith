@@ -99,7 +99,7 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
         for (const auto &existing : project.releases) {
             if (existing.sourceSha256 == sourceHash) {
                 if (existing.state != ReleaseState::Discovered) {
-                    return ImportResult{std::move(project), existing.id, false, true};
+                    return ImportResult{std::move(project), existing.id, false, true, {}};
                 }
                 break;
             }
@@ -268,7 +268,7 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     }
     if (progress) progress({ImportStage::SavingProject, 0});
     if (!save(project, error)) return std::nullopt;
-    return ImportResult{std::move(project), release.id, projectCreated, false};
+    return ImportResult{std::move(project), release.id, projectCreated, false, {}};
 }
 
 std::optional<ImportResult> ProjectStore::importSource(
@@ -400,7 +400,7 @@ std::optional<ImportResult> ProjectStore::importSource(
                     }
                     if (!save(project, error)) return std::nullopt;
                 }
-                return ImportResult{std::move(project), existing.id, false, true};
+                return ImportResult{std::move(project), existing.id, false, true, {}};
             }
         }
     } else {
@@ -553,7 +553,7 @@ std::optional<ImportResult> ProjectStore::importSource(
     project.formatVersion = 5;
     if (progress) progress({ImportStage::SavingProject, 0});
     if (!save(project, error)) return std::nullopt;
-    return ImportResult{std::move(project), release.id, projectCreated, false};
+    return ImportResult{std::move(project), release.id, projectCreated, false, {}};
 }
 
 std::optional<ImportResult> ProjectStore::reanalyzeRelease(
@@ -706,7 +706,7 @@ std::optional<ImportResult> ProjectStore::reanalyzeRelease(
                                         QString::fromLatin1(suffix)).toStdString());
         }
     }
-    return ImportResult{std::move(project), releaseIdValue, false, false};
+    return ImportResult{std::move(project), releaseIdValue, false, false, {}};
 }
 
 } // namespace pacsmith

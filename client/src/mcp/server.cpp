@@ -287,7 +287,7 @@ QJsonArray tools() {
                            {QStringLiteral("existing_project"), project}},
                           {QStringLiteral("url")}), annotations(false, false, false, true)),
         tool(QStringLiteral("import_direct_url"),
-             QStringLiteral("Create or update a project directly from a first-party HTTPS artifact URL. For a manual update, select the existing project and supply a version when the URL or artifact does not identify itself. PacSmith owns the download, optional publisher-checksum verification, upload, and inspection; never download the artifact with curl or another external tool."),
+             QStringLiteral("Start creating or updating a project from a first-party HTTPS artifact URL. After the server validates the response and receives payload bytes, this returns the visible preparing project, release, and job IDs while download and inspection continue. Use get_build_job for progress or cancel_build_job to cancel. For a manual update, select the existing project and supply a version when the URL or artifact does not identify itself. PacSmith owns the transfer; never download the artifact with curl or another external tool."),
              objectSchema({{QStringLiteral("url"), stringProperty(QStringLiteral("Direct HTTPS URL for a vendor package or archive."))},
                            {QStringLiteral("existing_project"), project},
                            {QStringLiteral("version"), stringProperty(QStringLiteral("Optional explicit vendor version, required when it cannot be inferred from the artifact."))},
@@ -414,12 +414,12 @@ QJsonArray tools() {
                           {QStringLiteral("release_id"), QStringLiteral("name")}), annotations(false, true, true, false)),
         tool(QStringLiteral("start_build"), QStringLiteral("Start the same unprivileged PacSmith build job available to GUI/CLI users."),
              objectSchema({{QStringLiteral("release_id"), release}}, {QStringLiteral("release_id")}), action),
-        tool(QStringLiteral("get_build_job"), QStringLiteral("Get current status and structured result for a PacSmith build or preparation job."),
+        tool(QStringLiteral("get_build_job"), QStringLiteral("Get current status, byte or item progress, and structured result for a PacSmith job."),
              objectSchema({{QStringLiteral("job_id"), stringProperty(QStringLiteral("PacSmith job UUID."))}}, {QStringLiteral("job_id")}), read),
         tool(QStringLiteral("get_build_job_log"), QStringLiteral("Read a PacSmith job log from a byte offset without scraping the GUI."),
              objectSchema({{QStringLiteral("job_id"), stringProperty(QStringLiteral("PacSmith job UUID."))},
                            {QStringLiteral("after"), integerProperty(QStringLiteral("Byte offset; defaults to zero."))}}, {QStringLiteral("job_id")}), read),
-        tool(QStringLiteral("cancel_build_job"), QStringLiteral("Cancel a running PacSmith build or preparation job."),
+        tool(QStringLiteral("cancel_build_job"), QStringLiteral("Cancel a running PacSmith import, build, or preparation job."),
              objectSchema({{QStringLiteral("job_id"), stringProperty(QStringLiteral("PacSmith job UUID."))}}, {QStringLiteral("job_id")}), annotations(false, true, true, false)),
         tool(QStringLiteral("set_project_build_policy"),
              QStringLiteral("Set this project's automatic update-build and Custom PKGBUILD compiler-cache policies."),
@@ -705,6 +705,10 @@ QJsonObject jobJson(const JobStatus &job) {
     return {{QStringLiteral("id"), job.id}, {QStringLiteral("kind"), job.kind},
             {QStringLiteral("status"), job.status}, {QStringLiteral("project_id"), job.projectId},
             {QStringLiteral("release_id"), job.releaseId}, {QStringLiteral("error"), job.error},
+            {QStringLiteral("message"), job.message}, {QStringLiteral("current"), job.current},
+            {QStringLiteral("total"), job.total},
+            {QStringLiteral("failed_items"), job.failedItems},
+            {QStringLiteral("paused_items"), job.pausedItems},
             {QStringLiteral("result"), job.result}};
 }
 
@@ -1325,7 +1329,12 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         if (!imported) return fail(error);
         const auto *importedRelease = imported->imported.project.release(
             imported->imported.releaseId);
+        const auto sourceSha256 = importedRelease == nullptr ||
+                importedRelease->sourceSha256.startsWith(QStringLiteral("pending:"))
+            ? imported->source.sha256 : importedRelease->sourceSha256;
         return toolResult(id, QJsonObject{
+            {QStringLiteral("job_id"), imported->imported.jobId},
+            {QStringLiteral("status"), QStringLiteral("preparing")},
             {QStringLiteral("project_id"), imported->imported.project.id},
             {QStringLiteral("project_name"), imported->imported.project.displayName},
             {QStringLiteral("release_id"), imported->imported.releaseId},
@@ -1336,8 +1345,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
              importedRelease == nullptr ? imported->source.filename
                                         : importedRelease->originalSourceFilename},
             {QStringLiteral("source_sha256"),
-             importedRelease == nullptr ? imported->source.sha256
-                                        : importedRelease->sourceSha256},
+             sourceSha256},
             {QStringLiteral("project_created"), imported->imported.projectCreated},
             {QStringLiteral("duplicate"), imported->imported.duplicate},
             {QStringLiteral("github_tag"), imported->source.tag},

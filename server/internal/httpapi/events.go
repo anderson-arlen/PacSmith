@@ -76,6 +76,9 @@ func writeServerEvent(w http.ResponseWriter, name string, event events.Event) bo
 
 func (s *Server) publishJob(job jobs.Job) {
 	topics := []string{"jobs"}
+	if job.ProjectAttached {
+		topics = append(topics, "projects")
+	}
 	if job.Status == "succeeded" || job.Status == "failed" || job.Status == "interrupted" {
 		topics = append(topics, "projects", "repository")
 	}

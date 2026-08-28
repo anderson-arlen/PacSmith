@@ -113,6 +113,11 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := lib.RecoverInterruptedPendingImports(ctx); err != nil {
+		manager.Stop()
+		_ = db.Close()
+		return nil, err
+	}
 	listenState := &listen.State{}
 	stored, err := db.Queries.GetServerState(ctx)
 	if err != nil {
@@ -277,7 +282,12 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 			if err := json.Unmarshal(payload, &req); err != nil {
 				return nil, err
 			}
-			result, err := updater.ImportDirectURL(ctx, req, log)
+			result, err := updater.ImportDirectURL(ctx, req, job.ID, log,
+				func(update updatecheck.Progress) {
+					progress(jobs.Progress{Message: update.Message, ProjectID: update.ProjectID,
+						ReleaseID: update.ReleaseID, ProjectName: update.ProjectName,
+						PackageName: update.PackageName, Current: update.Current, Total: update.Total})
+				})
 			raw, marshalErr := json.Marshal(result)
 			if err != nil {
 				return raw, err
@@ -347,8 +357,8 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 				return raw, err
 			}
 			progress(jobs.Progress{Message: updateBatchSummary(result),
-				Current: len(result.Checks), Total: len(result.Checks), FailedItems: result.Failed,
-				PausedItems: updatePausedCount(result)})
+				Current: int64(len(result.Checks)), Total: int64(len(result.Checks)),
+				FailedItems: int64(result.Failed), PausedItems: int64(updatePausedCount(result))})
 			return raw, marshalErr
 		case jobs.KindUpdatePrepare:
 			if updater == nil {

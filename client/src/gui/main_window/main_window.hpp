@@ -392,6 +392,7 @@ private:
     QTimer *preparationSpinnerTimer_{nullptr};
     QString preparingProjectId_;
     QString preparingReleaseId_;
+    QString remoteImportJobId_;
     QString preparationSourceReleaseId_;
     bool automaticPreparationBuild_{false};
     QString preparationPhase_;

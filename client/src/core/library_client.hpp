@@ -29,6 +29,11 @@ struct JobStatus {
     QString packageName;
     QString releaseId;
     QString error;
+    QString message;
+    qint64 current{0};
+    qint64 total{0};
+    qint64 failedItems{0};
+    qint64 pausedItems{0};
     QJsonObject result;
 };
 

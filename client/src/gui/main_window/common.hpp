@@ -122,6 +122,7 @@
 #include <QtConcurrentRun>
 
 #include <algorithm>
+#include <climits>
 #include <filesystem>
 #include <functional>
 #include <memory>

@@ -552,10 +552,14 @@ void MainWindow::showBuildOutput() {
 }
 
 void MainWindow::cancelRemoteBuild() {
-    if (buildJobId_.isEmpty()) return;
+    const auto jobId = !remoteImportJobId_.isEmpty() && project_ &&
+            project_->id == preparingProjectId_
+        ? remoteImportJobId_ : buildJobId_;
+    if (jobId.isEmpty()) return;
     const auto config = library_.config();
-    const auto jobId = buildJobId_;
-    statusBar()->showMessage(QStringLiteral("Canceling build…"));
+    statusBar()->showMessage(remoteImportJobId_ == jobId
+                                 ? QStringLiteral("Canceling import…")
+                                 : QStringLiteral("Canceling build…"));
     QThreadPool::globalInstance()->start([config, jobId] {
         LibraryClient client(config);
         QString error;

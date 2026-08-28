@@ -37,6 +37,12 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
+	if job.ProjectID != "" {
+		if project, projectErr := s.DB.Queries.GetProject(r.Context(), job.ProjectID); projectErr == nil {
+			job.ProjectName = project.DisplayName
+			job.PackageName = project.ArchPackageName
+		}
+	}
 	writeJSON(w, http.StatusOK, job)
 }
 

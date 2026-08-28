@@ -15,6 +15,9 @@ SELECT * FROM releases WHERE project_id = ? AND source_sha256 = ?;
 -- name: ListReleasesForProject :many
 SELECT * FROM releases WHERE project_id = ? ORDER BY created_at;
 
+-- name: ListPreparingReleases :many
+SELECT * FROM releases WHERE state = 'preparing' ORDER BY created_at;
+
 -- name: UpdateRelease :one
 UPDATE releases
 SET state = ?,

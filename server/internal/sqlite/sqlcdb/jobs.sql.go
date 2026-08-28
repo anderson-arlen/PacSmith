@@ -12,7 +12,7 @@ import (
 
 const getJob = `-- name: GetJob :one
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,
-       created_at, started_at, finished_at
+       message, current, total, failed_items, paused_items, created_at, started_at, finished_at
 FROM jobs
 WHERE id = ?
 `
@@ -29,6 +29,11 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 		&i.PayloadJson,
 		&i.Error,
 		&i.LogOffset,
+		&i.Message,
+		&i.Current,
+		&i.Total,
+		&i.FailedItems,
+		&i.PausedItems,
 		&i.CreatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
@@ -41,7 +46,7 @@ INSERT INTO jobs (
     id, kind, status, project_id, release_id, payload_json, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 RETURNING id, kind, status, project_id, release_id, payload_json, error, log_offset,
-          created_at, started_at, finished_at
+          message, current, total, failed_items, paused_items, created_at, started_at, finished_at
 `
 
 type InsertJobParams struct {
@@ -74,6 +79,11 @@ func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) (Job, erro
 		&i.PayloadJson,
 		&i.Error,
 		&i.LogOffset,
+		&i.Message,
+		&i.Current,
+		&i.Total,
+		&i.FailedItems,
+		&i.PausedItems,
 		&i.CreatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
@@ -96,7 +106,7 @@ func (q *Queries) InterruptRunningJobs(ctx context.Context, finishedAt sql.NullS
 
 const listActiveJobsByKind = `-- name: ListActiveJobsByKind :many
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,
-       created_at, started_at, finished_at
+       message, current, total, failed_items, paused_items, created_at, started_at, finished_at
 FROM jobs
 WHERE kind = ? AND status IN ('queued', 'running')
 ORDER BY created_at
@@ -120,6 +130,11 @@ func (q *Queries) ListActiveJobsByKind(ctx context.Context, kind string) ([]Job,
 			&i.PayloadJson,
 			&i.Error,
 			&i.LogOffset,
+			&i.Message,
+			&i.Current,
+			&i.Total,
+			&i.FailedItems,
+			&i.PausedItems,
 			&i.CreatedAt,
 			&i.StartedAt,
 			&i.FinishedAt,
@@ -145,21 +160,31 @@ SET status = ?,
     started_at = ?,
     finished_at = ?,
     project_id = ?,
-    release_id = ?
+    release_id = ?,
+    message = ?,
+    current = ?,
+    total = ?,
+    failed_items = ?,
+    paused_items = ?
 WHERE id = ?
 RETURNING id, kind, status, project_id, release_id, payload_json, error, log_offset,
-          created_at, started_at, finished_at
+          message, current, total, failed_items, paused_items, created_at, started_at, finished_at
 `
 
 type UpdateJobParams struct {
-	Status     string         `json:"status"`
-	Error      string         `json:"error"`
-	LogOffset  int64          `json:"log_offset"`
-	StartedAt  sql.NullString `json:"started_at"`
-	FinishedAt sql.NullString `json:"finished_at"`
-	ProjectID  sql.NullString `json:"project_id"`
-	ReleaseID  sql.NullString `json:"release_id"`
-	ID         string         `json:"id"`
+	Status      string         `json:"status"`
+	Error       string         `json:"error"`
+	LogOffset   int64          `json:"log_offset"`
+	StartedAt   sql.NullString `json:"started_at"`
+	FinishedAt  sql.NullString `json:"finished_at"`
+	ProjectID   sql.NullString `json:"project_id"`
+	ReleaseID   sql.NullString `json:"release_id"`
+	Message     string         `json:"message"`
+	Current     int64          `json:"current"`
+	Total       int64          `json:"total"`
+	FailedItems int64          `json:"failed_items"`
+	PausedItems int64          `json:"paused_items"`
+	ID          string         `json:"id"`
 }
 
 func (q *Queries) UpdateJob(ctx context.Context, arg UpdateJobParams) (Job, error) {
@@ -171,6 +196,11 @@ func (q *Queries) UpdateJob(ctx context.Context, arg UpdateJobParams) (Job, erro
 		arg.FinishedAt,
 		arg.ProjectID,
 		arg.ReleaseID,
+		arg.Message,
+		arg.Current,
+		arg.Total,
+		arg.FailedItems,
+		arg.PausedItems,
 		arg.ID,
 	)
 	var i Job
@@ -183,6 +213,11 @@ func (q *Queries) UpdateJob(ctx context.Context, arg UpdateJobParams) (Job, erro
 		&i.PayloadJson,
 		&i.Error,
 		&i.LogOffset,
+		&i.Message,
+		&i.Current,
+		&i.Total,
+		&i.FailedItems,
+		&i.PausedItems,
 		&i.CreatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,

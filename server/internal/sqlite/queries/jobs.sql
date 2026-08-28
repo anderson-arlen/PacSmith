@@ -3,11 +3,11 @@ INSERT INTO jobs (
     id, kind, status, project_id, release_id, payload_json, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 RETURNING id, kind, status, project_id, release_id, payload_json, error, log_offset,
-          created_at, started_at, finished_at;
+          message, current, total, failed_items, paused_items, created_at, started_at, finished_at;
 
 -- name: GetJob :one
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,
-       created_at, started_at, finished_at
+       message, current, total, failed_items, paused_items, created_at, started_at, finished_at
 FROM jobs
 WHERE id = ?;
 
@@ -19,10 +19,15 @@ SET status = ?,
     started_at = ?,
     finished_at = ?,
     project_id = ?,
-    release_id = ?
+    release_id = ?,
+    message = ?,
+    current = ?,
+    total = ?,
+    failed_items = ?,
+    paused_items = ?
 WHERE id = ?
 RETURNING id, kind, status, project_id, release_id, payload_json, error, log_offset,
-          created_at, started_at, finished_at;
+          message, current, total, failed_items, paused_items, created_at, started_at, finished_at;
 
 -- name: InterruptRunningJobs :exec
 UPDATE jobs
@@ -33,7 +38,7 @@ WHERE status = 'running';
 
 -- name: ListActiveJobsByKind :many
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,
-       created_at, started_at, finished_at
+       message, current, total, failed_items, paused_items, created_at, started_at, finished_at
 FROM jobs
 WHERE kind = ? AND status IN ('queued', 'running')
 ORDER BY created_at;

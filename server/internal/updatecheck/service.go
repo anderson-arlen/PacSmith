@@ -20,12 +20,20 @@ import (
 )
 
 type Service struct {
-	DB        *sqlite.DB
-	Library   *library.Service
-	Artifacts *artifact.Registry
-	GitHub    *githubapi.Service
-	Client    *http.Client
-	Now       func() time.Time
+	DB                  *sqlite.DB
+	Library             *library.Service
+	Artifacts           *artifact.Registry
+	GitHub              *githubapi.Service
+	Client              *http.Client
+	Now                 func() time.Time
+	DownloadIdleTimeout time.Duration
+}
+
+func (s *Service) downloadIdleTimeout() time.Duration {
+	if s.DownloadIdleTimeout > 0 {
+		return s.DownloadIdleTimeout
+	}
+	return 45 * time.Second
 }
 
 func (s *Service) httpClient() *http.Client {
@@ -86,7 +94,7 @@ func (s *Service) Run(ctx context.Context, releaseID string, force bool, log fun
 			batch.Checks = append(batch.Checks, result)
 			report(Progress{Message: result.Message, ProjectID: project.ID,
 				ProjectName: project.DisplayName, PackageName: project.ArchPackageName,
-				Current: index + 1, Total: len(projects)})
+				Current: int64(index + 1), Total: int64(len(projects))})
 			continue
 		}
 		target := checkTargetFrom(project, *release)
@@ -216,14 +224,14 @@ func progressLogger(log func(string), report func(Progress), target checkTarget,
 		}
 		report(Progress{Message: trimmed, ProjectID: target.Project.ID,
 			ReleaseID: target.Release.ID, ProjectName: target.Project.DisplayName,
-			PackageName: target.Project.ArchPackageName, Current: current, Total: total})
+			PackageName: target.Project.ArchPackageName, Current: int64(current), Total: int64(total)})
 	}
 }
 
 func reportResult(report func(Progress), target checkTarget, result Result, current, total int) {
 	report(Progress{Message: result.Message, ProjectID: target.Project.ID,
 		ReleaseID: target.Release.ID, ProjectName: target.Project.DisplayName,
-		PackageName: target.Project.ArchPackageName, Current: current, Total: total})
+		PackageName: target.Project.ArchPackageName, Current: int64(current), Total: int64(total)})
 }
 
 func checkTargetFrom(project library.Project, release library.Release) checkTarget {
@@ -596,13 +604,19 @@ func (s *Service) prepare(ctx context.Context, target checkTarget, result Result
 	rawAcquisition, _ := json.Marshal(acquisition)
 	rawUpdate, _ := json.Marshal(target.Update)
 	log("Inspecting downloaded vendor artifact…\n")
-	return s.Library.ImportArtifact(ctx, library.ImportRequest{
+	request := library.ImportRequest{
 		ArtifactID: record.ID, ExistingProjectID: target.Project.ID, Version: result.DetectedVersion,
 		ExpectedSHA256: result.SHA256, AcquisitionKind: kind,
 		CanonicalIdentity: target.Project.SourceIdentity, Acquisition: rawAcquisition, Update: rawUpdate,
 		GitHubAssetRegex:         stringValue(target.Update, "githubAssetRegex"),
 		GitHubIncludePrereleases: boolValue(target.Update, "githubIncludePrereleases"),
-	})
+	}
+	if strings.HasPrefix(target.Release.SourceSHA256, "pending:") {
+		request.PendingReleaseID = target.Release.ID
+		request.PendingProjectCreated = boolValue(object(target.Release.Document["importJob"]),
+			"projectCreated")
+	}
+	return s.Library.ImportArtifact(ctx, request)
 }
 
 func (s *Service) buildIfReviewFree(ctx context.Context, target checkTarget, releaseID string,

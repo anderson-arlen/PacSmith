@@ -118,7 +118,8 @@ func TestManagerPublishesStructuredProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(manager.Stop)
-	if _, err := manager.Enqueue(ctx, KindUpdateCheck, nil, "", ""); err != nil {
+	job, err := manager.Enqueue(ctx, KindUpdateCheck, nil, "", "")
+	if err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -128,5 +129,14 @@ func TestManagerPublishesStructuredProgress(t *testing.T) {
 	if progress.Status != "running" || progress.Message != "Checking Brave" ||
 		progress.ProjectID != "brave" || progress.Current != 3 || progress.Total != 9 {
 		t.Fatalf("progress event %+v", progress)
+	}
+	<-transitions
+	persisted, err := manager.Get(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ProjectID != "brave" || persisted.Message != "Checking Brave" ||
+		persisted.Current != 3 || persisted.Total != 9 {
+		t.Fatalf("persisted progress %+v", persisted)
 	}
 }

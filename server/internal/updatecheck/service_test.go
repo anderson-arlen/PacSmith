@@ -79,7 +79,7 @@ func TestDirectImportAndUpdateCheckStayServerSide(t *testing.T) {
 	service := &Service{DB: db, Library: libraryService, Artifacts: registry, Client: client}
 	imported, err := service.ImportDirectURL(ctx, DirectImportRequest{
 		URL: "https://vendor.invalid/demo-2.0.tar?download=1",
-	}, nil)
+	}, "direct-import-job", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

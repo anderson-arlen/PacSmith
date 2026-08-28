@@ -107,6 +107,11 @@ CREATE TABLE jobs (
     payload_json TEXT NOT NULL,
     error TEXT NOT NULL DEFAULT '',
     log_offset INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    current INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0,
+    failed_items INTEGER NOT NULL DEFAULT 0,
+    paused_items INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT

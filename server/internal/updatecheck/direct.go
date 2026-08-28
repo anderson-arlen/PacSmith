@@ -1,6 +1,7 @@
 package updatecheck
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
@@ -234,7 +236,65 @@ func (reader *boundedReader) Read(buffer []byte) (int, error) {
 	return count, err
 }
 
-func (s *Service) downloadArtifact(ctx context.Context, target *url.URL, filename, kind string) (artifact.Record, error) {
+type downloadInfo struct {
+	Filename      string
+	EffectiveURL  string
+	ContentLength int64
+	Received      int64
+}
+
+type downloadObserver struct {
+	Started  func(downloadInfo) error
+	Progress func(downloadInfo)
+}
+
+type idleReadCloser struct {
+	reader   io.ReadCloser
+	timeout  time.Duration
+	timedOut atomic.Bool
+}
+
+func (reader *idleReadCloser) Read(buffer []byte) (int, error) {
+	timer := time.AfterFunc(reader.timeout, func() {
+		reader.timedOut.Store(true)
+		_ = reader.reader.Close()
+	})
+	count, err := reader.reader.Read(buffer)
+	if !timer.Stop() && reader.timedOut.Load() {
+		return count, fmt.Errorf("artifact download received no data for %s", reader.timeout)
+	}
+	return count, err
+}
+
+func (reader *idleReadCloser) Close() error {
+	return reader.reader.Close()
+}
+
+type progressReader struct {
+	reader     io.Reader
+	info       downloadInfo
+	report     func(downloadInfo)
+	lastReport time.Time
+}
+
+func (reader *progressReader) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	reader.info.Received += int64(count)
+	now := time.Now()
+	if reader.report != nil && (reader.lastReport.IsZero() ||
+		now.Sub(reader.lastReport) >= 250*time.Millisecond || err != nil) {
+		reader.report(reader.info)
+		reader.lastReport = now
+	}
+	return count, err
+}
+
+func (s *Service) downloadArtifact(ctx context.Context, target *url.URL, filename, kind string,
+	observers ...downloadObserver) (artifact.Record, error) {
+	observer := downloadObserver{}
+	if len(observers) > 0 {
+		observer = observers[0]
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return artifact.Record{}, err
@@ -245,7 +305,8 @@ func (s *Service) downloadArtifact(ctx context.Context, target *url.URL, filenam
 	if err != nil {
 		return artifact.Record{}, err
 	}
-	defer response.Body.Close()
+	body := &idleReadCloser{reader: response.Body, timeout: s.downloadIdleTimeout()}
+	defer body.Close()
 	effectiveURL := target
 	if response.Request != nil && response.Request.URL != nil {
 		effectiveURL = response.Request.URL
@@ -263,5 +324,28 @@ func (s *Service) downloadArtifact(ctx context.Context, target *url.URL, filenam
 		return artifact.Record{}, fmt.Errorf("artifact exceeds the %d-byte safety limit", artifact.MaxBytes)
 	}
 	filename = responseFilename(response.Header, effectiveURL, filename)
-	return s.Artifacts.Put(ctx, filename, kind, &boundedReader{reader: response.Body, left: artifact.MaxBytes})
+	var first [32 * 1024]byte
+	count, readErr := body.Read(first[:])
+	if count == 0 {
+		if readErr == nil {
+			readErr = io.ErrUnexpectedEOF
+		}
+		return artifact.Record{}, fmt.Errorf("artifact download returned no data: %w", readErr)
+	}
+	info := downloadInfo{Filename: filename, EffectiveURL: effectiveURL.String(),
+		ContentLength: response.ContentLength, Received: int64(count)}
+	if observer.Started != nil {
+		if err := observer.Started(info); err != nil {
+			return artifact.Record{}, err
+		}
+	}
+	if observer.Progress != nil {
+		observer.Progress(info)
+	}
+	stream := io.MultiReader(bytes.NewReader(first[:count]), body)
+	tracked := &progressReader{reader: stream, info: downloadInfo{Filename: filename,
+		EffectiveURL: effectiveURL.String(), ContentLength: response.ContentLength},
+		report: observer.Progress}
+	return s.Artifacts.Put(ctx, filename, kind,
+		&boundedReader{reader: tracked, left: artifact.MaxBytes})
 }
