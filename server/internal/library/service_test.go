@@ -29,6 +29,103 @@ func TestBuildParallelismArguments(t *testing.T) {
 	}
 }
 
+func TestPodmanBuildArgumentsConfineCustomBuild(t *testing.T) {
+	execution := buildExecution{
+		ReleaseID: "release-1", ProjectID: "project-1",
+		WorkDir: "/work/releases/release-1", Parallelism: 6,
+	}
+	arguments := podmanBuildArguments(
+		"pacsmith-build-release-1", defaultBuildImage, execution,
+		"/work/cache/ccache/project-1", "/work/cache/sources/project-1",
+		"/work/cache/pacman")
+	joined := strings.Join(arguments, " ")
+	for _, required := range []string{
+		"--cpus 6", "--pids-limit 4096", "no-new-privileges",
+		"src=/work/releases/release-1,dst=/build,rw",
+		"src=/work/cache/ccache/project-1,dst=/cache/ccache,rw",
+		"src=/work/cache/sources/project-1,dst=/cache/sources,rw",
+		"src=/work/cache/pacman,dst=/var/cache/pacman/pkg,rw",
+		defaultBuildImage, "makepkg --printsrcinfo", "pacman -Syu --needed --noconfirm",
+		"makepkg --force --noconfirm",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("Podman arguments did not contain %q:\n%s", required, joined)
+		}
+	}
+	if strings.Contains(joined, "/home/") || strings.Contains(joined, "podman.sock") {
+		t.Fatalf("Podman arguments exposed host authority:\n%s", joined)
+	}
+}
+
+func TestResetBuildWorkspaceKeepsOnlyCustomSourceTree(t *testing.T) {
+	work := filepath.Join(t.TempDir(), "release")
+	if err := os.MkdirAll(filepath.Join(work, "src", "project"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "src", "project", "object.o"), []byte("cached"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "stale.patch"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetBuildWorkspace(work, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "src", "project", "object.o")); err != nil {
+		t.Fatalf("custom source tree was not retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "stale.patch")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale workspace input survived reset: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(work, "sources")); err != nil || !info.IsDir() {
+		t.Fatalf("source input directory was not recreated: %v", err)
+	}
+}
+
+func TestCustomBuildSelectionUsesPersistedRecipeMode(t *testing.T) {
+	if customBuild(map[string]any{}) {
+		t.Fatal("Guided release selected container build")
+	}
+	if !customBuild(map[string]any{"pkgbuildManuallyModified": true}) {
+		t.Fatal("Custom release did not select container build")
+	}
+}
+
+func TestPatchProjectBuildPolicies(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := nowUTC()
+	row, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "project-policy", DisplayName: "Policy", ArchPackageName: "policy-bin",
+		SourceIdentity: "local:policy", HistoryJson: "[]", CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ai := "ai"
+	clear := "clear_after_success"
+	service := &Service{DB: db}
+	updated, err := service.PatchProject(ctx, row.ID, ProjectPatch{
+		Revision: row.Revision, AutoBuildPolicy: &ai, CompileCachePolicy: &clear,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.AutoBuildPolicy != ai || updated.CompileCachePolicy != clear {
+		t.Fatalf("unexpected build policies: %+v", updated)
+	}
+	invalid := "sometimes"
+	if _, err := service.PatchProject(ctx, row.ID, ProjectPatch{
+		Revision: updated.Revision, AutoBuildPolicy: &invalid,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid build policy error = %v, want ErrInvalid", err)
+	}
+}
+
 func TestBuildResultKeepsJobPayloadCompact(t *testing.T) {
 	raw, err := json.Marshal(BuildResult{Status: "succeeded", Log: strings.Repeat("build output", 100)})
 	if err != nil {

@@ -327,18 +327,20 @@ func encodeProject(project library.Project) map[string]any {
 		history = []library.HistoryEntry{}
 	}
 	return map[string]any{
-		"formatVersion":   5,
-		"id":              project.ID,
-		"revision":        project.Revision,
-		"displayName":     project.DisplayName,
-		"archPackageName": project.ArchPackageName,
-		"vendorName":      project.VendorName,
-		"sourceIdentity":  project.SourceIdentity,
-		"iconSha256":      project.IconSha256,
-		"history":         history,
-		"createdAt":       project.CreatedAt,
-		"modifiedAt":      project.ModifiedAt,
-		"releases":        releases,
+		"formatVersion":      5,
+		"id":                 project.ID,
+		"revision":           project.Revision,
+		"displayName":        project.DisplayName,
+		"archPackageName":    project.ArchPackageName,
+		"vendorName":         project.VendorName,
+		"sourceIdentity":     project.SourceIdentity,
+		"iconSha256":         project.IconSha256,
+		"autoBuildPolicy":    project.AutoBuildPolicy,
+		"compileCachePolicy": project.CompileCachePolicy,
+		"history":            history,
+		"createdAt":          project.CreatedAt,
+		"modifiedAt":         project.ModifiedAt,
+		"releases":           releases,
 	}
 }
 

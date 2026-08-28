@@ -36,7 +36,7 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := again.SQL.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 14 {
+	if version != 15 {
 		t.Fatalf("migration version %d", version)
 	}
 	settings, err := again.Queries.GetLibrarySettings(ctx)
@@ -125,5 +125,62 @@ func TestBuildArtifactMigrationBackfillsLatestSuccessfulBuild(t *testing.T) {
 	}
 	if buildID != "newer" {
 		t.Fatalf("backfilled build %q, want newer", buildID)
+	}
+}
+
+func TestProjectBuildPolicyMigrationStopsExistingCustomProjects(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "pacsmith.db")
+	raw, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := applyPragmas(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	legacyFiles := fstest.MapFS{}
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() >= "0015_" {
+			continue
+		}
+		name := "migrations/" + entry.Name()
+		body, readErr := fs.ReadFile(migrationFiles, name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		legacyFiles[name] = &fstest.MapFile{Data: body}
+	}
+	if err := migrate(ctx, raw, legacyFiles); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-08-28T12:00:00Z"
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO projects (id, display_name, arch_package_name, source_identity, created_at, modified_at)
+VALUES ('custom-project', 'Custom', 'custom-bin', 'local:custom', ?, ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO releases (id, project_id, state, source_type, original_filename, source_sha256,
+                      arch_package_name, body_json, created_at, modified_at)
+VALUES ('custom-release', 'custom-project', 'ready', 'archive', 'source.tar.gz', 'sha',
+        'custom-bin', '{"pkgbuildManuallyModified":true}', ?, ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, raw, migrationFiles); err != nil {
+		t.Fatal(err)
+	}
+	var automatic, cache string
+	if err := raw.QueryRowContext(ctx, `
+SELECT auto_build_policy, compile_cache_policy FROM projects WHERE id = 'custom-project'`).
+		Scan(&automatic, &cache); err != nil {
+		t.Fatal(err)
+	}
+	if automatic != "never" || cache != "reuse" {
+		t.Fatalf("migrated policies = %q, %q", automatic, cache)
 	}
 }

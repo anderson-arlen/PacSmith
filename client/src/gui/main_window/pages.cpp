@@ -835,6 +835,12 @@ QWidget *MainWindow::createUpdatesPage() {
     updateStrategy_->addItems({QStringLiteral("Manual"), QStringLiteral("Direct URL"),
                                QStringLiteral("APT repository"), QStringLiteral("RPM repository"),
                                QStringLiteral("GitHub releases")});
+    autoBuildPolicy_ = new QComboBox(page);
+    autoBuildPolicy_->addItem(QStringLiteral("Never"), QStringLiteral("never"));
+    autoBuildPolicy_->addItem(QStringLiteral("When nothing is flagged for review"),
+                              QStringLiteral("review_free"));
+    autoBuildPolicy_->addItem(QStringLiteral("Resolve review items with AI automatically"),
+                              QStringLiteral("ai"));
     updateUrl_ = new QLineEdit(page);
     updateUrl_->setPlaceholderText(QStringLiteral("https://vendor.example/download/package.deb"));
     directUrlFullCheckInterval_ = new QComboBox(page);
@@ -889,22 +895,12 @@ QWidget *MainWindow::createUpdatesPage() {
     githubAssetRegex_ = new QLineEdit(page);
     githubAssetRegex_->setPlaceholderText(
         QStringLiteral("Exactly one full asset name must match, e.g. app-.*-linux-amd64\\.tar\\.gz"));
-    const QList<QWidget *> compressibleFields{
-        updateUrl_, aptSuite_, aptComponent_, aptArchitecture_, aptPackageName_,
-        rpmArchitecture_, rpmPackageName_, aptSigningKeyring_, aptSigningKeyUrl_,
-        githubOwner_, githubRepository_, githubAssetRegex_, keyUrlRow, keyringRow,
-    };
-    for (auto *field : compressibleFields) {
-        auto policy = field->sizePolicy();
-        policy.setHorizontalPolicy(QSizePolicy::Ignored);
-        field->setSizePolicy(policy);
-        field->setMinimumWidth(0);
-    }
     githubPrereleases_ = new QCheckBox(
         QStringLiteral("Track prereleases even after a stable release exists"), page);
     githubPrereleases_->setToolTip(QStringLiteral(
         "The default policy prefers stable releases, falls back to prereleases when no matching stable release exists, and moves to stable when one is published."));
     form->addRow(QStringLiteral("Strategy"), updateStrategy_);
+    form->addRow(QStringLiteral("Auto-build updates when"), autoBuildPolicy_);
     form->addRow(QStringLiteral("URL / repository"), updateUrl_);
     form->addRow(QStringLiteral("Full-content checks"), directUrlFullCheckInterval_);
     form->addRow(QStringLiteral("APT suite"), aptSuite_);
@@ -924,6 +920,7 @@ QWidget *MainWindow::createUpdatesPage() {
     form->addRow(QStringLiteral("GitHub repository"), githubRepository_);
     form->addRow(QStringLiteral("Asset-name regex"), githubAssetRegex_);
     form->addRow(QString{}, githubPrereleases_);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     updateNotice_ = new QLabel(page);
     updateNotice_->setWordWrap(true);
@@ -1079,11 +1076,20 @@ QWidget *MainWindow::createBuildPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Build the Arch package with makepkg, then install it with pacman."),
+        QStringLiteral("Build the Arch package, then install it with pacman."),
         page,
-        QStringLiteral("Progress and command output open in a dialog.")));
+        QStringLiteral("Guided packages use the library host directly. Custom PKGBUILDs use rootless Podman with their declared dependencies and project compiler cache. Progress and command output open in a dialog.")));
     buildChecklist_ = new QLabel(page);
     buildChecklist_->setWordWrap(true);
+    compileCachePolicy_ = new QComboBox(page);
+    compileCachePolicy_->addItem(QStringLiteral("Reuse project compiler cache"),
+                                 QStringLiteral("reuse"));
+    compileCachePolicy_->addItem(QStringLiteral("Clear project cache after success"),
+                                 QStringLiteral("clear_after_success"));
+    compileCachePolicy_->addItem(QStringLiteral("Disable compiler cache"),
+                                 QStringLiteral("disabled"));
+    compileCachePolicy_->setToolTip(QStringLiteral(
+        "Custom source builds share one compiler cache across versions of this project."));
     buildButton_ = new QPushButton(QStringLiteral("Build"), page);
     viewBuildOutputButton_ = new QPushButton(QStringLiteral("View Build Output"), page);
     viewBuildOutputButton_->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
@@ -1099,6 +1105,9 @@ QWidget *MainWindow::createBuildPage() {
     packageRow->addWidget(installButton_, 0, Qt::AlignTop);
     packageRow->addStretch(1);
     layout->addWidget(buildChecklist_);
+    auto *cacheForm = new QFormLayout;
+    cacheForm->addRow(QStringLiteral("Compiler cache"), compileCachePolicy_);
+    layout->addLayout(cacheForm);
     auto *buildActions = new QHBoxLayout;
     buildActions->addWidget(buildButton_);
     buildActions->addWidget(viewBuildOutputButton_);
@@ -1118,6 +1127,14 @@ QWidget *MainWindow::createBuildPage() {
     connect(installButton_, &QPushButton::clicked, this, &MainWindow::startInstall);
     connect(viewBuildOutputButton_, &QPushButton::clicked,
             this, &MainWindow::showBuildOutput);
+    connect(compileCachePolicy_, &QComboBox::currentIndexChanged, this, [this] {
+        if (populating_ || !project_) return;
+        project_->compileCachePolicy = compileCachePolicyFromName(
+            compileCachePolicy_->currentData().toString());
+        if (persistCurrent()) {
+            statusBar()->showMessage(QStringLiteral("Compiler cache policy saved"), 4000);
+        }
+    });
     return page;
 }
 

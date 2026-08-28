@@ -30,6 +30,9 @@ public:
                                                const QString &releaseId);
     [[nodiscard]] static QString customPkgbuildPrompt(const QString &projectId,
                                                      const QString &releaseId);
+    [[nodiscard]] static QString automaticUpdatePrompt(const QString &projectId,
+                                                       const QString &releaseId,
+                                                       bool customPkgbuild);
 };
 
 } // namespace pacsmith

@@ -577,6 +577,7 @@ private:
     QListWidget *updateCandidates_{nullptr};
     QLabel *updateNotice_{nullptr};
     QLabel *updateOwnerLabel_{nullptr};
+    QComboBox *autoBuildPolicy_{nullptr};
     QLabel *updateCheckStatus_{nullptr};
     QPushButton *updateSaveButton_{nullptr};
     QPushButton *updateCheckButton_{nullptr};
@@ -597,6 +598,7 @@ private:
     QPushButton *repoPromoteButton_{nullptr};
     QLabel *repoStatusLabel_{nullptr};
     QLabel *buildChecklist_{nullptr};
+    QComboBox *compileCachePolicy_{nullptr};
     QLabel *builtPackage_{nullptr};
     QPushButton *buildButton_{nullptr};
     QPushButton *viewBuildOutputButton_{nullptr};

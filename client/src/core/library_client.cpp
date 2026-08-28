@@ -216,7 +216,11 @@ bool LibraryClient::save(Project &project, QString *error) const {
                                   {{QStringLiteral("revision"), project.revision},
                                    {QStringLiteral("displayName"), project.displayName},
                                    {QStringLiteral("archPackageName"), project.archPackageName},
-                                   {QStringLiteral("vendorName"), project.vendorName}},
+                                   {QStringLiteral("vendorName"), project.vendorName},
+                                   {QStringLiteral("autoBuildPolicy"),
+                                    autoBuildPolicyName(project.autoBuildPolicy)},
+                                   {QStringLiteral("compileCachePolicy"),
+                                    compileCachePolicyName(project.compileCachePolicy)}},
                                   error, 200);
     if (!patched) return false;
     for (auto &release : project.releases) {

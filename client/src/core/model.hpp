@@ -14,6 +14,8 @@ enum class SourcePackageType { Unknown, Debian, Rpm, ArchPackage, Archive, AppIm
 enum class AcquisitionKind { LocalFile, DirectUrl, AptRepository, RpmRepository, GitHubRelease };
 enum class MappingStatus { Unresolved, Resolved, Ignored, Bundled, Provided };
 enum class BuildStatus { NeverBuilt, Building, Succeeded, Failed, Canceled };
+enum class AutoBuildPolicy { Never, ReviewFree, Ai };
+enum class CompileCachePolicy { Reuse, ClearAfterSuccess, Disabled };
 enum class ReleaseState { Discovered, Preparing, NeedsReview, Ready, Built };
 enum class UpdateStrategy { Manual, DirectUrl, AptRepository, RpmRepository, GitHubRelease };
 enum class ValueOrigin { Unknown, Deterministic, Ai, User };
@@ -549,6 +551,8 @@ struct Project {
     QDateTime createdAt;
     QDateTime modifiedAt;
     ProjectRepository repository;
+    AutoBuildPolicy autoBuildPolicy{AutoBuildPolicy::ReviewFree};
+    CompileCachePolicy compileCachePolicy{CompileCachePolicy::Reuse};
 
     [[nodiscard]] PackageRelease *release(const QString &releaseId);
     [[nodiscard]] const PackageRelease *release(const QString &releaseId) const;
@@ -574,6 +578,10 @@ struct Project {
 
 [[nodiscard]] QString mappingStatusName(MappingStatus status);
 [[nodiscard]] QString buildStatusName(BuildStatus status);
+[[nodiscard]] QString autoBuildPolicyName(AutoBuildPolicy policy);
+[[nodiscard]] AutoBuildPolicy autoBuildPolicyFromName(const QString &name);
+[[nodiscard]] QString compileCachePolicyName(CompileCachePolicy policy);
+[[nodiscard]] CompileCachePolicy compileCachePolicyFromName(const QString &name);
 [[nodiscard]] QString releaseStateName(ReleaseState state);
 [[nodiscard]] ReleaseState releaseStateFromName(const QString &name);
 [[nodiscard]] QString updateStrategyName(UpdateStrategy strategy);

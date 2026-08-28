@@ -7,7 +7,7 @@ pkgdesc='Native Arch package workbench for official vendor artifacts'
 arch=('x86_64')
 url='https://github.com/anderson-arlen/pacsmith'
 license=('MIT')
-depends=('qt6-base' 'qt6-svg' 'libarchive' 'squashfs-tools' 'pacman' 'polkit' 'gnupg' 'age' 'libsecret')
+depends=('qt6-base' 'qt6-svg' 'libarchive' 'squashfs-tools' 'pacman' 'podman' 'polkit' 'gnupg' 'age' 'libsecret')
 options=('!strip')
 
 package() {

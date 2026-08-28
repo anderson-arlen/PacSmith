@@ -95,6 +95,8 @@ type Project struct {
 	RepoPublish          int64          `json:"repo_publish"`
 	RepoPkgnameOverride  string         `json:"repo_pkgname_override"`
 	RepoPublishedPkgname string         `json:"repo_published_pkgname"`
+	AutoBuildPolicy      string         `json:"auto_build_policy"`
+	CompileCachePolicy   string         `json:"compile_cache_policy"`
 }
 
 type ProjectRepoPolicy struct {

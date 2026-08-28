@@ -465,7 +465,7 @@ void MainWindow::showSettings() {
     updatesForm->addRow(QStringLiteral("Weekday"), weekday);
     updatesForm->addRow(QStringLiteral("Local time"), checkTime);
     auto *automaticPrepare = new QCheckBox(
-        QStringLiteral("Download, prepare, and build new updates automatically when no review is required"),
+        QStringLiteral("Download and prepare new updates automatically; each project decides whether to build"),
         scheduleGroup);
     automaticPrepare->setChecked(appSettings_.updates.automaticallyPrepare);
     updatesForm->addRow(QString{}, automaticPrepare);

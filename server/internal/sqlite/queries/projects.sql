@@ -23,6 +23,8 @@ SET display_name = ?,
     icon_artifact_id = ?,
     icon_sha256 = ?,
     history_json = ?,
+    auto_build_policy = ?,
+    compile_cache_policy = ?,
     modified_at = ?,
     revision = revision + 1
 WHERE id = ? AND revision = ?

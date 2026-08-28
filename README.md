@@ -84,7 +84,7 @@ PacSmith is the update authority for the packages it creates. After import, each
 - **Signed RPM / Red Hat-style repositories** — Fedora, RHEL, OpenSUSE, and the developer's own Yum/DNF repos
 - **GitHub Releases** — tagged assets from the developer's repository, including cases where there is no Linux package repo at all.
 
-When a newer upstream version appears, PacSmith can notify you, optionally download and inspect it, and walk you through a new release of *your* package. Your reviewed Guided choices carry forward across same-format updates. A Custom PKGBUILD and its support files copy forward verbatim while PacSmith regenerates `pacsmith.vars` for the new verified artifact. No model is called during discovery or preparation.
+When a newer upstream version appears, PacSmith can notify you, optionally download and inspect it, and walk you through a new release of *your* package. Your reviewed Guided choices carry forward across same-format updates. A Custom PKGBUILD and its support files copy forward verbatim while PacSmith regenerates `pacsmith.vars` for the new verified artifact. Discovery and preparation remain deterministic. Per project, the subsequent build can be disabled, allowed when deterministic review is clear, or delegated to the default external AI harness when review is needed.
 
 That is the difference between "I converted a `.deb` once" and "I can actually live without the AUR." The first is a weekend script. The second is why PacSmith exists.
 
@@ -98,7 +98,7 @@ PacSmith is not an AI client. It has no provider login, API-key setting, model p
 - `pacsmith plugin path` prints the Agent Plugin directory containing `plugin.json`, `mcp.json`, and the PacSmith Agent Skill.
 - `pacsmith skill install` also copies the Skill into the cross-harness user directory `~/.agents/skills/pacsmith` for clients that discover standalone Skills; `pacsmith skill path` prints the active Skill directory.
 
-`make install` installs the bundle and the shared standalone Skill. A Skill is guidance, not permission to execute an MCP server. If the Skill is visible but MCP is not, it must stop and ask whether you want the integration installed. After approval, the harness uses its native Agent Plugin or MCP installation control with the directory from `pacsmith plugin path`. It must not fall back to PacSmith CLI project commands, Unix sockets, D-Bus, daemon control, HTTP calls, or database access. PacSmith does not use ACP, a harness registry, or vendor-specific configuration.
+`make install` installs the bundle and the shared standalone Skill. A Skill is guidance, not permission to execute an MCP server. Agents prefer MCP when it is available and may use documented PacSmith CLI commands when it is not. If a task needs MCP-only functionality, the agent asks whether you want the integration installed; after approval, the harness uses its native Agent Plugin or MCP installation control with the directory from `pacsmith plugin path`. Agents must not bypass MCP or the CLI through Unix sockets, D-Bus, daemon control, direct HTTP, database access, or PacSmith storage. PacSmith does not use ACP, a harness registry, or vendor-specific configuration.
 
 MCP exposes typed PacSmith reads and ordinary domain edits: project/release evidence, inspected dependency mappings, explicit Arch runtime dependencies, package description/homepage/licenses/compatibility relations, payload rules, lifecycle state, AppRun, launchers, desktop entries and icons, deterministic update checks and update sources, vendor APT/RPM signing-key import, Guided/Custom mode, PKGBUILD and support files, builds/jobs/logs/artifacts, project and global repository state, library update/retention policy, repository signing, local-admin remote enrollment, the GitHub credential, this client's tray/login preferences, and the same generic external-harness launch profiles edited in the GUI. `check_updates` accepts an optional project and checks every project when omitted. `import_repository_signing_key` is the same Fetch & Review path as the GUI: PacSmith downloads a first-party OpenPGP key, shows its fingerprint, and elicits confirmation before pinning it. Harness profiles are managed with `list_harness_profiles`, `upsert_harness_profile`, `remove_harness_profile`, and `set_default_harness_profile`; executable and arguments remain separate values and are never evaluated by a shell. MCP has no generic internal-state mutation tool and no setting that only an agent can edit.
 
@@ -110,7 +110,7 @@ The running GUI watches its client settings file and subscribes to authenticated
 
 Custom support files are also directly manageable by a person with `pacsmith custom-file <project> list|read|write|delete`; MCP uses the same release-file API and validation.
 
-Routine structured recipe edits are ordinary work. Writing a Custom PKGBUILD requires PacSmith-enforced MCP form elicitation because it replaces shell code that will execute during the build. Destructive deletion, release-reset reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login-autostart changes, remote-listener/client trust, and credential changes require the same confirmation. If the client cannot present it, PacSmith fails closed. MCP exposes repository bootstrap scripts only as text for review; it does not execute them, change pacman trust, enable a repository on the machine, or install packages.
+Routine recipe edits, including Custom PKGBUILD writes, are ordinary MCP work. Custom recipes execute only inside PacSmith's rootless Podman build environment. Destructive deletion, release-reset reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login-autostart changes, remote-listener/client trust, and credential changes require confirmation. If the client cannot present it, PacSmith fails closed. MCP exposes repository bootstrap scripts only as text for review; it does not execute them, change pacman trust, enable a repository on the machine, or install packages.
 
 All mutating project/release tools use the display/package name and release version shown by `list_projects`, not opaque database IDs. This keeps harness preflight prompts understandable; PacSmith also uses the verified names in its own mandatory confirmation for sensitive operations. Read tools can continue using stable IDs without presenting an approval prompt.
 
@@ -174,13 +174,13 @@ The repository listener is separate from the mTLS management listener used by en
 
 ```text
 developer → developer's own package → persistent local project
-                → editable PKGBUILD → unprivileged makepkg
+                → editable PKGBUILD → Guided host build or Custom rootless Podman build
                     ├→ explicit privileged pacman -U
                     └→ signed unstable → soak/manual promotion
                                          → signed stable → pacman clients
 ```
 
-Imported packages are untrusted data, even when they come from a known developer. PacSmith never executes an imported binary, shared object, or Debian/RPM maintainer script during analysis. `makepkg` runs as your user. Only an explicit Install action elevates, and it runs one command: `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
+Imported packages are untrusted data, even when they come from a known developer. PacSmith never executes an imported binary, shared object, or Debian/RPM maintainer script during analysis. Guided `makepkg` runs as the daemon user. Custom PKGBUILDs and their declared build dependencies run inside rootless Podman. Only an explicit Install action elevates, and it runs one constrained `pacman -U` command.
 
 Signed APT and RPM checks do not trust HTTPS alone. A project-local public key and a pinned signer fingerprint are required. GitHub tracking records a publisher `sha256:` digest when GitHub provides one, always hashes the downloaded bytes, and marks releases without a publisher digest as unsigned.
 
@@ -209,8 +209,10 @@ The AUR is never executable authority in this workflow. PKGBUILDs, comments, ins
 Install dependencies from the official repositories:
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools polkit gnupg age libsecret desktop-file-utils openssl
+sudo pacman -S --needed base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools podman polkit gnupg age libsecret desktop-file-utils openssl
 ```
+
+`make deps` and `make install` include Podman so the installed library host can build Custom PKGBUILDs.
 
 The top-level Makefile can perform the complete Arch-only setup, build, test, and current-user installation. It checks `/etc/arch-release` and `/etc/os-release` plus the system `pacman` before changing anything. Run it as your normal user. Pacman elevation is used only to install official repository dependencies; PacSmith itself is installed without elevation:
 
@@ -282,7 +284,7 @@ Direct CMake builds also default to the current user's `~/.local` prefix. An exp
 - Original maintainer scripts remain untrusted evidence. Acknowledgment records a content fingerprint, never permission to execute the Debian or RPM script.
 - Archive member paths are normalized; traversal, absolute paths, duplicate members, special device entries, unsafe hard links, and escaping symlinks are rejected.
 - External processes use `QProcess` with explicit argument lists — never `/bin/sh -c` with imported values.
-- `makepkg` is run in the project directory as the current user. PacSmith refuses to start it as root.
+- Guided `makepkg` runs in a disposable workspace as the daemon user. Custom PKGBUILDs run as a container user under rootless Podman with bounded mounts and project-scoped source/compiler caches.
 - Only an explicit Install action runs `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
 - APT source files and repository keyrings are flagged and excluded from generated packages unless explicitly retained. Repository checks require a trusted project-local key and a pinned signer fingerprint.
 - Published packages and repository databases are OpenPGP-signed. Bootstrap scripts pin the expected key fingerprints and configure pacman to require trusted signatures.

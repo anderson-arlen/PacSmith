@@ -8,7 +8,7 @@ PACMAN := /usr/bin/pacman
 ARCH_RELEASE ?= /etc/arch-release
 OS_RELEASE ?= /etc/os-release
 
-DEPENDENCIES := base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools polkit gnupg age libsecret desktop-file-utils openssl
+DEPENDENCIES := base-devel cmake ninja go qt6-base qt6-svg libarchive squashfs-tools podman polkit gnupg age libsecret desktop-file-utils openssl
 
 .DEFAULT_GOAL := all
 .NOTPARALLEL:

@@ -98,6 +98,7 @@
 #include <QSignalBlocker>
 #include <QSet>
 #include <QSplitter>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>

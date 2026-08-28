@@ -188,7 +188,7 @@ void MainWindow::populateUpdates() {
     auto *tracker = updateEditorRelease();
     populating_ = true;
     const auto controls = QList<QWidget *>{
-        updateStrategy_, updateUrl_, directUrlFullCheckInterval_,
+        updateStrategy_, autoBuildPolicy_, updateUrl_, directUrlFullCheckInterval_,
         aptSuite_, aptComponent_, aptArchitecture_, aptPackageName_,
         rpmArchitecture_, rpmPackageName_,
         aptSigningKeyUrl_, aptSigningKeyDownloadButton_, aptSigningKeyring_, aptSigningKey_,
@@ -223,6 +223,18 @@ void MainWindow::populateUpdates() {
         return;
     }
     for (auto *control : controls) control->setEnabled(true);
+    const auto autoBuildIndex = autoBuildPolicy_->findData(
+        autoBuildPolicyName(project_->autoBuildPolicy));
+    autoBuildPolicy_->setCurrentIndex(autoBuildIndex < 0 ? 1 : autoBuildIndex);
+    if (auto *model = qobject_cast<QStandardItemModel *>(autoBuildPolicy_->model())) {
+        if (auto *reviewFree = model->item(1)) {
+            const bool custom = tracker->pkgbuildManuallyModified;
+            reviewFree->setEnabled(!custom);
+            reviewFree->setToolTip(custom
+                ? QStringLiteral("Custom PKGBUILDs require manual or AI review because upstream compatibility cannot be determined mechanically.")
+                : QString{});
+        }
+    }
     const bool installedOwner = project_->installedRelease() == tracker;
     const bool newestOwner = project_->newestRelease() == tracker;
     const auto ownership = installedOwner
@@ -391,6 +403,17 @@ void MainWindow::populateUpdates() {
 
 void MainWindow::populateBuild() {
     if (!project_) return;
+    if (compileCachePolicy_ != nullptr) {
+        QSignalBlocker blocker(compileCachePolicy_);
+        const auto index = compileCachePolicy_->findData(
+            compileCachePolicyName(project_->compileCachePolicy));
+        compileCachePolicy_->setCurrentIndex(index < 0 ? 0 : index);
+        const bool custom = currentRelease()->pkgbuildManuallyModified;
+        compileCachePolicy_->setEnabled(custom);
+        compileCachePolicy_->setToolTip(custom
+            ? QStringLiteral("Custom source builds share one compiler cache across versions of this project.")
+            : QStringLiteral("Compiler caching is managed only for containerized Custom PKGBUILDs."));
+    }
     const auto unresolved = std::count_if(currentRelease()->dependencies.cbegin(), currentRelease()->dependencies.cend(),
                                           [](const auto &dependency) {
                                               return dependency.status == MappingStatus::Unresolved;
@@ -612,6 +635,8 @@ bool MainWindow::saveUpdateConfiguration() {
                                                                : UpdateStrategy::GitHubRelease;
     const auto previousStrategy = tracker->update.strategy;
     const auto previousUrl = tracker->update.url;
+    project_->autoBuildPolicy = autoBuildPolicyFromName(
+        autoBuildPolicy_->currentData().toString());
     tracker->update.strategy = strategy;
     tracker->update.url = updateUrl_->text().trimmed();
     tracker->update.directUrlFullCheckIntervalHours =

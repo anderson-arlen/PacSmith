@@ -36,7 +36,11 @@ CREATE TABLE projects (
     modified_at TEXT NOT NULL,
     repo_publish INTEGER NOT NULL DEFAULT 0,
     repo_pkgname_override TEXT NOT NULL DEFAULT '',
-    repo_published_pkgname TEXT NOT NULL DEFAULT ''
+    repo_published_pkgname TEXT NOT NULL DEFAULT '',
+    auto_build_policy TEXT NOT NULL DEFAULT 'review_free'
+        CHECK (auto_build_policy IN ('never', 'review_free', 'ai')),
+    compile_cache_policy TEXT NOT NULL DEFAULT 'reuse'
+        CHECK (compile_cache_policy IN ('reuse', 'clear_after_success', 'disabled'))
 );
 
 CREATE INDEX projects_source_identity_idx ON projects (source_identity);

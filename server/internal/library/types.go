@@ -36,6 +36,8 @@ type Project struct {
 	RepoPublish          bool           `json:"-"`
 	RepoPkgnameOverride  string         `json:"-"`
 	RepoPublishedPkgname string         `json:"-"`
+	AutoBuildPolicy      string         `json:"autoBuildPolicy"`
+	CompileCachePolicy   string         `json:"compileCachePolicy"`
 }
 
 type Release struct {

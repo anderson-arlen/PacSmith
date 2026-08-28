@@ -163,7 +163,7 @@ normally `~/.local/share/pacsmith/projects`, is **legacy data**. New code must n
 
 Pre-refactor client config (`$XDG_CONFIG_HOME/pacsmith/settings.json`, `secrets.age`) and state (`$XDG_STATE_HOME/pacsmith/update-state.json`) likewise remain outside the new ownership boundary. New client/server code uses the `client/` and `server/` subdirectories.
 
-Library-wide settings live on `pacsmithd` (`GET`/`PATCH /api/v1/settings`): update-check schedule, automatic update preparation/safe building, and one per-project outdated-version retention count. The oldest active distribution pointer defines the cleanup boundary: Stable when populated, otherwise Unstable. Cleanup preserves the entire boundary-to-Unstable rollout window, keeps the configured number of completed releases immediately behind the boundary, and makes every excess older release's source artifact and built packages collectible together. Repository HTTP listening is independent of these internal pointers. Automatic handling carries forward reviewed configuration, pauses for dependency, lifecycle, or structured-review changes, and advances Unstable when project publication is enabled; installation is never automatic. This-machine GUI session options (tray, start at login, MIME onboarding, external-harness launch profiles) stay in the client config tree. Old AI and superseded retention columns remain inert only for database compatibility. Client connection mode (local Unix vs remote host:port) stays in `$XDG_CONFIG_HOME/pacsmith/client/connection.json` and is edited from the GUI connection control on the status bar, not from Settings. HTTPS listen enable/interfaces/port live on `GET`/`PATCH /api/v1/server` (local-admin only). Client enrollment (list/approve/reject/revoke) is local-Unix PKI administration; the GUI Settings Library tab shows registration approval only while the host is listening, and hides that tab entirely when this GUI is itself a remote client.
+Library-wide settings live on `pacsmithd` (`GET`/`PATCH /api/v1/settings`): update-check schedule, automatic update preparation, build parallelism, and one per-project outdated-version retention count. Each project separately chooses whether prepared updates are never built automatically, built when deterministic review is clear, or handed to the default external AI harness when review is needed. Custom PKGBUILDs cannot use the deterministic-review option. The oldest active distribution pointer defines the cleanup boundary: Stable when populated, otherwise Unstable. Cleanup preserves the entire boundary-to-Unstable rollout window, keeps the configured number of completed releases immediately behind the boundary, and makes every excess older release's source artifact and built packages collectible together. Repository HTTP listening is independent of these internal pointers. Installation is never automatic. This-machine GUI session options (tray, start at login, MIME onboarding, external-harness launch profiles) stay in the client config tree. Superseded retention columns remain inert only for database compatibility. Client connection mode (local Unix vs remote host:port) stays in `$XDG_CONFIG_HOME/pacsmith/client/connection.json` and is edited from the GUI connection control on the status bar, not from Settings. HTTPS listen enable/interfaces/port live on `GET`/`PATCH /api/v1/server` (local-admin only). Client enrollment (list/approve/reject/revoke) is local-Unix PKI administration; the GUI Settings Library tab shows registration approval only while the host is listening, and hides that tab entirely when this GUI is itself a remote client.
 
 Repository channel existence is server-owned: unstable always exists, while stable is one optional system-wide second channel. Project publication policy remains project-owned rather than release-owned. Publication sends builds to unstable; when stable exists, each project independently selects manual or automatic promotion and may inherit the server-wide soak duration or store an override. Changing a duration recomputes active eligible times from their original soak starts. Enabling publication retroactively publishes the newest retained successful build, while disabling publication removes every version of that project from repository channels. Package-name overrides therefore apply across the whole project.
 
@@ -241,7 +241,8 @@ untrusted artifact bytes
        │  static format/libarchive parsing only
        ▼
 reviewable project + PKGBUILD
-       │  explicit user/server build, never root
+       │  Guided: host makepkg as the daemon user
+       │  Custom: rootless Podman, makepkg as a container user
        ▼
 makepkg output
        │  client streams the package; explicit local install choice
@@ -258,13 +259,15 @@ Invariant:
 - Do not execute maintainer scripts during inspection.
 - Reject dangerous archive paths, duplicate members, special files, and unsafe symlink/hardlink behavior.
 - Avoid shell-string interpolation; use argument-vector execution.
-- Builds remain unprivileged. Never run `makepkg` as root.
+- Builds remain unprivileged on the host. Guided recipes run as the daemon user; Custom recipes run as a non-root user inside rootless Podman.
 - Privilege elevation remains narrow and local to explicit package installation on the **client** machine.
 - Preserve signature/trust verification (pinned OpenPGP keys for APT/RPM; GitHub digest when present).
 - Apply strict request/file size limits.
 - Do not allow path traversal from client- or upstream-supplied filenames.
 
 Builds run on the library host (the machine running `pacsmithd`). In local mode that is the same computer as the client. In remote mode the library host builds; the client only downloads the artifact and, if the user chooses, installs it locally.
+
+Guided recipes only repackage already-inspected vendor payloads and keep their short-lived host workspace only for the duration of the build. Custom PKGBUILDs run in an Arch `base-devel` image with only the release workspace, a project-scoped ccache/source cache, and a shared pacman download cache mounted. PacSmith evaluates `.SRCINFO` inside the container and installs declared `depends`, `makedepends`, and `checkdepends` there before building. Successful custom workspaces are removed. Failed custom workspaces remain inspectable, and their compiled `src/` tree is carried into the next retry. The project cache policy can reuse ccache, clear it after a successful build, or disable it. Cancellation terminates the Podman process group and forcibly removes the named container.
 
 ## Library domain
 
@@ -322,7 +325,7 @@ Generated PKGBUILDs use a relative source link and verify SHA-256 through makepk
 
 PKGBUILD validation is static and does not source the file. A generated Arch `.install` file is checked with `bash -n` (syntax only) and a restrictive policy, then requires exact-content acknowledgment because pacman will run its lifecycle functions as root.
 
-`makepkg --force --nodeps` is intentional: PacSmith unpacks prebuilt vendor files, so `depends=` are runtime metadata for `pacman -U` rather than libraries needed to assemble the package. Source hashes and `package()` still run.
+Guided builds use `makepkg --force --nodeps`: those recipes unpack prebuilt vendor files, so `depends=` are runtime metadata for `pacman -U` rather than libraries needed to assemble the package. Custom builds install the dependency arrays from `.SRCINFO` inside the container and then run `makepkg --force --noconfirm`. Source hashes and `package()` still run in both modes.
 
 ## Updates and acquisition
 
@@ -361,13 +364,13 @@ Tools are typed, domain-oriented projections of normal PacSmith operations. They
 
 Detailed payload inspection also stays behind this boundary. An MCP client selects an exact path from the release's immutable payload inventory; `pacsmithd` reads that member from its retained source artifact and returns bounded text or static ELF evidence plus file identity and archive metadata. The client receives evidence, not an extracted package or a path into server storage, so this works identically over a local socket and remote mTLS.
 
-Tool annotations describe read-only, destructive, idempotent, and open-world behavior. They are advisory. A central PacSmith permission policy additionally requires MCP form elicitation for Custom PKGBUILD writes, destructive project/release deletion, resetting a release through reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login autostart, remote listener/client trust, and credential changes. The client response must explicitly accept and set the confirmation field. A client without form elicitation fails closed and the user must use a compatible client or perform the operation directly through PacSmith.
+Tool annotations describe read-only, destructive, idempotent, and open-world behavior. They are advisory. Custom PKGBUILD writes are routine because those recipes execute only inside the rootless Podman build environment. A central PacSmith permission policy requires MCP form elicitation for destructive project/release deletion, resetting a release through reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login autostart, remote listener/client trust, and credential changes. The client response must explicitly accept and set the confirmation field. A client without form elicitation fails closed and the user must use a compatible client or perform the operation directly through PacSmith.
 
 Every mutating project and release tool input uses human-readable project/package names and release versions from `list_projects`. UUIDs remain available to read tools as stable lookup identifiers, but are not the sole target shown to a person in a harness preflight. Sensitive operations also use the server-verified names in PacSmith's elicitation prompt.
 
-Routine structured recipe edits do not trigger confirmation spam. Replacing a Custom PKGBUILD is sensitive because that shell code executes during the build, so MCP requires explicit harness elicitation before saving it. Deletion, trust/system changes, and published repository state use the same fail-closed boundary. PacSmith does not expose package installation or repository bootstrap/trust installation through MCP. The constrained `pacsmith install <project>` CLI is the host-local installation boundary: it accepts no arbitrary package path, resolves a retained PacSmith artifact, uses sudo in the current TTY by default, and supports explicit `--polkit` for graphical callers.
+Routine recipe edits do not trigger confirmation spam, including replacing a Custom PKGBUILD that can execute only in the rootless container runner. Deletion, trust/system changes, and published repository state retain the fail-closed confirmation boundary. PacSmith does not expose package installation or repository bootstrap/trust installation through MCP. The constrained `pacsmith install <project>` CLI is the host-local installation boundary: it accepts no arbitrary package path, resolves a retained PacSmith artifact, uses sudo in the current TTY by default, and supports explicit `--polkit` for graphical callers.
 
-Automatic updates remain deterministic:
+Automatic preparation remains deterministic:
 
 ```text
 discover → acquire/verify → inspect → carry known decisions
@@ -375,6 +378,8 @@ discover → acquire/verify → inspect → carry known decisions
 ```
 
 Guided mode carries only supported structured behavior. Arbitrary Bash/filesystem logic belongs in Custom PKGBUILD. A Custom PKGBUILD and explicit text support files copy forward verbatim from the most applicable release; PacSmith-owned artifacts, inspection state, and build output do not. `pacsmith.vars` is freshly generated for the new release. No shell-code merge occurs and historical releases are immutable.
+
+The per-project automatic-build policy controls what follows preparation. `Never` stops there. `When nothing is flagged for review` follows the deterministic checks and is unavailable for Custom PKGBUILDs. `Resolve review items with AI automatically` launches the existing default external harness with a scoped MCP prompt and returns immediately; PacSmith does not monitor or limit the visible harness session. The prompt permits one additional obvious, simple repair after a failed build and otherwise tells the agent to stop for human attention.
 
 ## Installation prefix and units
 

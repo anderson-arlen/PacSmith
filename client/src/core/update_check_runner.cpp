@@ -6,6 +6,7 @@
 #include "core/deb_download_service.hpp"
 #include "core/direct_url_update_service.hpp"
 #include "core/github_update_service.hpp"
+#include "core/harness_launcher.hpp"
 #include "core/release_review.hpp"
 #include "core/rpm_update_service.hpp"
 #include "core/system_package_query.hpp"
@@ -159,6 +160,49 @@ bool buildPreparedUpdate(LibraryClient &library, const QString &projectId,
         return false;
     }
     diagnostics << "built " << name << " and published it to the unstable repository channel\n";
+    return true;
+}
+
+bool automaticAiAlreadyDispatched(const PackageRelease &release) {
+    return std::any_of(release.history.cbegin(), release.history.cend(), [](const auto &entry) {
+        return entry.event == QStringLiteral("automatic-ai-dispatched");
+    });
+}
+
+bool launchAutomaticAi(LibraryClient &library, Project &project, PackageRelease &release,
+                       QTextStream &diagnostics) {
+    if (automaticAiAlreadyDispatched(release)) return false;
+    AppSettingsStore settingsStore;
+    auto appSettings = settingsStore.load();
+    const auto *profile = appSettings.defaultHarness();
+    if (profile == nullptr) {
+        diagnostics << "warning: automatic AI review requires a default harness profile\n";
+        return false;
+    }
+    const auto prompt = HarnessLauncher::automaticUpdatePrompt(
+        project.id, release.id, release.pkgbuildManuallyModified);
+    bool promptInserted = false;
+    static_cast<void>(HarnessLauncher::expandedArguments(*profile, prompt, &promptInserted));
+    if (!promptInserted) {
+        diagnostics << "warning: the default harness profile needs a {prompt} argument for automatic AI review\n";
+        return false;
+    }
+    const auto launched = HarnessLauncher::launch(*profile, prompt);
+    if (!launched.started) {
+        diagnostics << "warning: automatic AI harness could not start: " << launched.error << '\n';
+        return false;
+    }
+    release.history.append({QDateTime::currentDateTimeUtc(),
+                            QStringLiteral("automatic-ai-dispatched"),
+                            QStringLiteral("Launched default harness profile %1 for update review")
+                                .arg(profile->name)});
+    QString error;
+    if (!library.save(project, &error)) {
+        diagnostics << "warning: automatic AI dispatch started but could not be recorded: "
+                    << error << '\n';
+    }
+    diagnostics << "launched AI review for " << projectActivityName(project) << ' '
+                << release.debian.version << '\n';
     return true;
 }
 
@@ -454,7 +498,7 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
             clearPreparation(activity);
         }
     }
-    if (automaticallyPrepare) {
+    if (automaticallyPrepare && project.autoBuildPolicy != AutoBuildPolicy::Never) {
         BackgroundUpdateState ownedBuildActivity;
         auto *buildActivity = backgroundState;
         if (buildActivity == nullptr) {
@@ -464,9 +508,25 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
         if (const auto preparedProject = library.load(project.id, &saveError)) {
             if (const auto selection = automaticUpdateBuildSelection(*preparedProject)) {
                 const auto *candidate = preparedProject->release(selection->preparedReleaseId);
-                runResult.built = buildPreparedUpdate(
-                    library, project.id, selection->previousReleaseId,
-                    selection->preparedReleaseId, diagnostics, buildActivity);
+                const auto *previous = preparedProject->release(selection->previousReleaseId);
+                const auto blockers = previous != nullptr && candidate != nullptr
+                    ? automaticUpdateBuildBlockers(*previous, *candidate)
+                    : QStringList{QStringLiteral("The prepared update could not be compared with its predecessor.")};
+                const bool requiresAi = candidate != nullptr &&
+                    (candidate->pkgbuildManuallyModified || !blockers.isEmpty());
+                if (preparedProject->autoBuildPolicy == AutoBuildPolicy::Ai && requiresAi) {
+                    auto mutableProject = *preparedProject;
+                    if (auto *mutableCandidate = mutableProject.release(selection->preparedReleaseId)) {
+                        static_cast<void>(launchAutomaticAi(
+                            library, mutableProject, *mutableCandidate, diagnostics));
+                    }
+                } else if (candidate != nullptr && candidate->pkgbuildManuallyModified) {
+                    diagnostics << "automatic build paused: Custom PKGBUILDs require AI or manual review\n";
+                } else {
+                    runResult.built = buildPreparedUpdate(
+                        library, project.id, selection->previousReleaseId,
+                        selection->preparedReleaseId, diagnostics, buildActivity);
+                }
                 if (runResult.built && candidate != nullptr) {
                     runResult.detectedVersion = candidate->debian.version;
                 }

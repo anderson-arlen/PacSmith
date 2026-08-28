@@ -1234,6 +1234,14 @@ void MainWindow::setConfigurationMode(const bool custom) {
             updateConfigurationModeChrome();
             return;
         }
+        if (custom && project_->autoBuildPolicy == AutoBuildPolicy::ReviewFree) {
+            project_->autoBuildPolicy = AutoBuildPolicy::Never;
+            if (!library_.save(*project_, &error)) {
+                QMessageBox::critical(this, QStringLiteral("Could not update automatic-build policy"), error);
+                updateConfigurationModeChrome();
+                return;
+            }
+        }
         projectCache_.insert(project_->id, *project_);
     }
     configureEditorProfile();

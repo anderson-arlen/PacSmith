@@ -283,6 +283,15 @@ void CoreTests::serializesProjectsAndOverrides() {
     QCOMPARE(restored.history.size(), 1);
     QCOMPARE(restored.buildStatus, pacsmith::BuildStatus::Canceled);
     QVERIFY(restored.automaticBuild);
+
+    pacsmith::Project packageProject;
+    packageProject.id = QStringLiteral("project-id");
+    packageProject.autoBuildPolicy = pacsmith::AutoBuildPolicy::Ai;
+    packageProject.compileCachePolicy = pacsmith::CompileCachePolicy::ClearAfterSuccess;
+    const auto restoredProject = pacsmith::Project::fromJson(packageProject.toJson());
+    QCOMPARE(restoredProject.autoBuildPolicy, pacsmith::AutoBuildPolicy::Ai);
+    QCOMPARE(restoredProject.compileCachePolicy,
+             pacsmith::CompileCachePolicy::ClearAfterSuccess);
 }
 
 void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {

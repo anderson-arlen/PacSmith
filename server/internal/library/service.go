@@ -12,11 +12,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
@@ -168,10 +165,12 @@ func (s *Service) FindProject(ctx context.Context, idOrName string) (Project, er
 }
 
 type ProjectPatch struct {
-	Revision        int64  `json:"revision"`
-	DisplayName     string `json:"displayName"`
-	ArchPackageName string `json:"archPackageName"`
-	VendorName      string `json:"vendorName"`
+	Revision           int64   `json:"revision"`
+	DisplayName        string  `json:"displayName"`
+	ArchPackageName    string  `json:"archPackageName"`
+	VendorName         string  `json:"vendorName"`
+	AutoBuildPolicy    *string `json:"autoBuildPolicy"`
+	CompileCachePolicy *string `json:"compileCachePolicy"`
 }
 
 func (s *Service) PatchProject(ctx context.Context, id string, patch ProjectPatch) (Project, error) {
@@ -198,17 +197,34 @@ func (s *Service) PatchProject(ctx context.Context, id string, patch ProjectPatc
 	if patch.VendorName != "" {
 		vendor = patch.VendorName
 	}
+	autoBuildPolicy := row.AutoBuildPolicy
+	if patch.AutoBuildPolicy != nil {
+		autoBuildPolicy = strings.TrimSpace(*patch.AutoBuildPolicy)
+	}
+	if autoBuildPolicy != "never" && autoBuildPolicy != "review_free" && autoBuildPolicy != "ai" {
+		return Project{}, fmt.Errorf("%w: autoBuildPolicy must be never, review_free, or ai", ErrInvalid)
+	}
+	compileCachePolicy := row.CompileCachePolicy
+	if patch.CompileCachePolicy != nil {
+		compileCachePolicy = strings.TrimSpace(*patch.CompileCachePolicy)
+	}
+	if compileCachePolicy != "reuse" && compileCachePolicy != "clear_after_success" &&
+		compileCachePolicy != "disabled" {
+		return Project{}, fmt.Errorf("%w: compileCachePolicy must be reuse, clear_after_success, or disabled", ErrInvalid)
+	}
 	_, err = s.DB.Queries.UpdateProject(ctx, sqlcdb.UpdateProjectParams{
-		DisplayName:     display,
-		ArchPackageName: arch,
-		VendorName:      vendor,
-		SourceIdentity:  row.SourceIdentity,
-		IconArtifactID:  row.IconArtifactID,
-		IconSha256:      row.IconSha256,
-		HistoryJson:     row.HistoryJson,
-		ModifiedAt:      nowUTC(),
-		ID:              row.ID,
-		Revision:        revision,
+		DisplayName:        display,
+		ArchPackageName:    arch,
+		VendorName:         vendor,
+		SourceIdentity:     row.SourceIdentity,
+		IconArtifactID:     row.IconArtifactID,
+		IconSha256:         row.IconSha256,
+		HistoryJson:        row.HistoryJson,
+		AutoBuildPolicy:    autoBuildPolicy,
+		CompileCachePolicy: compileCachePolicy,
+		ModifiedAt:         nowUTC(),
+		ID:                 row.ID,
+		Revision:           revision,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, ErrConflict
@@ -878,9 +894,6 @@ type BuildResult struct {
 
 func (s *Service) BuildRelease(ctx context.Context, releaseID string,
 	logOutput func(string), automatic bool) (BuildResult, error) {
-	if os.Geteuid() == 0 {
-		return BuildResult{}, fmt.Errorf("%w: refusing to run makepkg as root", ErrInvalid)
-	}
 	row, err := s.DB.Queries.GetRelease(ctx, releaseID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BuildResult{}, ErrNotFound
@@ -907,9 +920,14 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string,
 	if err != nil {
 		return BuildResult{}, err
 	}
+	document := releaseDocument(row).Document
+	isCustom := customBuild(document)
 	work := filepath.Join(s.WorkDir, "releases", releaseID)
-	if err := os.RemoveAll(work); err != nil {
+	if err := resetBuildWorkspace(work, isCustom); err != nil {
 		return BuildResult{}, err
+	}
+	if !isCustom {
+		defer os.RemoveAll(work)
 	}
 	if err := os.MkdirAll(filepath.Join(work, "sources"), 0o700); err != nil {
 		return BuildResult{}, err
@@ -967,37 +985,37 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string,
 	if err != nil {
 		return BuildResult{}, err
 	}
-	arguments := []string{"--force", "--nodeps"}
-	arguments = append(arguments, buildParallelismArguments(int(settings.BuildParallelism))...)
-	cmd := exec.CommandContext(ctx, "/usr/bin/makepkg", arguments...)
-	cmd.Dir = work
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
+	project, err := s.DB.Queries.GetProject(ctx, row.ProjectID)
+	if err != nil {
+		return BuildResult{}, err
 	}
-	cmd.WaitDelay = 5 * time.Second
-	var output bytes.Buffer
-	stream := io.Writer(&output)
-	if logOutput != nil {
-		stream = io.MultiWriter(&output, buildLogWriter(logOutput))
+	execution := buildExecution{
+		ReleaseID: releaseID, ProjectID: row.ProjectID, WorkDir: work,
+		Parallelism:        int(settings.BuildParallelism),
+		CompileCachePolicy: project.CompileCachePolicy, LogOutput: logOutput,
 	}
-	cmd.Stdout = stream
-	cmd.Stderr = stream
-	err = cmd.Run()
-	logText := output.String()
+	var logText string
+	if isCustom {
+		if logOutput != nil {
+			logOutput("Starting isolated rootless Podman build…\n")
+		}
+		logText, err = runContainerBuild(ctx, execution)
+	} else {
+		if os.Geteuid() == 0 {
+			return BuildResult{}, fmt.Errorf("%w: refusing to run makepkg as root", ErrInvalid)
+		}
+		logText, err = runNativeBuild(ctx, execution)
+	}
 	status := "succeeded"
 	if err != nil {
 		status = "failed"
-		logText += "\n" + err.Error()
+	}
+	if isCustom && status == "succeeded" {
+		defer os.RemoveAll(work)
+	}
+	if isCustom && status == "succeeded" &&
+		project.CompileCachePolicy == "clear_after_success" {
+		defer os.RemoveAll(projectCompileCacheDir(work, row.ProjectID))
 	}
 	now := nowUTC()
 	build, buildErr := s.DB.Queries.InsertBuild(ctx, sqlcdb.InsertBuildParams{
@@ -1063,6 +1081,32 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string,
 		}
 	}
 	return result, nil
+}
+
+func resetBuildWorkspace(work string, preserveCustomSources bool) error {
+	preserved := work + ".preserved-src"
+	if err := os.RemoveAll(preserved); err != nil {
+		return err
+	}
+	if preserveCustomSources {
+		if err := os.Rename(filepath.Join(work, "src"), preserved); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := os.RemoveAll(work); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(work, "sources"), 0o700); err != nil {
+		return err
+	}
+	if preserveCustomSources {
+		if err := os.Rename(preserved, filepath.Join(work, "src")); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 type buildLogWriter func(string)
@@ -1444,6 +1488,8 @@ func projectFromRow(row sqlcdb.Project) Project {
 		RepoPublish:          row.RepoPublish != 0,
 		RepoPkgnameOverride:  row.RepoPkgnameOverride,
 		RepoPublishedPkgname: row.RepoPublishedPkgname,
+		AutoBuildPolicy:      row.AutoBuildPolicy,
+		CompileCachePolicy:   row.CompileCachePolicy,
 	}
 }
 

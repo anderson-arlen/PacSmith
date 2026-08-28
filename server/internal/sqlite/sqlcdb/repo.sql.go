@@ -578,7 +578,7 @@ SET repo_publish = ?,
     modified_at = ?,
     revision = revision + 1
 WHERE id = ? AND revision = ?
-RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname
+RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy
 `
 
 type UpdateProjectRepoParams struct {
@@ -615,6 +615,8 @@ func (q *Queries) UpdateProjectRepo(ctx context.Context, arg UpdateProjectRepoPa
 		&i.RepoPublish,
 		&i.RepoPkgnameOverride,
 		&i.RepoPublishedPkgname,
+		&i.AutoBuildPolicy,
+		&i.CompileCachePolicy,
 	)
 	return i, err
 }

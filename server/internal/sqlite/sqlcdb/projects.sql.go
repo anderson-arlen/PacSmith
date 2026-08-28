@@ -20,7 +20,7 @@ func (q *Queries) DeleteProject(ctx context.Context, id string) error {
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname FROM projects WHERE id = ?
+SELECT id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy FROM projects WHERE id = ?
 `
 
 func (q *Queries) GetProject(ctx context.Context, id string) (Project, error) {
@@ -41,6 +41,8 @@ func (q *Queries) GetProject(ctx context.Context, id string) (Project, error) {
 		&i.RepoPublish,
 		&i.RepoPkgnameOverride,
 		&i.RepoPublishedPkgname,
+		&i.AutoBuildPolicy,
+		&i.CompileCachePolicy,
 	)
 	return i, err
 }
@@ -50,7 +52,7 @@ INSERT INTO projects (
     id, revision, display_name, arch_package_name, vendor_name, source_identity,
     icon_artifact_id, icon_sha256, history_json, created_at, modified_at
 ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname
+RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy
 `
 
 type InsertProjectParams struct {
@@ -95,12 +97,14 @@ func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (P
 		&i.RepoPublish,
 		&i.RepoPkgnameOverride,
 		&i.RepoPublishedPkgname,
+		&i.AutoBuildPolicy,
+		&i.CompileCachePolicy,
 	)
 	return i, err
 }
 
 const listProjects = `-- name: ListProjects :many
-SELECT id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname FROM projects ORDER BY display_name COLLATE NOCASE, id
+SELECT id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy FROM projects ORDER BY display_name COLLATE NOCASE, id
 `
 
 func (q *Queries) ListProjects(ctx context.Context) ([]Project, error) {
@@ -127,6 +131,8 @@ func (q *Queries) ListProjects(ctx context.Context) ([]Project, error) {
 			&i.RepoPublish,
 			&i.RepoPkgnameOverride,
 			&i.RepoPublishedPkgname,
+			&i.AutoBuildPolicy,
+			&i.CompileCachePolicy,
 		); err != nil {
 			return nil, err
 		}
@@ -142,7 +148,7 @@ func (q *Queries) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 const listProjectsBySourceIdentity = `-- name: ListProjectsBySourceIdentity :many
-SELECT id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname FROM projects WHERE source_identity = ?
+SELECT id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy FROM projects WHERE source_identity = ?
 `
 
 func (q *Queries) ListProjectsBySourceIdentity(ctx context.Context, sourceIdentity string) ([]Project, error) {
@@ -169,6 +175,8 @@ func (q *Queries) ListProjectsBySourceIdentity(ctx context.Context, sourceIdenti
 			&i.RepoPublish,
 			&i.RepoPkgnameOverride,
 			&i.RepoPublishedPkgname,
+			&i.AutoBuildPolicy,
+			&i.CompileCachePolicy,
 		); err != nil {
 			return nil, err
 		}
@@ -192,23 +200,27 @@ SET display_name = ?,
     icon_artifact_id = ?,
     icon_sha256 = ?,
     history_json = ?,
+    auto_build_policy = ?,
+    compile_cache_policy = ?,
     modified_at = ?,
     revision = revision + 1
 WHERE id = ? AND revision = ?
-RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname
+RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy
 `
 
 type UpdateProjectParams struct {
-	DisplayName     string         `json:"display_name"`
-	ArchPackageName string         `json:"arch_package_name"`
-	VendorName      string         `json:"vendor_name"`
-	SourceIdentity  string         `json:"source_identity"`
-	IconArtifactID  sql.NullString `json:"icon_artifact_id"`
-	IconSha256      string         `json:"icon_sha256"`
-	HistoryJson     string         `json:"history_json"`
-	ModifiedAt      string         `json:"modified_at"`
-	ID              string         `json:"id"`
-	Revision        int64          `json:"revision"`
+	DisplayName        string         `json:"display_name"`
+	ArchPackageName    string         `json:"arch_package_name"`
+	VendorName         string         `json:"vendor_name"`
+	SourceIdentity     string         `json:"source_identity"`
+	IconArtifactID     sql.NullString `json:"icon_artifact_id"`
+	IconSha256         string         `json:"icon_sha256"`
+	HistoryJson        string         `json:"history_json"`
+	AutoBuildPolicy    string         `json:"auto_build_policy"`
+	CompileCachePolicy string         `json:"compile_cache_policy"`
+	ModifiedAt         string         `json:"modified_at"`
+	ID                 string         `json:"id"`
+	Revision           int64          `json:"revision"`
 }
 
 func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (Project, error) {
@@ -220,6 +232,8 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (P
 		arg.IconArtifactID,
 		arg.IconSha256,
 		arg.HistoryJson,
+		arg.AutoBuildPolicy,
+		arg.CompileCachePolicy,
 		arg.ModifiedAt,
 		arg.ID,
 		arg.Revision,
@@ -240,6 +254,8 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (P
 		&i.RepoPublish,
 		&i.RepoPkgnameOverride,
 		&i.RepoPublishedPkgname,
+		&i.AutoBuildPolicy,
+		&i.CompileCachePolicy,
 	)
 	return i, err
 }

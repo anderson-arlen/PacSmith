@@ -1172,6 +1172,8 @@ QJsonObject Project::toJson() const {
             {QStringLiteral("installedVersion"), installedVersion},
             {QStringLiteral("installedReleaseId"), installedReleaseId},
             {QStringLiteral("externallyInstalled"), externallyInstalled},
+            {QStringLiteral("autoBuildPolicy"), autoBuildPolicyName(autoBuildPolicy)},
+            {QStringLiteral("compileCachePolicy"), compileCachePolicyName(compileCachePolicy)},
             {QStringLiteral("history"), valueListToJson(history)},
             {QStringLiteral("createdAt"), dateToString(createdAt)},
             {QStringLiteral("modifiedAt"), dateToString(modifiedAt)}};
@@ -1192,12 +1194,48 @@ Project Project::fromJson(const QJsonObject &object) {
     result.installedVersion = object.value(QStringLiteral("installedVersion")).toString();
     result.installedReleaseId = object.value(QStringLiteral("installedReleaseId")).toString();
     result.externallyInstalled = object.value(QStringLiteral("externallyInstalled")).toBool();
+    result.autoBuildPolicy = autoBuildPolicyFromName(
+        object.value(QStringLiteral("autoBuildPolicy")).toString());
+    result.compileCachePolicy = compileCachePolicyFromName(
+        object.value(QStringLiteral("compileCachePolicy")).toString());
     result.history = valueListFromJson<HistoryEntry>(object.value(QStringLiteral("history")));
     result.createdAt = dateFromString(object.value(QStringLiteral("createdAt")));
     result.modifiedAt = dateFromString(object.value(QStringLiteral("modifiedAt")));
     result.releases = valueListFromJson<PackageRelease>(object.value(QStringLiteral("releases")));
     result.repository = ProjectRepository::fromJson(object.value(QStringLiteral("repository")).toObject());
     return result;
+}
+
+QString autoBuildPolicyName(const AutoBuildPolicy policy) {
+    switch (policy) {
+    case AutoBuildPolicy::Never: return QStringLiteral("never");
+    case AutoBuildPolicy::Ai: return QStringLiteral("ai");
+    case AutoBuildPolicy::ReviewFree: return QStringLiteral("review_free");
+    }
+    return QStringLiteral("review_free");
+}
+
+AutoBuildPolicy autoBuildPolicyFromName(const QString &name) {
+    if (name == QStringLiteral("never")) return AutoBuildPolicy::Never;
+    if (name == QStringLiteral("ai")) return AutoBuildPolicy::Ai;
+    return AutoBuildPolicy::ReviewFree;
+}
+
+QString compileCachePolicyName(const CompileCachePolicy policy) {
+    switch (policy) {
+    case CompileCachePolicy::ClearAfterSuccess: return QStringLiteral("clear_after_success");
+    case CompileCachePolicy::Disabled: return QStringLiteral("disabled");
+    case CompileCachePolicy::Reuse: return QStringLiteral("reuse");
+    }
+    return QStringLiteral("reuse");
+}
+
+CompileCachePolicy compileCachePolicyFromName(const QString &name) {
+    if (name == QStringLiteral("clear_after_success")) {
+        return CompileCachePolicy::ClearAfterSuccess;
+    }
+    if (name == QStringLiteral("disabled")) return CompileCachePolicy::Disabled;
+    return CompileCachePolicy::Reuse;
 }
 
 RepoPackageRef RepoPackageRef::fromJson(const QJsonObject &object) {
