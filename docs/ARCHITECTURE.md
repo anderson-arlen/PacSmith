@@ -102,6 +102,8 @@ Artifacts are part of the API. Server filesystem paths are never given to client
 
 Remote artifact creation is also part of the MCP domain surface. `import_github_release` accepts a GitHub repository, tagged release, or exact release-asset URL and uses PacSmith's GitHub selector, downloader, digest verification, and normal import pipeline. `import_direct_url` applies the same owned acquisition pipeline to another first-party HTTPS URL. `import_repository_signing_key` is the GUI Fetch & Review path for a vendor APT/RPM signing key: PacSmith downloads the first-party OpenPGP key, inspects its fingerprint, elicits confirmation, and pins it. Agents never need to create a local staging file with an external downloader. Ambiguous GitHub inputs return visible asset names and require an asset rule that selects exactly one non-sidecar artifact.
 
+Manual monitoring treats the person as the release-discovery source. The GUI's Versions tab and MCP `import_artifact` can upload a local artifact into an existing project, override a missing vendor version, and require an optional publisher SHA-256. After that boundary, manual releases use the ordinary immutable artifact inspection, configuration carry-forward, review, build, retention, and publication pipeline.
+
 Upload: client file → HTTP body → temporary file (hashed while streaming) → validate → fsync → atomic move into the object store → SQLite association.
 
 Download: object store → HTTP body → client.

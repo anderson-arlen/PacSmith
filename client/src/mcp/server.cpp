@@ -275,9 +275,11 @@ QJsonArray tools() {
              QStringLiteral("Select which configured generic external AI harness profile PacSmith launches by default."),
              objectSchema({{QStringLiteral("name"), stringProperty(QStringLiteral("Exact profile name."))}},
                           {QStringLiteral("name")}), write),
-        tool(QStringLiteral("import_artifact"), QStringLiteral("Create or update a project by uploading and inspecting a local first-party vendor artifact through the normal PacSmith HTTP API."),
+        tool(QStringLiteral("import_artifact"), QStringLiteral("Create or update a project by uploading and inspecting a local first-party vendor artifact through the normal PacSmith HTTP API. For a manual update, select the existing project and supply a version when the artifact does not identify itself."),
              objectSchema({{QStringLiteral("path"), stringProperty(QStringLiteral("Absolute local path to a vendor artifact."))},
                            {QStringLiteral("existing_project"), project},
+                           {QStringLiteral("version"), stringProperty(QStringLiteral("Optional explicit vendor version, required when it cannot be inferred from the artifact."))},
+                           {QStringLiteral("expected_sha256"), stringProperty(QStringLiteral("Optional 64-character publisher SHA256 that must match the uploaded artifact."))},
                            {QStringLiteral("canonical_identity"), stringProperty(QStringLiteral("Stable source identity such as vendor:product."))}},
                           {QStringLiteral("path")}), annotations(false, false, false, false)),
         tool(QStringLiteral("import_github_release"),
@@ -1330,6 +1332,8 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         const auto path = argumentString(args, QStringLiteral("path"));
         if (!QFileInfo(path).isAbsolute() || !QFileInfo(path).isFile()) return fail(QStringLiteral("path must be an absolute regular file"));
         ImportOptions options;
+        options.version = argumentString(args, QStringLiteral("version"));
+        options.expectedSha256 = argumentString(args, QStringLiteral("expected_sha256"));
         const auto existingProjectName = argumentString(args, QStringLiteral("existing_project_name"));
         if (!existingProjectName.isEmpty()) {
             const auto existing = loadNamedProject(library_, existingProjectName, &error);

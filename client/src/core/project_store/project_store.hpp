@@ -27,6 +27,7 @@ struct ImportOptions {
     QString architecture;
     QString displayName;
     QString description;
+    QString expectedSha256;
     QString githubAssetRegex;
     bool githubIncludePrereleases{false};
     // Repository-first imports verify metadata before downloading the artifact,

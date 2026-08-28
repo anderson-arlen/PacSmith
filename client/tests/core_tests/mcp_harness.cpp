@@ -144,6 +144,17 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         QCOMPARE(remoteImport.value(QStringLiteral("annotations")).toObject()
                      .value(QStringLiteral("openWorldHint")).toBool(), true);
     }
+    const auto artifactImport = findTool(QStringLiteral("import_artifact"));
+    const auto artifactImportSchema =
+        artifactImport.value(QStringLiteral("inputSchema")).toObject();
+    const auto artifactImportProperties =
+        artifactImportSchema.value(QStringLiteral("properties")).toObject();
+    QVERIFY(artifactImportProperties.contains(QStringLiteral("path")));
+    QVERIFY(artifactImportProperties.contains(QStringLiteral("existing_project_name")));
+    QVERIFY(artifactImportProperties.contains(QStringLiteral("version")));
+    QVERIFY(artifactImportProperties.contains(QStringLiteral("expected_sha256")));
+    QVERIFY(artifactImportSchema.value(QStringLiteral("required")).toArray()
+                .contains(QStringLiteral("path")));
     const auto signingKeyImport = findTool(QStringLiteral("import_repository_signing_key"));
     const auto signingKeySchema = signingKeyImport.value(QStringLiteral("inputSchema")).toObject();
     const auto signingKeyProperties = signingKeySchema.value(QStringLiteral("properties")).toObject();

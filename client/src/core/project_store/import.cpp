@@ -8,11 +8,47 @@
 
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QRegularExpression>
 
 #include <algorithm>
 
 namespace pacsmith {
 using namespace project_store_internal;
+
+namespace {
+
+bool verifyExpectedSha256(const ImportOptions &options, const QString &actual,
+                          QString *error) {
+    const auto expected = options.expectedSha256.trimmed().toLower();
+    if (expected.isEmpty()) return true;
+    static const QRegularExpression sha256(QStringLiteral("^[0-9a-f]{64}$"));
+    if (!sha256.match(expected).hasMatch()) {
+        if (error != nullptr) {
+            *error = QStringLiteral(
+                "Expected SHA256 must contain 64 hexadecimal characters");
+        }
+        return false;
+    }
+    if (expected != actual.toLower()) {
+        if (error != nullptr) {
+            *error = QStringLiteral(
+                "Publisher SHA256 mismatch: expected %1, downloaded %2")
+                         .arg(expected, actual.toLower());
+        }
+        return false;
+    }
+    return true;
+}
+
+void applyVerifiedPublisherDigest(SourceAcquisition &acquisition,
+                                  const ImportOptions &options) {
+    const auto expected = options.expectedSha256.trimmed().toLower();
+    if (expected.isEmpty()) return;
+    acquisition.publisherDigest = expected;
+    acquisition.publisherVerified = true;
+}
+
+} // namespace
 
 std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path &debPath,
                                                     QString *error,
@@ -20,13 +56,25 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
                                                     const ImportOptions &options) const {
     if (progress) progress({ImportStage::ValidatingSource, 0});
     AnalysisError analysisError;
-    const auto analysis = DebAnalyzer{}.analyze(debPath, analysisError, progress);
+    auto analysis = DebAnalyzer{}.analyze(debPath, analysisError, progress);
     if (!analysis) {
         if (error != nullptr) *error = analysisError.message;
         return std::nullopt;
     }
+    if (!options.packageName.isEmpty()) {
+        analysis->metadata.package = options.packageName.trimmed();
+    }
+    if (!options.version.isEmpty()) analysis->metadata.version = options.version.trimmed();
+    if (!options.architecture.isEmpty()) {
+        analysis->metadata.architecture = options.architecture.trimmed();
+    }
+    if (!options.description.isEmpty()) {
+        analysis->metadata.description = options.description.trimmed();
+    }
     const auto sourceHash = sha256File(debPath, error);
-    if (sourceHash.isEmpty()) return std::nullopt;
+    if (sourceHash.isEmpty() || !verifyExpectedSha256(options, sourceHash, error)) {
+        return std::nullopt;
+    }
 
     if (progress) progress({ImportStage::PreparingProject, 0});
     const auto identity = requestedSourceIdentity(options, &analysis->metadata);
@@ -82,6 +130,7 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
     release.sourceType = SourcePackageType::Debian;
     release.installMapping = analysis->installMapping;
     release.acquisition = options.acquisition;
+    applyVerifiedPublisherDigest(release.acquisition, options);
     if (release.acquisition.canonicalIdentity.isEmpty()) {
         release.acquisition.kind = AcquisitionKind::LocalFile;
         release.acquisition.canonicalIdentity = sourceIdentity(analysis->metadata);
@@ -235,6 +284,7 @@ std::optional<ImportResult> ProjectStore::importSource(
         if (release != nullptr) {
             release->sourceType = SourcePackageType::Debian;
             release->acquisition = options.acquisition;
+            applyVerifiedPublisherDigest(release->acquisition, options);
             if (release->acquisition.canonicalIdentity.isEmpty()) {
                 release->acquisition.kind = AcquisitionKind::LocalFile;
                 release->acquisition.canonicalIdentity = sourceIdentity(release->debian);
@@ -273,8 +323,11 @@ std::optional<ImportResult> ProjectStore::importSource(
         return std::nullopt;
     }
     const auto sourceHash = sha256File(inputPath, error);
-    if (sourceHash.isEmpty()) return std::nullopt;
+    if (sourceHash.isEmpty() || !verifyExpectedSha256(options, sourceHash, error)) {
+        return std::nullopt;
+    }
     auto acquisition = options.acquisition;
+    applyVerifiedPublisherDigest(acquisition, options);
     if (acquisition.canonicalIdentity.isEmpty()) {
         acquisition.kind = AcquisitionKind::LocalFile;
         acquisition.canonicalIdentity = QStringLiteral("%1:%2:%3")

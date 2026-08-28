@@ -26,6 +26,92 @@ void MainWindow::chooseImport() {
     if (!path.isEmpty()) importPackage(path);
 }
 
+void MainWindow::submitManualRelease() {
+    if (!project_ || importThread_ != nullptr || debDownloadService_->isRunning()) return;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Submit New Release"));
+    dialog.resize(680, dialog.sizeHint().height());
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *introduction = new QLabel(
+        QStringLiteral("Import a vendor artifact as a new release of <b>%1</b>. "
+                       "PacSmith will verify the optional publisher checksum, inspect the "
+                       "artifact, and carry forward the previous package configuration.")
+            .arg(project_->displayName.toHtmlEscaped()),
+        &dialog);
+    introduction->setWordWrap(true);
+    layout->addWidget(introduction);
+
+    auto *form = new QFormLayout;
+    auto *artifactRow = new QWidget(&dialog);
+    auto *artifactLayout = new QHBoxLayout(artifactRow);
+    artifactLayout->setContentsMargins(0, 0, 0, 0);
+    auto *artifactPath = new QLineEdit(artifactRow);
+    artifactPath->setPlaceholderText(QStringLiteral("Locally downloaded vendor artifact"));
+    auto *browse = new QPushButton(QStringLiteral("Browse…"), artifactRow);
+    artifactLayout->addWidget(artifactPath, 1);
+    artifactLayout->addWidget(browse);
+    auto *version = new QLineEdit(&dialog);
+    version->setPlaceholderText(
+        QStringLiteral("Optional when the artifact or filename contains the version"));
+    auto *expectedSha256 = new QLineEdit(&dialog);
+    expectedSha256->setPlaceholderText(
+        QStringLiteral("Optional 64-character checksum published by the vendor"));
+    form->addRow(QStringLiteral("Artifact"), artifactRow);
+    form->addRow(QStringLiteral("Vendor version"), version);
+    form->addRow(QStringLiteral("Publisher SHA256"), expectedSha256);
+    layout->addLayout(form);
+
+    auto *versionHelp = new QLabel(
+        QStringLiteral("Enter the vendor version when it cannot be inferred, such as an "
+                       "archive whose filename contains only a release codename."),
+        &dialog);
+    versionHelp->setWordWrap(true);
+    layout->addWidget(versionHelp);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok,
+                                         &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Import && Inspect"));
+    layout->addWidget(buttons);
+
+    connect(browse, &QPushButton::clicked, &dialog, [this, artifactPath] {
+        const auto path = QFileDialog::getOpenFileName(
+            this, QStringLiteral("Select Vendor Artifact"), {},
+            QStringLiteral(
+                "PacSmith package sources (*.deb *.rpm *.AppImage *.appimage *.pkg.tar.zst "
+                "*.pkg.tar.xz *.pkg.tar.gz *.tar *.tar.gz *.tgz *.tar.xz *.tar.zst "
+                "*.tar.bz2 *.tbz2 *.tar.lz4 *.zip *.7z);;All files (*)"));
+        if (!path.isEmpty()) artifactPath->setText(path);
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog,
+            [&dialog, artifactPath, expectedSha256] {
+        const QFileInfo artifact(artifactPath->text().trimmed());
+        if (!artifact.isAbsolute() || !artifact.isFile()) {
+            QMessageBox::warning(&dialog, QStringLiteral("Artifact required"),
+                                 QStringLiteral("Select a local vendor artifact file."));
+            return;
+        }
+        const auto checksum = expectedSha256->text().trimmed();
+        static const QRegularExpression sha256(QStringLiteral("^[0-9A-Fa-f]{64}$"));
+        if (!checksum.isEmpty() && !sha256.match(checksum).hasMatch()) {
+            QMessageBox::warning(
+                &dialog, QStringLiteral("Invalid SHA256"),
+                QStringLiteral("The publisher SHA256 must contain exactly 64 hexadecimal characters."));
+            return;
+        }
+        dialog.accept();
+    });
+    if (dialog.exec() != QDialog::Accepted || !project_) return;
+
+    pendingImportOptions_ = {};
+    pendingImportOptions_.existingProjectId = project_->id;
+    pendingImportOptions_.version = version->text().trimmed();
+    pendingImportOptions_.expectedSha256 = expectedSha256->text().trimmed().toLower();
+    pendingImportOptions_.acquisition.kind = AcquisitionKind::LocalFile;
+    pendingImportOptions_.acquisition.canonicalIdentity = project_->sourceIdentity;
+    importPackage(artifactPath->text().trimmed());
+}
+
 void MainWindow::importGitHubUrl() {
     QInputDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("New Project from GitHub"));
@@ -400,6 +486,7 @@ void MainWindow::importPackage(const QString &path) {
                                     pendingImportOptions_);
     importThread_ = thread;
     updateDeleteButton();
+    updateDashboardActions();
     worker->moveToThread(thread);
     connect(thread, &QThread::started, worker, &ImportWorker::run);
     connect(worker, &ImportWorker::progressChanged, this, [this](const QString &description) {
@@ -414,6 +501,8 @@ void MainWindow::importPackage(const QString &path) {
             [this](const QString &projectId, const QString &releaseId, const QString &error) {
         const auto preparationProjectId = preparingProjectId_;
         const bool preparedUpdate = !preparingReleaseId_.isEmpty();
+        const bool submittedManualRelease =
+            !pendingImportOptions_.existingProjectId.isEmpty();
         const auto preparationSourceReleaseId = preparationSourceReleaseId_;
         const bool automaticPreparationBuild = automaticPreparationBuild_;
         if (!pendingDownloadedImport_.isEmpty()) {
@@ -435,6 +524,7 @@ void MainWindow::importPackage(const QString &path) {
         }
         resetPreparationState();
         refreshProjectList(projectId, [this, projectId, releaseId, preparedUpdate,
+                                       submittedManualRelease,
                                        preparationSourceReleaseId,
                                        automaticPreparationBuild](const bool succeeded) {
             if (!succeeded || !project_ || project_->id != projectId ||
@@ -509,7 +599,7 @@ void MainWindow::importPackage(const QString &path) {
                 automaticBuildPauseMessage = QStringLiteral(
                     "Update prepared but needs attention: %1").arg(blockers.constFirst());
             }
-            if (preparedUpdate) applyRetentionCleanup();
+            if (preparedUpdate || submittedManualRelease) applyRetentionCleanup();
             if (automaticBuildPauseMessage.isEmpty()) {
                 statusBar()->showMessage(
                     QStringLiteral("Imported to %1").arg(projectDirectory(library_, *project_)), 10000);
@@ -559,6 +649,7 @@ void MainWindow::importPackage(const QString &path) {
         }
         if (importThread_ == thread) importThread_ = nullptr;
         updateDeleteButton();
+        updateDashboardActions();
         thread->deleteLater();
     });
     thread->start();

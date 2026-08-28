@@ -41,6 +41,10 @@ QString activitySpinnerFrame(const int frame) {
 
 void MainWindow::updateDashboardActions() {
     const bool installed = project_ && !project_->installedVersion.isEmpty();
+    if (submitReleaseButton_ != nullptr) {
+        submitReleaseButton_->setEnabled(project_ && importThread_ == nullptr &&
+                                         !debDownloadService_->isRunning());
+    }
     if (projectBuildOutputButton_ != nullptr) projectBuildOutputButton_->setVisible(false);
     if (projectBuildCancelButton_ != nullptr) projectBuildCancelButton_->setVisible(false);
     if (uninstallButton_ != nullptr) {

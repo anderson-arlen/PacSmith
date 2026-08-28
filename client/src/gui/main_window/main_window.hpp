@@ -139,6 +139,7 @@ private:
     [[nodiscard]] bool isSectionActive(EditorSection section) const;
 
     void chooseImport();
+    void submitManualRelease();
     void importGitHubUrl();
     void importDirectUrl();
     void importAptRepository();
@@ -479,6 +480,7 @@ private:
     QPushButton *projectBuildOutputButton_{nullptr};
     QPushButton *projectBuildCancelButton_{nullptr};
     QPushButton *historyCheckUpdatesButton_{nullptr};
+    QPushButton *submitReleaseButton_{nullptr};
     QPushButton *editConfigurationButton_{nullptr};
     QPushButton *deleteReleaseButton_{nullptr};
     QPlainTextEdit *metadataView_{nullptr};

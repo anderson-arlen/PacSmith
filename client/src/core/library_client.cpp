@@ -270,6 +270,11 @@ std::optional<ImportResult> LibraryClient::importSource(const QString &sourcePat
     const auto artifact = QJsonDocument::fromJson(uploaded.body).object();
     QJsonObject body{{QStringLiteral("artifact_id"), artifact.value(QStringLiteral("id")).toString()},
                      {QStringLiteral("existing_project_id"), options.existingProjectId},
+                     {QStringLiteral("package_name"), options.packageName},
+                     {QStringLiteral("version"), options.version},
+                     {QStringLiteral("architecture"), options.architecture},
+                     {QStringLiteral("description"), options.description},
+                     {QStringLiteral("expected_sha256"), options.expectedSha256},
                      {QStringLiteral("acquisition_kind"), acquisitionKindName(options.acquisition.kind)},
                      {QStringLiteral("canonical_identity"), options.acquisition.canonicalIdentity},
                      {QStringLiteral("acquisition"), options.acquisition.toJson()},

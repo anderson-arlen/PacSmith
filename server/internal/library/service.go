@@ -484,6 +484,11 @@ func (s *Service) GetRelease(ctx context.Context, id string) (Release, error) {
 type ImportRequest struct {
 	ArtifactID               string          `json:"artifact_id"`
 	ExistingProjectID        string          `json:"existing_project_id"`
+	PackageName              string          `json:"package_name"`
+	Version                  string          `json:"version"`
+	Architecture             string          `json:"architecture"`
+	Description              string          `json:"description"`
+	ExpectedSHA256           string          `json:"expected_sha256"`
 	AcquisitionKind          string          `json:"acquisition_kind"`
 	CanonicalIdentity        string          `json:"canonical_identity"`
 	Acquisition              json.RawMessage `json:"acquisition"`
@@ -509,6 +514,17 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 		}
 		return ImportResult{}, err
 	}
+	expectedSHA256 := strings.ToLower(strings.TrimSpace(req.ExpectedSHA256))
+	if expectedSHA256 != "" {
+		decoded, decodeErr := hex.DecodeString(expectedSHA256)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return ImportResult{}, fmt.Errorf("%w: expected_sha256 must contain 64 hexadecimal characters", ErrInvalid)
+		}
+		if !strings.EqualFold(expectedSHA256, record.SHA256) {
+			return ImportResult{}, fmt.Errorf("%w: publisher SHA256 mismatch: expected %s, uploaded %s",
+				ErrInvalid, expectedSHA256, record.SHA256)
+		}
+	}
 	path, err := s.Artifacts.Store.Path(record.SHA256)
 	if err != nil {
 		return ImportResult{}, err
@@ -516,6 +532,18 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 	analysis, err := inspect.AnalyzeArtifact(path, record.OriginalFilename)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("%w: %s", ErrInvalid, err.Error())
+	}
+	if value := strings.TrimSpace(req.PackageName); value != "" {
+		analysis.Metadata.Package = value
+	}
+	if value := strings.TrimSpace(req.Version); value != "" {
+		analysis.Metadata.Version = value
+	}
+	if value := strings.TrimSpace(req.Architecture); value != "" {
+		analysis.Metadata.Architecture = value
+	}
+	if value := strings.TrimSpace(req.Description); value != "" {
+		analysis.Metadata.Description = value
 	}
 
 	identity := strings.TrimSpace(req.CanonicalIdentity)
@@ -606,6 +634,11 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 		req.CanonicalIdentity = identity
 	}
 	applyAcquisition(body, req)
+	if expectedSHA256 != "" {
+		acquisition, _ := mapValue(body, "acquisition")
+		acquisition["publisherDigest"] = expectedSHA256
+		acquisition["publisherVerified"] = true
+	}
 	if len(req.Update) > 0 && string(req.Update) != "null" {
 		mergeImportedUpdate(body, req.Update)
 	}

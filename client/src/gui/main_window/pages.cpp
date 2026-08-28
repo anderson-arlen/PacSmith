@@ -93,11 +93,15 @@ QWidget *MainWindow::createOverviewPage() {
     rollbackButton_ = new QPushButton(QStringLiteral("Roll Back to Release"), page);
     deleteReleaseButton_ = new QPushButton(QStringLiteral("Delete Release"), page);
     historyCheckUpdatesButton_ = new QPushButton(QStringLiteral("Check for Updates"), page);
+    submitReleaseButton_ = new QPushButton(QStringLiteral("Submit New Release…"), page);
+    submitReleaseButton_->setToolTip(
+        QStringLiteral("Import a locally downloaded vendor artifact as a new release of this project"));
     historyCheckUpdatesButton_->setToolTip(
         QStringLiteral("Check the current update source for a newer vendor release"));
     historyCheckUpdatesButton_->setEnabled(false);
     auto *buttons = new QHBoxLayout;
     buttons->addWidget(historyCheckUpdatesButton_);
+    buttons->addWidget(submitReleaseButton_);
     buttons->addWidget(editReleaseButton_);
     buttons->addWidget(prepareReleaseButton_);
     buttons->addWidget(installReleaseButton_);
@@ -111,6 +115,8 @@ QWidget *MainWindow::createOverviewPage() {
     historyList_->setMinimumHeight(120);
     layout->addWidget(historyList_, 1);
     connect(historyCheckUpdatesButton_, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
+    connect(submitReleaseButton_, &QPushButton::clicked, this,
+            &MainWindow::submitManualRelease);
     connect(editReleaseButton_, &QPushButton::clicked, this, &MainWindow::editSelectedRelease);
     connect(prepareReleaseButton_, &QPushButton::clicked, this, &MainWindow::prepareSelectedRelease);
     connect(installReleaseButton_, &QPushButton::clicked, this, &MainWindow::installSelectedRelease);

@@ -647,11 +647,20 @@ void CoreTests::writesPacsmithIdentityVariablesAcrossUpdates() {
     secondOptions.acquisition.originalUrl = QStringLiteral("https://example.invalid/v2");
     secondOptions.acquisition.githubReleaseId = 20;
     secondOptions.acquisition.githubAssetId = 21;
+    secondOptions.expectedSha256 = QString(64, QLatin1Char('0'));
+    auto rejected = store.importSource(
+        std::filesystem::path(secondPath.toUtf8().constData()), secondOptions, &error);
+    QVERIFY(!rejected.has_value());
+    QVERIFY(error.contains(QStringLiteral("Publisher SHA256 mismatch")));
+    secondOptions.expectedSha256 = pacsmith::sha256File(
+        std::filesystem::path(secondPath.toUtf8().constData()), &error);
     auto imported = store.importSource(
         std::filesystem::path(secondPath.toUtf8().constData()), secondOptions, &error);
     QVERIFY2(imported.has_value(), qPrintable(error));
     const auto *updated = imported->project.release(imported->releaseId);
     QVERIFY(updated != nullptr);
+    QVERIFY(updated->acquisition.publisherVerified);
+    QCOMPARE(updated->acquisition.publisherDigest, secondOptions.expectedSha256);
     QVERIFY(updated->pkgbuildManuallyModified);
     QCOMPARE(updated->customPkgbuild, custom);
     QCOMPARE(store.readPkgbuild(*updated, &error).value_or(QString{}), custom);
