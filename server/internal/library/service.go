@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
@@ -47,6 +48,58 @@ func (s *Service) ListProjects(ctx context.Context) ([]Project, error) {
 		out = append(out, project)
 	}
 	return out, nil
+}
+
+func (s *Service) ListProjectSummaries(ctx context.Context) ([]Project, error) {
+	rows, err := s.DB.Queries.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	iconRows, err := s.DB.Queries.ListReleaseIconArtifacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	iconArtifacts := make(map[string]string, len(iconRows))
+	for _, row := range iconRows {
+		iconArtifacts[row.ReleaseID] = row.ArtifactID
+	}
+	out := make([]Project, 0, len(rows))
+	for _, row := range rows {
+		project := projectFromRow(row)
+		releases, err := s.DB.Queries.ListReleasesForProject(ctx, row.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, release := range releases {
+			summary := releaseSummary(release)
+			attachReleaseIconSummary(&summary, release.BodyJson, iconArtifacts[release.ID])
+			project.Releases = append(project.Releases, summary)
+		}
+		out = append(out, project)
+	}
+	return out, nil
+}
+
+func attachReleaseIconSummary(release *Release, bodyJSON, artifactID string) {
+	if artifactID == "" {
+		return
+	}
+	var body struct {
+		InstallMapping struct {
+			Icon map[string]any `json:"icon"`
+		} `json:"installMapping"`
+	}
+	if json.Unmarshal([]byte(bodyJSON), &body) != nil || len(body.InstallMapping.Icon) == 0 {
+		return
+	}
+	document := map[string]any{
+		"installMapping": map[string]any{"icon": body.InstallMapping.Icon},
+	}
+	if !releaseIconConfigured(document) {
+		return
+	}
+	release.Document["installMapping"] = document["installMapping"]
+	release.Document["iconArtifactId"] = artifactID
 }
 
 func (s *Service) GetProject(ctx context.Context, id string) (Project, error) {
@@ -293,6 +346,7 @@ func (s *Service) Reanalyze(ctx context.Context, releaseID string) (ImportResult
 		return ImportResult{}, fmt.Errorf("%w: %s", ErrInvalid, err.Error())
 	}
 	previous := releaseDocument(row).Document
+	alignIntegrationIconName(&analysis, row.ArchPackageName)
 	recipeRel := recipeFromAnalysis(row.ProjectID, row.ID, source.OriginalFilename, source.SHA256, analysis)
 	recipeRel.ArchPackageName = row.ArchPackageName
 	recipeRel.DisplayName = firstNonEmpty(stringValue(previous, "displayName"), row.ArchPackageName)
@@ -511,6 +565,7 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 	if foundExisting {
 		releaseID = existing.ID
 	}
+	alignIntegrationIconName(&analysis, project.ArchPackageName)
 	recipeRel := recipeFromAnalysis(project.ID, releaseID, record.OriginalFilename, record.SHA256, analysis)
 	recipeRel.ArchPackageName = project.ArchPackageName
 	recipeRel.DisplayName = project.DisplayName
@@ -817,11 +872,12 @@ func validateCustomFileName(name string) error {
 
 type BuildResult struct {
 	Status    string   `json:"status"`
-	Log       string   `json:"log"`
+	Log       string   `json:"-"`
 	Artifacts []string `json:"artifact_ids"`
 }
 
-func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResult, error) {
+func (s *Service) BuildRelease(ctx context.Context, releaseID string,
+	logOutput func(string), automatic bool) (BuildResult, error) {
 	if os.Geteuid() == 0 {
 		return BuildResult{}, fmt.Errorf("%w: refusing to run makepkg as root", ErrInvalid)
 	}
@@ -907,11 +963,37 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 		return BuildResult{}, err
 	}
 
-	cmd := exec.CommandContext(ctx, "/usr/bin/makepkg", "--force", "--nodeps")
+	settings, err := s.DB.Queries.GetLibrarySettings(ctx)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	arguments := []string{"--force", "--nodeps"}
+	arguments = append(arguments, buildParallelismArguments(int(settings.BuildParallelism))...)
+	cmd := exec.CommandContext(ctx, "/usr/bin/makepkg", arguments...)
 	cmd.Dir = work
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	output, err := cmd.CombinedOutput()
-	logText := string(output)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = 5 * time.Second
+	var output bytes.Buffer
+	stream := io.Writer(&output)
+	if logOutput != nil {
+		stream = io.MultiWriter(&output, buildLogWriter(logOutput))
+	}
+	cmd.Stdout = stream
+	cmd.Stderr = stream
+	err = cmd.Run()
+	logText := output.String()
 	status := "succeeded"
 	if err != nil {
 		status = "failed"
@@ -931,7 +1013,7 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 	}
 	result := BuildResult{Status: status, Log: logText}
 	if status != "succeeded" {
-		if summaryErr := s.recordBuildSummary(ctx, releaseID, status, logText, nil); summaryErr != nil {
+		if summaryErr := s.recordBuildSummary(ctx, releaseID, status, logText, nil, automatic); summaryErr != nil {
 			return result, fmt.Errorf("makepkg failed; record build summary: %w", summaryErr)
 		}
 		return result, fmt.Errorf("makepkg failed")
@@ -971,7 +1053,7 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 			producedPackages = append(producedPackages, record.OriginalFilename)
 		}
 	}
-	if err := s.recordBuildSummary(ctx, releaseID, status, logText, producedPackages); err != nil {
+	if err := s.recordBuildSummary(ctx, releaseID, status, logText, producedPackages, automatic); err != nil {
 		return result, err
 	}
 	if s.Repo != nil && len(result.Artifacts) > 0 {
@@ -981,6 +1063,23 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string) (BuildResu
 		}
 	}
 	return result, nil
+}
+
+type buildLogWriter func(string)
+
+func (writer buildLogWriter) Write(data []byte) (int, error) {
+	writer(string(data))
+	return len(data), nil
+}
+
+func buildParallelismArguments(parallelism int) []string {
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	return []string{
+		fmt.Sprintf("MAKEFLAGS=-j%d", parallelism),
+		fmt.Sprintf("CMAKE_BUILD_PARALLEL_LEVEL=%d", parallelism),
+	}
 }
 
 func (s *Service) SetReleaseIcon(ctx context.Context, releaseID, artifactID string) (Release, error) {
@@ -1200,8 +1299,8 @@ func (s *Service) cleanupWith(ctx context.Context, protected map[string]struct{}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err == nil && settings.RetainedPackageVersions >= 0 {
-		if err := s.pruneReleases(ctx, int(settings.RetainedPackageVersions), protected); err != nil {
+	if err == nil && settings.RetentionVersions >= 0 {
+		if err := s.pruneCompletedReleases(ctx, int(settings.RetentionVersions), protected); err != nil {
 			return err
 		}
 	}
@@ -1248,8 +1347,17 @@ func (s *Service) cleanupWith(ctx context.Context, protected map[string]struct{}
 	return nil
 }
 
-func (s *Service) pruneReleases(ctx context.Context, keep int, protected map[string]struct{}) error {
+func (s *Service) pruneCompletedReleases(ctx context.Context, keepOutdated int,
+	protected map[string]struct{}) error {
 	projects, err := s.DB.Queries.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	channelEntries, err := s.DB.Queries.ListChannelEntries(ctx)
+	if err != nil {
+		return err
+	}
+	repoSettings, err := s.DB.Queries.GetRepoSettings(ctx)
 	if err != nil {
 		return err
 	}
@@ -1258,8 +1366,23 @@ func (s *Service) pruneReleases(ctx context.Context, keep int, protected map[str
 		if err != nil {
 			return err
 		}
-		var built []sqlcdb.Release
-		for _, rel := range releases {
+		boundary := len(releases) - 1
+		releaseIndexes := make(map[string]int, len(releases))
+		for index, rel := range releases {
+			releaseIndexes[rel.ID] = index
+		}
+		for _, entry := range channelEntries {
+			if !entry.ProjectID.Valid || entry.ProjectID.String != project.ID ||
+				!entry.ReleaseID.Valid || (entry.Channel == repo.ChannelStable && repoSettings.StableEnabled == 0) {
+				continue
+			}
+			if index, ok := releaseIndexes[entry.ReleaseID.String]; ok && index < boundary {
+				boundary = index
+			}
+		}
+		completedSeen := 0
+		for index := boundary - 1; index >= 0; index-- {
+			rel := releases[index]
 			arts, err := s.DB.Queries.ListReleaseArtifacts(ctx, rel.ID)
 			if err != nil {
 				return err
@@ -1271,19 +1394,12 @@ func (s *Service) pruneReleases(ctx context.Context, keep int, protected map[str
 					break
 				}
 			}
-			if hasBuilt {
-				built = append(built, rel)
+			if !hasBuilt {
+				continue
 			}
-		}
-		if keep < 0 || len(built) <= keep {
-			continue
-		}
-		// Keep the newest keep releases (created_at order is oldest-first).
-		drop := built[:len(built)-keep]
-		for _, rel := range drop {
-			arts, err := s.DB.Queries.ListReleaseArtifacts(ctx, rel.ID)
-			if err != nil {
-				return err
+			completedSeen++
+			if completedSeen <= keepOutdated {
+				continue
 			}
 			blocked := false
 			for _, art := range arts {
@@ -1315,16 +1431,19 @@ func sha256Hex(data []byte) string {
 
 func projectFromRow(row sqlcdb.Project) Project {
 	return Project{
-		ID:              row.ID,
-		Revision:        row.Revision,
-		DisplayName:     row.DisplayName,
-		ArchPackageName: row.ArchPackageName,
-		VendorName:      row.VendorName,
-		SourceIdentity:  row.SourceIdentity,
-		IconSha256:      row.IconSha256,
-		History:         decodeHistory(row.HistoryJson),
-		CreatedAt:       row.CreatedAt,
-		ModifiedAt:      row.ModifiedAt,
+		ID:                   row.ID,
+		Revision:             row.Revision,
+		DisplayName:          row.DisplayName,
+		ArchPackageName:      row.ArchPackageName,
+		VendorName:           row.VendorName,
+		SourceIdentity:       row.SourceIdentity,
+		IconSha256:           row.IconSha256,
+		History:              decodeHistory(row.HistoryJson),
+		CreatedAt:            row.CreatedAt,
+		ModifiedAt:           row.ModifiedAt,
+		RepoPublish:          row.RepoPublish != 0,
+		RepoPkgnameOverride:  row.RepoPkgnameOverride,
+		RepoPublishedPkgname: row.RepoPublishedPkgname,
 	}
 }
 
@@ -1343,6 +1462,10 @@ func releaseSummary(row sqlcdb.Release) Release {
 		Document: map[string]any{
 			"originalSourceFilename": row.OriginalFilename,
 			"state":                  row.State,
+			"archPkgrel":             row.ArchPkgrel,
+			"debian": map[string]any{
+				"version": row.VendorVersion,
+			},
 		},
 	}
 }

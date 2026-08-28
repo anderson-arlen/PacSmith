@@ -48,6 +48,11 @@ AppSettings AppSettingsStore::load(QString *error) const {
     for (auto iterator = credentials.constBegin(); iterator != credentials.constEnd(); ++iterator) {
         result.credentialSources.insert(iterator.key(), credentialSourceFromName(iterator.value().toString()));
     }
+    const auto appearance = object.value(QStringLiteral("appearance")).toObject();
+    result.appearance.interfaceTheme =
+        appearanceModeFromName(appearance.value(QStringLiteral("interfaceTheme")).toString());
+    result.appearance.trayTheme =
+        appearanceModeFromName(appearance.value(QStringLiteral("trayTheme")).toString());
     const auto updates = object.value(QStringLiteral("updates")).toObject();
     result.updates.enabled = updates.value(QStringLiteral("enabled")).toBool(false);
     result.updates.startAtLogin = updates.value(QStringLiteral("startAtLogin")).toBool(false);
@@ -58,8 +63,8 @@ AppSettings AppSettingsStore::load(QString *error) const {
     const auto time = QTime::fromString(updates.value(QStringLiteral("localTime")).toString(), QStringLiteral("HH:mm"));
     if (time.isValid()) result.updates.localTime = time;
     result.updates.automaticallyPrepare = updates.value(QStringLiteral("automaticallyPrepare")).toBool(false);
-    result.updates.retainedPackageVersions = std::max(-1, updates.value(QStringLiteral("retainedPackageVersions")).toInt(2));
-    result.updates.retainedCompleteReleases = std::max(-1, updates.value(QStringLiteral("retainedCompleteReleases")).toInt(3));
+    result.updates.retentionVersions =
+        std::max(-1, updates.value(QStringLiteral("retentionVersions")).toInt(2));
     result.githubTokenConfigured = object.value(QStringLiteral("githubTokenConfigured")).toBool(false) ||
                                    (!object.contains(QStringLiteral("githubTokenConfigured")) &&
                                     result.credentialSources.contains(QStringLiteral("github")));
@@ -89,10 +94,9 @@ bool AppSettingsStore::save(const AppSettings &settings, QString *error) const {
     for (auto iterator = settings.credentialSources.cbegin(); iterator != settings.credentialSources.cend(); ++iterator) {
         credentials.insert(iterator.key(), credentialSourceName(iterator.value()));
     }
-    const auto completeRetention = settings.updates.retainedPackageVersions < 0 ||
-                                   settings.updates.retainedCompleteReleases < 0
-        ? -1
-        : std::max(settings.updates.retainedCompleteReleases, settings.updates.retainedPackageVersions);
+    const QJsonObject appearance{
+        {QStringLiteral("interfaceTheme"), appearanceModeName(settings.appearance.interfaceTheme)},
+        {QStringLiteral("trayTheme"), appearanceModeName(settings.appearance.trayTheme)}};
     const QJsonObject updates{{QStringLiteral("enabled"), settings.updates.enabled},
                               {QStringLiteral("startAtLogin"), settings.updates.startAtLogin},
                               {QStringLiteral("startMinimized"), settings.updates.startMinimized},
@@ -101,8 +105,7 @@ bool AppSettingsStore::save(const AppSettings &settings, QString *error) const {
                               {QStringLiteral("weekDay"), settings.updates.weekDay},
                               {QStringLiteral("localTime"), settings.updates.localTime.toString(QStringLiteral("HH:mm"))},
                               {QStringLiteral("automaticallyPrepare"), settings.updates.automaticallyPrepare},
-                              {QStringLiteral("retainedPackageVersions"), settings.updates.retainedPackageVersions},
-                              {QStringLiteral("retainedCompleteReleases"), completeRetention}};
+                              {QStringLiteral("retentionVersions"), settings.updates.retentionVersions}};
     QJsonArray profiles;
     for (const auto &profile : settings.harnessProfiles) {
         QJsonArray arguments;
@@ -114,9 +117,10 @@ bool AppSettingsStore::save(const AppSettings &settings, QString *error) const {
     }
     const QJsonObject onboarding{{QStringLiteral("debAssociationPrompted"), settings.debAssociationPrompted},
                                  {QStringLiteral("selfTrackingPrompted"), settings.selfTrackingPrompted}};
-    const QJsonObject object{{QStringLiteral("formatVersion"), 5},
+    const QJsonObject object{{QStringLiteral("formatVersion"), 6},
                              {QStringLiteral("credentialSources"), credentials},
                              {QStringLiteral("githubTokenConfigured"), settings.githubTokenConfigured},
+                             {QStringLiteral("appearance"), appearance},
                              {QStringLiteral("updates"), updates},
                              {QStringLiteral("harnessProfiles"), profiles},
                              {QStringLiteral("onboarding"), onboarding}};
@@ -228,6 +232,21 @@ CredentialSource credentialSourceFromName(const QString &name) {
     if (name == QStringLiteral("keyring")) return CredentialSource::Keyring;
     if (name == QStringLiteral("age")) return CredentialSource::Age;
     return CredentialSource::Environment;
+}
+
+QString appearanceModeName(const AppearanceMode mode) {
+    switch (mode) {
+    case AppearanceMode::Light: return QStringLiteral("light");
+    case AppearanceMode::Dark: return QStringLiteral("dark");
+    case AppearanceMode::Auto: return QStringLiteral("auto");
+    }
+    return QStringLiteral("auto");
+}
+
+AppearanceMode appearanceModeFromName(const QString &name) {
+    if (name == QStringLiteral("light")) return AppearanceMode::Light;
+    if (name == QStringLiteral("dark")) return AppearanceMode::Dark;
+    return AppearanceMode::Auto;
 }
 
 bool githubTokenUsesAge(const AppSettings &settings) {

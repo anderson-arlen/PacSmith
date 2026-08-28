@@ -9,6 +9,7 @@ PermissionLevel PermissionPolicy::level(const QString &toolName) {
         QStringLiteral("delete_project"),
         QStringLiteral("delete_release"),
         QStringLiteral("reanalyze_release"),
+        QStringLiteral("write_pkgbuild"),
         QStringLiteral("configure_project_repository"),
         QStringLiteral("promote_repository_package"),
         QStringLiteral("set_library_settings"),
@@ -23,6 +24,7 @@ PermissionLevel PermissionPolicy::level(const QString &toolName) {
         QStringLiteral("revoke_remote_client"),
         QStringLiteral("set_github_credential"),
         QStringLiteral("delete_github_credential"),
+        QStringLiteral("import_repository_signing_key"),
     };
     return mandatory.contains(toolName) ? PermissionLevel::MandatoryConfirmation
                                         : PermissionLevel::Routine;
@@ -37,6 +39,10 @@ QString PermissionPolicy::confirmationMessage(const QString &toolName, const QSt
     }
     if (toolName == QStringLiteral("reanalyze_release")) {
         return QStringLiteral("Reset the maintained setup for PacSmith release %1 and reanalyze its stored artifact?").arg(target);
+    }
+    if (toolName == QStringLiteral("write_pkgbuild")) {
+        return QStringLiteral("Replace the Custom PKGBUILD for PacSmith release %1? A PKGBUILD is shell code that will execute during the package build.")
+            .arg(target);
     }
     if (toolName == QStringLiteral("configure_project_repository")) {
         return QStringLiteral("Change published repository state for PacSmith project %1?").arg(target);
@@ -77,6 +83,10 @@ QString PermissionPolicy::confirmationMessage(const QString &toolName, const QSt
     }
     if (toolName == QStringLiteral("delete_github_credential")) {
         return QStringLiteral("Delete pacsmithd's stored GitHub credential?");
+    }
+    if (toolName == QStringLiteral("import_repository_signing_key")) {
+        return QStringLiteral("Trust and pin a downloaded repository signing key for PacSmith release %1?")
+            .arg(target);
     }
     return QStringLiteral("Approve sensitive PacSmith operation %1 on %2?").arg(toolName, target);
 }

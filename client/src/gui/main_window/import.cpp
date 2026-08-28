@@ -1,6 +1,16 @@
 #include "gui/main_window/common.hpp"
 
+#include "core/release_review.hpp"
+
 namespace pacsmith::gui {
+namespace {
+
+struct AutomaticBuildRepositoryReadiness {
+    bool ready{false};
+    QString message;
+};
+
+} // namespace
 
 void MainWindow::chooseImport() {
     const auto path = QFileDialog::getOpenFileName(
@@ -20,7 +30,7 @@ void MainWindow::importGitHubUrl() {
     QInputDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("New Project from GitHub"));
     dialog.setLabelText(QStringLiteral(
-        "Enter a GitHub repository, release, or release-asset link. PacSmith will load the release assets and let you choose the package pattern.\n\n"
+        "Enter a GitHub repository, release, or release-asset link. PacSmith will load uploaded assets and generated source archives, then let you choose the artifact pattern.\n\n"
         "Examples:\n"
         "https://github.com/segmentio/chamber\n"
         "https://github.com/owner/project/releases/tag/v1.2.3"));
@@ -404,6 +414,8 @@ void MainWindow::importPackage(const QString &path) {
             [this](const QString &projectId, const QString &releaseId, const QString &error) {
         const auto preparationProjectId = preparingProjectId_;
         const bool preparedUpdate = !preparingReleaseId_.isEmpty();
+        const auto preparationSourceReleaseId = preparationSourceReleaseId_;
+        const bool automaticPreparationBuild = automaticPreparationBuild_;
         if (!pendingDownloadedImport_.isEmpty()) {
             static_cast<void>(QFile::remove(pendingDownloadedImport_));
             pendingDownloadedImport_.clear();
@@ -422,7 +434,9 @@ void MainWindow::importPackage(const QString &path) {
             return;
         }
         resetPreparationState();
-        refreshProjectList(projectId, [this, projectId, releaseId, preparedUpdate](const bool succeeded) {
+        refreshProjectList(projectId, [this, projectId, releaseId, preparedUpdate,
+                                       preparationSourceReleaseId,
+                                       automaticPreparationBuild](const bool succeeded) {
             if (!succeeded || !project_ || project_->id != projectId ||
                 project_->release(releaseId) == nullptr) {
                 statusBar()->showMessage(
@@ -431,14 +445,86 @@ void MainWindow::importPackage(const QString &path) {
             }
             currentReleaseId_ = releaseId;
             refreshCurrentProject();
+            QString automaticBuildPauseMessage;
+            if (preparedUpdate && automaticPreparationBuild) {
+                const auto *previous = project_->release(preparationSourceReleaseId);
+                const auto *prepared = project_->release(releaseId);
+                QStringList blockers;
+                if (previous == nullptr || prepared == nullptr) {
+                    blockers.append(QStringLiteral(
+                        "PacSmith could not identify the previous package configuration."));
+                } else {
+                    blockers = automaticUpdateBuildBlockers(*previous, *prepared);
+                }
+                if (!project_->repository.publish) {
+                    blockers.append(QStringLiteral(
+                        "Repository publishing is not enabled for this project."));
+                }
+                if (blockers.isEmpty()) {
+                    statusBar()->showMessage(QStringLiteral(
+                        "Update prepared with no review changes; checking repository readiness…"));
+                    const auto config = library_.config();
+                    auto *watcher = new QFutureWatcher<AutomaticBuildRepositoryReadiness>(this);
+                    connect(watcher, &QFutureWatcher<AutomaticBuildRepositoryReadiness>::finished,
+                            this, [this, watcher, projectId, releaseId] {
+                        const auto readiness = watcher->result();
+                        watcher->deleteLater();
+                        if (!project_ || project_->id != projectId ||
+                            project_->release(releaseId) == nullptr) return;
+                        currentReleaseId_ = releaseId;
+                        if (!readiness.ready) {
+                            showReleaseWorkbenchAtFirstAttention(releaseId);
+                            statusBar()->showMessage(
+                                QStringLiteral("Update prepared but automatic build paused: %1")
+                                    .arg(readiness.message),
+                                12000);
+                            return;
+                        }
+                        statusBar()->showMessage(
+                            QStringLiteral("Building package %1…").arg(project_->displayName));
+                        startBuild(false, true);
+                    });
+                    watcher->setFuture(QtConcurrent::run([config] {
+                        LibraryClient client(config);
+                        QString repoError;
+                        const auto repo = client.repoSettings(&repoError);
+                        if (!repo) {
+                            return AutomaticBuildRepositoryReadiness{
+                                false, repoError.isEmpty()
+                                           ? QStringLiteral("repository settings are unavailable")
+                                           : repoError};
+                        }
+                        if (!repo->enabled) {
+                            return AutomaticBuildRepositoryReadiness{
+                                false, QStringLiteral("the PacSmith package repository is not enabled")};
+                        }
+                        if (!repo->signingInitialized) {
+                            return AutomaticBuildRepositoryReadiness{
+                                false, QStringLiteral("repository signing is not initialized")};
+                        }
+                        return AutomaticBuildRepositoryReadiness{true, {}};
+                    }));
+                    return;
+                }
+                automaticBuildPauseMessage = QStringLiteral(
+                    "Update prepared but needs attention: %1").arg(blockers.constFirst());
+            }
             if (preparedUpdate) applyRetentionCleanup();
-            statusBar()->showMessage(
-                QStringLiteral("Imported to %1").arg(projectDirectory(library_, *project_)), 10000);
+            if (automaticBuildPauseMessage.isEmpty()) {
+                statusBar()->showMessage(
+                    QStringLiteral("Imported to %1").arg(projectDirectory(library_, *project_)), 10000);
+            }
             if (preparedUpdate) showReleaseWorkbenchAtFirstAttention(releaseId);
-            QTimer::singleShot(0, this, [this, projectId, releaseId] {
+            QTimer::singleShot(0, this, [this, projectId, releaseId,
+                                         automaticBuildPauseMessage] {
                 if (!project_ || project_->id != projectId ||
                     project_->release(releaseId) == nullptr) return;
                 currentReleaseId_ = releaseId;
+                if (!automaticBuildPauseMessage.isEmpty()) {
+                    showReleaseWorkbenchAtFirstAttention(releaseId);
+                    statusBar()->showMessage(automaticBuildPauseMessage, 12000);
+                    return;
+                }
                 const bool needsReview = pendingScriptFindings(*currentRelease()) > 0 ||
                                          pendingPayloadReviews(*currentRelease()) > 0 ||
                                          currentRelease()->installMapping.appRun.requiresReview() ||
@@ -511,7 +597,7 @@ void MainWindow::beginGitHubImport(const QUrl &url) {
     probe.update.githubAssetRegex = initialRegex;
     probe.update.githubIncludePrereleases = false;
     auto *service = networkServiceOnThread<GitHubUpdateService>(networkIoThread_);
-    auto *progress = new QProgressDialog(QStringLiteral("Loading GitHub release assets…"),
+    auto *progress = new QProgressDialog(QStringLiteral("Loading GitHub release artifacts…"),
                                          QStringLiteral("Cancel"), 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Import from GitHub"));
     progress->setWindowModality(Qt::WindowModal);

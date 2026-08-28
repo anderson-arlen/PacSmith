@@ -2,14 +2,25 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <QString>
 #include <QUrl>
+
+#include <optional>
 
 class QNetworkAccessManager;
 class QNetworkReply;
 
 namespace pacsmith {
 
+struct RepositoryKeyDownload {
+    QByteArray contents;
+    QUrl requestedUrl;
+    QUrl resolvedUrl;
+};
+
 [[nodiscard]] bool isAcceptableRepositoryKeyUrl(const QUrl &url);
+[[nodiscard]] std::optional<RepositoryKeyDownload> downloadRepositorySigningKey(const QUrl &url,
+                                                                               QString *error = nullptr);
 
 class RepositoryKeyDownloadService final : public QObject {
     Q_OBJECT

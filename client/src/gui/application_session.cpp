@@ -4,6 +4,8 @@
 #include "core/background_updates.hpp"
 #include "core/credential_store.hpp"
 #include "core/library_client.hpp"
+#include "core/library_events.hpp"
+#include "gui/appearance.hpp"
 #include "gui/main_window/main_window.hpp"
 
 #include <QAction>
@@ -13,14 +15,14 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QIcon>
 #include <QMessageBox>
-#include <QPainter>
-#include <QPalette>
 #include <QPixmap>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QStyle>
+#include <QtConcurrent>
 
 #include <algorithm>
 
@@ -31,37 +33,15 @@ QIcon applicationIcon() {
     return QIcon(QStringLiteral(":/pacsmith/icons/pacsmith.png"));
 }
 
-QIcon trayStatusIcon(const int availableUpdates) {
+QIcon trayStatusIcon(const int availableUpdates, const QColor &foreground,
+                     const int activityFrame = -1) {
     auto *application = qobject_cast<QApplication *>(QCoreApplication::instance());
     QIcon source(QStringLiteral(":/pacsmith/icons/pacsmith-tray.png"));
     QPixmap mask = source.pixmap(QSize(32, 32));
     if (mask.isNull() && application != nullptr) {
         mask = application->style()->standardIcon(QStyle::SP_ComputerIcon).pixmap(32, 32);
     }
-    QPixmap pixmap(mask.size());
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.drawPixmap(0, 0, mask);
-    if (application != nullptr) {
-        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        painter.fillRect(pixmap.rect(), application->palette().color(QPalette::WindowText));
-    }
-    if (availableUpdates > 0) {
-        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        painter.setBrush(QColor(210, 50, 50));
-        painter.setPen(Qt::white);
-        painter.drawEllipse(QRect(17, 0, 15, 15));
-        auto font = painter.font();
-        font.setBold(true);
-        font.setPixelSize(10);
-        painter.setFont(font);
-        painter.drawText(QRect(17, 0, 15, 15), Qt::AlignCenter,
-                         availableUpdates > 9 ? QStringLiteral("9+")
-                                              : QString::number(availableUpdates));
-    }
-    return QIcon(pixmap);
+    return renderTrayStatusIcon(mask, availableUpdates, foreground, activityFrame);
 }
 
 QString pacsmithCliPath() {
@@ -86,6 +66,11 @@ ApplicationSession::ApplicationSession(AppSettingsStore &settingsStore, Credenti
     });
     trayRefresh_.setInterval(5000);
     connect(&trayRefresh_, &QTimer::timeout, this, &ApplicationSession::refreshTray);
+    trayAnimation_.setInterval(160);
+    connect(&trayAnimation_, &QTimer::timeout, this, [this] {
+        trayActivityFrame_ = (trayActivityFrame_ + 1) % 8;
+        refreshTray();
+    });
     checkTimer_.setSingleShot(true);
     connect(&checkTimer_, &QTimer::timeout, this, [this] { runBackgroundCheck(CheckKind::Scheduled); });
 }
@@ -103,11 +88,53 @@ void ApplicationSession::start(const bool startHidden, const QString &importPath
     startHidden_ = startHidden;
     trayRefresh_.start();
     if (trayWanted()) ensureTray();
+    libraryEventStream_ = new LibraryEventStream(ConnectionConfig::load(), this);
+    connect(libraryEventStream_, &LibraryEventStream::eventReceived,
+            this, &ApplicationSession::handleServerEvent);
+    libraryEventStream_->start();
+    auto *activeJobs = new QFutureWatcher<QList<JobStatus>>(this);
+    connect(activeJobs, &QFutureWatcher<QList<JobStatus>>::finished, this, [this, activeJobs] {
+        const auto jobs = activeJobs->result();
+        activeJobs->deleteLater();
+        for (const auto &job : jobs) {
+            ServerEvent event;
+            event.jobId = job.id;
+            event.jobKind = job.kind;
+            event.jobStatus = job.status;
+            event.projectId = job.projectId;
+            event.projectName = job.projectName;
+            event.packageName = job.packageName;
+            event.releaseId = job.releaseId;
+            handleServerEvent(event);
+        }
+    });
+    const auto connection = ConnectionConfig::load();
+    activeJobs->setFuture(QtConcurrent::run([connection] {
+        return LibraryClient(connection).activeJobs(QStringLiteral("build"));
+    }));
     if (!startHidden || !importPath.isEmpty()) showWorkbench(importPath);
     QTimer::singleShot(0, this, [this] {
         runBackgroundCheck(CheckKind::IfOverdue);
         scheduleNextCheck();
     });
+}
+
+void ApplicationSession::handleServerEvent(const ServerEvent &event) {
+    if (event.jobKind != QStringLiteral("build") || event.jobId.isEmpty()) return;
+    const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
+                          event.jobStatus == QStringLiteral("failed") ||
+                          event.jobStatus == QStringLiteral("interrupted");
+    if (finished) {
+        activeBuildJobs_.remove(event.jobId);
+    } else if (event.jobStatus == QStringLiteral("queued") ||
+               event.jobStatus == QStringLiteral("running")) {
+        auto name = !event.projectName.isEmpty() ? event.projectName : event.packageName;
+        if (name.isEmpty()) name = QStringLiteral("package");
+        activeBuildJobs_.insert(event.jobId, name);
+    }
+    if (activeBuildJobs_.isEmpty()) trayAnimation_.stop();
+    else if (!trayAnimation_.isActive()) trayAnimation_.start();
+    refreshTray();
 }
 
 void ApplicationSession::showWorkbench(const QString &importPath) {
@@ -181,14 +208,24 @@ void ApplicationSession::refreshTray() {
     const auto availableUpdates = current.availableUpdates;
     const auto checking = current.checking;
     const auto preparing = !current.preparingProjectId.isEmpty();
+    const auto foreground = trayIconColor(settings.appearance.trayTheme);
+    const auto activityFrame = activeBuildJobs_.isEmpty() ? -1 : trayActivityFrame_;
     if (lastTrayBadge_ != availableUpdates || lastTrayChecking_ != checking ||
-        lastTrayPreparing_ != preparing) {
+        lastTrayPreparing_ != preparing || lastTrayColor_ != foreground.rgba() ||
+        lastTrayActivityFrame_ != activityFrame) {
         lastTrayBadge_ = availableUpdates;
         lastTrayChecking_ = checking;
         lastTrayPreparing_ = preparing;
-        tray_->setIcon(trayStatusIcon(availableUpdates));
+        lastTrayColor_ = foreground.rgba();
+        lastTrayActivityFrame_ = activityFrame;
+        tray_->setIcon(trayStatusIcon(availableUpdates, foreground, activityFrame));
     }
-    tray_->setToolTip(preparing
+    if (!activeBuildJobs_.isEmpty()) {
+        auto names = activeBuildJobs_.values();
+        names.removeDuplicates();
+        names.sort(Qt::CaseInsensitive);
+        tray_->setToolTip(QStringLiteral("PacSmith is building %1").arg(names.join(QStringLiteral(", "))));
+    } else tray_->setToolTip(preparing
         ? (current.preparingProjectName.isEmpty()
                ? QStringLiteral("PacSmith is downloading an update")
                : QStringLiteral("PacSmith is downloading an update for %1")
@@ -245,6 +282,7 @@ void ApplicationSession::runBackgroundCheck(const CheckKind kind) {
     checkProcess_->setProcessEnvironment(credentials_.environmentWithGithubToken(source));
     auto pendingState = BackgroundUpdateStateStore::load();
     pendingState.checking = true;
+    BackgroundUpdateStateStore::claimActivity(pendingState);
     pendingState.message = QStringLiteral("Checking for updates");
     static_cast<void>(BackgroundUpdateStateStore::save(pendingState));
     connect(checkProcess_, &QProcess::finished, this, [this] {
@@ -255,6 +293,7 @@ void ApplicationSession::runBackgroundCheck(const CheckKind kind) {
         auto finishedState = BackgroundUpdateStateStore::load();
         if (finishedState.checking || !finishedState.preparingProjectId.isEmpty()) {
             finishedState.checking = false;
+            BackgroundUpdateStateStore::clearActivityOwner(finishedState);
             finishedState.checkingProjectId.clear();
             finishedState.checkingProjectName.clear();
             finishedState.preparingProjectId.clear();
@@ -275,6 +314,7 @@ void ApplicationSession::runBackgroundCheck(const CheckKind kind) {
         checkProcess_ = nullptr;
         auto failedState = BackgroundUpdateStateStore::load();
         failedState.checking = false;
+        BackgroundUpdateStateStore::clearActivityOwner(failedState);
         failedState.checkingProjectId.clear();
         failedState.checkingProjectName.clear();
         static_cast<void>(BackgroundUpdateStateStore::save(failedState));

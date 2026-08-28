@@ -10,7 +10,7 @@ import (
 )
 
 const getLibrarySettings = `-- name: GetLibrarySettings :one
-SELECT id, revision, ai_provider, ai_model, ai_reasoning_effort, ai_execution_mode, ai_auto_resolve, updates_enabled, updates_daily, updates_weekday, updates_hour, updates_minute, updates_auto_prepare, retained_package_versions, retained_complete_releases FROM library_settings WHERE id = 1
+SELECT id, revision, ai_provider, ai_model, ai_reasoning_effort, ai_execution_mode, ai_auto_resolve, updates_enabled, updates_daily, updates_weekday, updates_hour, updates_minute, updates_auto_prepare, retained_package_versions, retained_complete_releases, retention_days, retention_versions, build_parallelism FROM library_settings WHERE id = 1
 `
 
 func (q *Queries) GetLibrarySettings(ctx context.Context) (LibrarySetting, error) {
@@ -32,6 +32,9 @@ func (q *Queries) GetLibrarySettings(ctx context.Context) (LibrarySetting, error
 		&i.UpdatesAutoPrepare,
 		&i.RetainedPackageVersions,
 		&i.RetainedCompleteReleases,
+		&i.RetentionDays,
+		&i.RetentionVersions,
+		&i.BuildParallelism,
 	)
 	return i, err
 }
@@ -50,27 +53,27 @@ SET revision = revision + 1,
     updates_hour = ?,
     updates_minute = ?,
     updates_auto_prepare = ?,
-    retained_package_versions = ?,
-    retained_complete_releases = ?
+    retention_versions = ?,
+    build_parallelism = ?
 WHERE id = 1 AND revision = ?
-RETURNING id, revision, ai_provider, ai_model, ai_reasoning_effort, ai_execution_mode, ai_auto_resolve, updates_enabled, updates_daily, updates_weekday, updates_hour, updates_minute, updates_auto_prepare, retained_package_versions, retained_complete_releases
+RETURNING id, revision, ai_provider, ai_model, ai_reasoning_effort, ai_execution_mode, ai_auto_resolve, updates_enabled, updates_daily, updates_weekday, updates_hour, updates_minute, updates_auto_prepare, retained_package_versions, retained_complete_releases, retention_days, retention_versions, build_parallelism
 `
 
 type UpdateLibrarySettingsParams struct {
-	AiProvider               string `json:"ai_provider"`
-	AiModel                  string `json:"ai_model"`
-	AiReasoningEffort        string `json:"ai_reasoning_effort"`
-	AiExecutionMode          string `json:"ai_execution_mode"`
-	AiAutoResolve            int64  `json:"ai_auto_resolve"`
-	UpdatesEnabled           int64  `json:"updates_enabled"`
-	UpdatesDaily             int64  `json:"updates_daily"`
-	UpdatesWeekday           int64  `json:"updates_weekday"`
-	UpdatesHour              int64  `json:"updates_hour"`
-	UpdatesMinute            int64  `json:"updates_minute"`
-	UpdatesAutoPrepare       int64  `json:"updates_auto_prepare"`
-	RetainedPackageVersions  int64  `json:"retained_package_versions"`
-	RetainedCompleteReleases int64  `json:"retained_complete_releases"`
-	Revision                 int64  `json:"revision"`
+	AiProvider         string `json:"ai_provider"`
+	AiModel            string `json:"ai_model"`
+	AiReasoningEffort  string `json:"ai_reasoning_effort"`
+	AiExecutionMode    string `json:"ai_execution_mode"`
+	AiAutoResolve      int64  `json:"ai_auto_resolve"`
+	UpdatesEnabled     int64  `json:"updates_enabled"`
+	UpdatesDaily       int64  `json:"updates_daily"`
+	UpdatesWeekday     int64  `json:"updates_weekday"`
+	UpdatesHour        int64  `json:"updates_hour"`
+	UpdatesMinute      int64  `json:"updates_minute"`
+	UpdatesAutoPrepare int64  `json:"updates_auto_prepare"`
+	RetentionVersions  int64  `json:"retention_versions"`
+	BuildParallelism   int64  `json:"build_parallelism"`
+	Revision           int64  `json:"revision"`
 }
 
 func (q *Queries) UpdateLibrarySettings(ctx context.Context, arg UpdateLibrarySettingsParams) (LibrarySetting, error) {
@@ -86,8 +89,8 @@ func (q *Queries) UpdateLibrarySettings(ctx context.Context, arg UpdateLibrarySe
 		arg.UpdatesHour,
 		arg.UpdatesMinute,
 		arg.UpdatesAutoPrepare,
-		arg.RetainedPackageVersions,
-		arg.RetainedCompleteReleases,
+		arg.RetentionVersions,
+		arg.BuildParallelism,
 		arg.Revision,
 	)
 	var i LibrarySetting
@@ -107,6 +110,9 @@ func (q *Queries) UpdateLibrarySettings(ctx context.Context, arg UpdateLibrarySe
 		&i.UpdatesAutoPrepare,
 		&i.RetainedPackageVersions,
 		&i.RetainedCompleteReleases,
+		&i.RetentionDays,
+		&i.RetentionVersions,
+		&i.BuildParallelism,
 	)
 	return i, err
 }

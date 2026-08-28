@@ -13,6 +13,8 @@
 #include <QTimeZone>
 
 #include <algorithm>
+#include <cerrno>
+#include <csignal>
 #include <unistd.h>
 
 namespace pacsmith {
@@ -44,7 +46,54 @@ bool runSystemctl(const QStringList &arguments, QString *error, QByteArray *stan
     return true;
 }
 
+quint64 processStartTicks(const qint64 processId) {
+    QFile file(QStringLiteral("/proc/%1/stat").arg(processId));
+    if (!file.open(QIODevice::ReadOnly)) return 0;
+    const auto stat = file.readAll();
+    const auto commandEnd = stat.lastIndexOf(") ");
+    if (commandEnd < 0) return 0;
+    const auto fields = stat.mid(commandEnd + 2).split(' ');
+    if (fields.size() <= 19) return 0;
+    bool ok = false;
+    const auto ticks = fields.at(19).toULongLong(&ok);
+    return ok ? ticks : 0;
+}
+
+bool processOwnsActivity(const BackgroundUpdateState &state) {
+    if (state.activityProcessId <= 0 || state.activityProcessStartTicks == 0) return false;
+    if (::kill(static_cast<pid_t>(state.activityProcessId), 0) != 0 && errno != EPERM) return false;
+    return processStartTicks(state.activityProcessId) == state.activityProcessStartTicks;
+}
+
+void discardOrphanedActivity(BackgroundUpdateState &state) {
+    const bool hasActivity = state.checking || !state.preparingProjectId.isEmpty();
+    if (!hasActivity || processOwnsActivity(state)) return;
+    state.checking = false;
+    BackgroundUpdateStateStore::clearActivityOwner(state);
+    state.checkingProjectId.clear();
+    state.checkingProjectName.clear();
+    state.preparingProjectId.clear();
+    state.preparingProjectName.clear();
+    state.preparationPhase.clear();
+    state.preparationBytesReceived = 0;
+    state.preparationBytesTotal = -1;
+    state.message = state.availableUpdates > 0
+        ? QStringLiteral("%1 update(s) available").arg(state.availableUpdates)
+        : state.failedChecks > 0 ? QStringLiteral("Update checks completed with failures")
+                                 : QStringLiteral("All eligible project trackers are current");
+}
+
 } // namespace
+
+void BackgroundUpdateStateStore::claimActivity(BackgroundUpdateState &state) {
+    state.activityProcessId = static_cast<qint64>(::getpid());
+    state.activityProcessStartTicks = processStartTicks(state.activityProcessId);
+}
+
+void BackgroundUpdateStateStore::clearActivityOwner(BackgroundUpdateState &state) {
+    state.activityProcessId = 0;
+    state.activityProcessStartTicks = 0;
+}
 
 void applyAvailableUpdateCensus(BackgroundUpdateState &state, const QList<Project> &projects) {
     state.projectsWithUpdates.clear();
@@ -97,6 +146,9 @@ BackgroundUpdateState BackgroundUpdateStateStore::load(QString *error) {
     }
     const auto object = document.object();
     result.checking = object.value(QStringLiteral("checking")).toBool();
+    result.activityProcessId = object.value(QStringLiteral("activityProcessId")).toInteger();
+    result.activityProcessStartTicks =
+        object.value(QStringLiteral("activityProcessStartTicks")).toVariant().toULongLong();
     result.checkingProjectId = object.value(QStringLiteral("checkingProjectId")).toString();
     result.checkingProjectName = object.value(QStringLiteral("checkingProjectName")).toString();
     result.preparingProjectId = object.value(QStringLiteral("preparingProjectId")).toString();
@@ -113,6 +165,7 @@ BackgroundUpdateState BackgroundUpdateStateStore::load(QString *error) {
         result.projectsWithUpdates.append(entry.toString());
     }
     result.message = object.value(QStringLiteral("message")).toString();
+    discardOrphanedActivity(result);
     return result;
 }
 
@@ -123,8 +176,11 @@ bool BackgroundUpdateStateStore::save(const BackgroundUpdateState &state, QStrin
     }
     QJsonArray projects;
     for (const auto &project : state.projectsWithUpdates) projects.append(project);
-    const QJsonObject object{{QStringLiteral("formatVersion"), 1},
+    const QJsonObject object{{QStringLiteral("formatVersion"), 2},
                              {QStringLiteral("checking"), state.checking},
+                             {QStringLiteral("activityProcessId"), state.activityProcessId},
+                             {QStringLiteral("activityProcessStartTicks"),
+                              QString::number(state.activityProcessStartTicks)},
                              {QStringLiteral("checkingProjectId"), state.checkingProjectId},
                              {QStringLiteral("checkingProjectName"), state.checkingProjectName},
                              {QStringLiteral("preparingProjectId"), state.preparingProjectId},

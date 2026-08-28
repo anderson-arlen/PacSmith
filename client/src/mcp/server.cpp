@@ -8,11 +8,15 @@
 #include "core/pkgbuild_generator.hpp"
 #include "core/release_review.hpp"
 #include "core/remote_import_service.hpp"
+#include "core/repository_key_download_service.hpp"
+#include "core/repository_trust.hpp"
 #include "core/update_check_runner.hpp"
 #include "mcp/permission_policy.hpp"
 
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
+#include <QDateTime>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QJsonArray>
@@ -181,18 +185,18 @@ QJsonArray tools() {
              QStringLiteral("Describe the exact local Unix-socket or remote authenticated PacSmith connection used by this MCP server."),
              objectSchema(), read),
         tool(QStringLiteral("get_library_settings"),
-             QStringLiteral("Read deterministic update scheduling, automatic preparation, and retention settings from pacsmithd."),
+             QStringLiteral("Read deterministic update scheduling, automatic update handling, retention, and build parallelism settings from pacsmithd."),
              objectSchema(), read),
         tool(QStringLiteral("set_library_settings"),
-             QStringLiteral("Change pacsmithd update scheduling, automatic preparation, or retention settings. PacSmith always elicits explicit human consent."),
+             QStringLiteral("Change pacsmithd update scheduling, automatic update handling, retention, or build parallelism settings. PacSmith always elicits explicit human consent."),
              objectSchema({{QStringLiteral("updates_enabled"), booleanProperty(QStringLiteral("Run scheduled deterministic update checks."))},
                            {QStringLiteral("daily"), booleanProperty(QStringLiteral("Run daily rather than weekly."))},
                            {QStringLiteral("weekday"), integerProperty(QStringLiteral("ISO weekday 1 through 7."))},
                            {QStringLiteral("hour"), integerProperty(QStringLiteral("Local hour 0 through 23."))},
                            {QStringLiteral("minute"), integerProperty(QStringLiteral("Minute 0 through 59."))},
-                           {QStringLiteral("automatically_prepare"), booleanProperty(QStringLiteral("Acquire and inspect discovered releases automatically."))},
-                           {QStringLiteral("retained_package_versions"), integerProperty(QStringLiteral("Built package versions to retain, or -1 for unlimited."))},
-                           {QStringLiteral("retained_complete_releases"), integerProperty(QStringLiteral("Complete releases to retain, or -1 for unlimited."))}}), sensitiveWrite),
+                           {QStringLiteral("automatically_prepare"), booleanProperty(QStringLiteral("Acquire, inspect, and build discovered updates automatically when copy-forward review finds no changes requiring attention; successful published-project builds enter unstable."))},
+                           {QStringLiteral("retention_versions"), integerProperty(QStringLiteral("Number of completed versions to keep behind each package's oldest active distribution pointer, or -1 to keep them forever. Stable is the boundary when populated; otherwise Unstable is. Source and built-package artifacts are pruned together."))},
+                           {QStringLiteral("build_parallelism"), integerProperty(QStringLiteral("Maximum compile jobs for subsequent package builds, from 1 through available_build_cores."))}}), sensitiveWrite),
         tool(QStringLiteral("get_client_preferences"),
              QStringLiteral("Read this PacSmith client's tray, login-start, and start-minimized preferences."),
              objectSchema(), read),
@@ -205,12 +209,13 @@ QJsonArray tools() {
              QStringLiteral("Read pacsmithd repository listener, signing, trust-mode, keyring, and retention/soak configuration."),
              objectSchema(), read),
         tool(QStringLiteral("set_repository_configuration"),
-             QStringLiteral("Change the global PacSmith repository listener or trust configuration. PacSmith always elicits explicit human consent."),
+             QStringLiteral("Change global PacSmith repository channels, listener, publication defaults, or trust configuration. PacSmith always elicits explicit human consent."),
              objectSchema({{QStringLiteral("enabled"), booleanProperty(QStringLiteral("Serve the PacSmith pacman repository."))},
                            {QStringLiteral("listen_hosts"), stringArrayProperty(QStringLiteral("Exact listener host/address values."))},
                            {QStringLiteral("listen_port"), integerProperty(QStringLiteral("TCP port 1 through 65535."))},
                            {QStringLiteral("advertised_url"), stringProperty(QStringLiteral("Public base URL advertised to clients."))},
-                           {QStringLiteral("soak_seconds"), integerProperty(QStringLiteral("Unstable soak duration before promotion."))},
+                           {QStringLiteral("stable_enabled"), booleanProperty(QStringLiteral("Add the system-wide Stable channel alongside Unstable."))},
+                           {QStringLiteral("soak_seconds"), integerProperty(QStringLiteral("Default promotion delay used only when Stable is enabled and a project selects automatic promotion."))},
                            {QStringLiteral("package_name_prefix"), stringProperty(QStringLiteral("Optional repository package-name prefix."))},
                            {QStringLiteral("trust_mode"), stringProperty(QStringLiteral("direct or root-certified."))}}), sensitiveWrite),
         tool(QStringLiteral("initialize_repository_signing"),
@@ -276,9 +281,9 @@ QJsonArray tools() {
                            {QStringLiteral("canonical_identity"), stringProperty(QStringLiteral("Stable source identity such as vendor:product."))}},
                           {QStringLiteral("path")}), annotations(false, false, false, false)),
         tool(QStringLiteral("import_github_release"),
-             QStringLiteral("Create or update a project directly from a first-party GitHub repository, release, or release-asset URL. PacSmith resolves the release, selects exactly one non-sidecar asset, downloads and verifies it, and performs normal inspection; never download the asset with curl or another external tool."),
+             QStringLiteral("Create or update a project directly from a first-party GitHub repository, release, or release-asset URL. PacSmith resolves the release, selects exactly one uploaded asset or generated source archive, downloads and verifies it, and performs normal inspection; never download the artifact with curl or another external tool."),
              objectSchema({{QStringLiteral("url"), stringProperty(QStringLiteral("HTTPS github.com repository, release, or release-asset URL."))},
-                           {QStringLiteral("asset_regex"), stringProperty(QStringLiteral("Optional persistent regular expression that must full-match exactly one release asset. An exact release-asset URL supplies this automatically."))},
+                            {QStringLiteral("asset_regex"), stringProperty(QStringLiteral("Optional persistent regular expression that must full-match exactly one uploaded asset or generated source archive. An exact release-asset URL supplies this automatically."))},
                            {QStringLiteral("include_prereleases"), booleanProperty(QStringLiteral("Allow prerelease selection when a specific tag is not present in the URL."))},
                            {QStringLiteral("existing_project"), project}},
                           {QStringLiteral("url")}), annotations(false, false, false, true)),
@@ -370,6 +375,12 @@ QJsonArray tools() {
         tool(QStringLiteral("acknowledge_vendor_script"), QStringLiteral("Acknowledge an inspected vendor maintainer script's exact contents."),
              objectSchema({{QStringLiteral("release_id"), release}, {QStringLiteral("name"), stringProperty(QStringLiteral("Exact maintainer-script name."))}},
                           {QStringLiteral("release_id"), QStringLiteral("name")}), write),
+        tool(QStringLiteral("import_repository_signing_key"),
+             QStringLiteral("Download a vendor OpenPGP public key over HTTPS, inspect its fingerprint, and after explicit confirmation pin it as this release's trusted APT/RPM repository signing key. This is the same Fetch & Review path as the GUI. Never download the key with curl or another external tool."),
+             objectSchema({{QStringLiteral("release_id"), release},
+                           {QStringLiteral("url"), stringProperty(QStringLiteral("HTTPS URL of the vendor OpenPGP public key, such as keys.asc or a .gpg keyring."))}},
+                          {QStringLiteral("release_id"), QStringLiteral("url")}),
+             annotations(false, true, false, true)),
         tool(QStringLiteral("set_update_configuration"), QStringLiteral("Edit the normal deterministic update-source configuration for a release."),
              objectSchema({{QStringLiteral("release_id"), release}, {QStringLiteral("strategy"), stringProperty(QStringLiteral("manual, direct-url, apt-repository, rpm-repository, or github-release."))},
                            {QStringLiteral("url"), stringProperty(QStringLiteral("Source or repository URL."))},
@@ -390,9 +401,9 @@ QJsonArray tools() {
         tool(QStringLiteral("set_recipe_mode"), QStringLiteral("Switch this release between constrained Guided mode and Custom PKGBUILD mode."),
              objectSchema({{QStringLiteral("release_id"), release}, {QStringLiteral("mode"), stringProperty(QStringLiteral("guided or custom."))}},
                           {QStringLiteral("release_id"), QStringLiteral("mode")}), write),
-        tool(QStringLiteral("write_pkgbuild"), QStringLiteral("Write the current release's Custom PKGBUILD. This never edits historical releases."),
+        tool(QStringLiteral("write_pkgbuild"), QStringLiteral("Write the current release's Custom PKGBUILD after mandatory human confirmation. A PKGBUILD is shell code that executes during the package build. This never edits historical releases."),
              objectSchema({{QStringLiteral("release_id"), release}, {QStringLiteral("contents"), stringProperty(QStringLiteral("Complete PKGBUILD text. Preserve pacsmith.vars and _PACSMITH_* release variables."))}},
-                          {QStringLiteral("release_id"), QStringLiteral("contents")}), write),
+                          {QStringLiteral("release_id"), QStringLiteral("contents")}), sensitiveWrite),
         tool(QStringLiteral("write_custom_support_file"), QStringLiteral("Write a text support file owned by the current Custom PKGBUILD release. It copies forward with the recipe."),
              objectSchema({{QStringLiteral("release_id"), release}, {QStringLiteral("name"), stringProperty(QStringLiteral("Safe basename; PacSmith-owned filenames are rejected."))},
                            {QStringLiteral("contents"), stringProperty(QStringLiteral("Complete text contents."))}},
@@ -416,11 +427,13 @@ QJsonArray tools() {
         tool(QStringLiteral("reanalyze_release"), QStringLiteral("Reset this release's maintained setup and re-run deterministic inspection of its stored artifact. PacSmith always elicits explicit human consent."),
              objectSchema({{QStringLiteral("project_name"), projectName}, {QStringLiteral("release_name"), releaseName}},
                           {QStringLiteral("project_name"), QStringLiteral("release_name")}), sensitive),
-        tool(QStringLiteral("configure_project_repository"), QStringLiteral("Enable or disable normal project publication. PacSmith always elicits explicit human consent."),
+        tool(QStringLiteral("configure_project_repository"), QStringLiteral("Configure this project's publication, package name, and automatic promotion policy. Repository channels are system-wide. PacSmith always elicits explicit human consent."),
              objectSchema({{QStringLiteral("project_name"), projectName}, {QStringLiteral("publish"), booleanProperty(QStringLiteral("Whether successful builds publish to unstable."))},
+                           {QStringLiteral("automatic_soak"), booleanProperty(QStringLiteral("Whether unstable builds automatically promote after the soak period."))},
+                           {QStringLiteral("soak_seconds_override"), integerProperty(QStringLiteral("Project-specific soak duration in seconds. Use -1 to inherit the library-wide default, 0 for immediate promotion, or a positive duration."))},
                            {QStringLiteral("package_name_override"), stringProperty(QStringLiteral("Optional published package name override."))}},
                           {QStringLiteral("project_name"), QStringLiteral("publish")}), sensitive),
-        tool(QStringLiteral("promote_repository_package"), QStringLiteral("Promote a soaked package to stable. PacSmith always elicits explicit human consent."),
+        tool(QStringLiteral("promote_repository_package"), QStringLiteral("Promote this project's current unstable package into the system-wide Stable channel. PacSmith always elicits explicit human consent."),
              objectSchema({{QStringLiteral("project_name"), projectName}}, {QStringLiteral("project_name")}), sensitive),
         tool(QStringLiteral("delete_release"), QStringLiteral("Permanently delete a release. PacSmith always elicits explicit human consent."),
              objectSchema({{QStringLiteral("project_name"), projectName}, {QStringLiteral("release_name"), releaseName}},
@@ -659,8 +672,9 @@ QJsonObject librarySettingsJson(const LibrarySettings &settings) {
             {QStringLiteral("hour"), settings.localTime.hour()},
             {QStringLiteral("minute"), settings.localTime.minute()},
             {QStringLiteral("automatically_prepare"), settings.automaticallyPrepare},
-            {QStringLiteral("retained_package_versions"), settings.retainedPackageVersions},
-            {QStringLiteral("retained_complete_releases"), settings.retainedCompleteReleases}};
+            {QStringLiteral("retention_versions"), settings.retentionVersions},
+            {QStringLiteral("build_parallelism"), settings.buildParallelism},
+            {QStringLiteral("available_build_cores"), settings.availableBuildCores}};
 }
 
 QJsonObject repoSettingsJson(const RepoSettings &settings) {
@@ -669,6 +683,7 @@ QJsonObject repoSettingsJson(const RepoSettings &settings) {
             {QStringLiteral("listen_hosts"), stringArray(settings.listenHosts)},
             {QStringLiteral("listen_port"), settings.listenPort},
             {QStringLiteral("advertised_url"), settings.advertisedUrl},
+            {QStringLiteral("stable_enabled"), settings.stableEnabled},
             {QStringLiteral("soak_seconds"), settings.soakSeconds},
             {QStringLiteral("package_name_prefix"), settings.packageNamePrefix},
             {QStringLiteral("trust_mode"), settings.trustMode},
@@ -767,6 +782,11 @@ QJsonObject Server::handleRequest(const QJsonObject &request) {
 }
 
 bool Server::confirm(const QString &toolName, const QString &target, QString *error) {
+    return confirm(toolName, target, {}, error);
+}
+
+bool Server::confirm(const QString &toolName, const QString &target, const QString &message,
+                     QString *error) {
     if (PermissionPolicy::level(toolName) != PermissionLevel::MandatoryConfirmation) return true;
     if (!PermissionPolicy::canProceedToConfirmation(toolName, elicitationSupported_, error)) return false;
     const auto requestId = QStringLiteral("pacsmith-confirm-%1").arg(++serverRequestId_);
@@ -776,7 +796,9 @@ bool Server::confirm(const QString &toolName, const QString &target, QString *er
         {QStringLiteral("method"), QStringLiteral("elicitation/create")},
         {QStringLiteral("params"), QJsonObject{
             {QStringLiteral("mode"), QStringLiteral("form")},
-            {QStringLiteral("message"), PermissionPolicy::confirmationMessage(toolName, target)},
+            {QStringLiteral("message"), message.isEmpty()
+                                            ? PermissionPolicy::confirmationMessage(toolName, target)
+                                            : message},
             {QStringLiteral("requestedSchema"), objectSchema(
                 {{QStringLiteral("confirm"), booleanProperty(QStringLiteral("Confirm this exact PacSmith operation."))}},
                 {QStringLiteral("confirm")})},
@@ -895,7 +917,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     if (name == QStringLiteral("set_library_settings")) {
         auto settings = library_.librarySettings(&error);
         if (!settings) return fail(error);
-        if (!confirm(name, QStringLiteral("library update and retention settings"), &error)) return fail(error);
+        if (!confirm(name, QStringLiteral("library update, retention, and build settings"), &error)) return fail(error);
         if (args.contains(QStringLiteral("updates_enabled"))) settings->updatesEnabled = args.value(QStringLiteral("updates_enabled")).toBool();
         if (args.contains(QStringLiteral("daily"))) settings->updatesDaily = args.value(QStringLiteral("daily")).toBool();
         if (args.contains(QStringLiteral("weekday"))) settings->weekDay = args.value(QStringLiteral("weekday")).toInt();
@@ -904,11 +926,12 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
                                         args.contains(QStringLiteral("minute")) ? args.value(QStringLiteral("minute")).toInt() : settings->localTime.minute());
         }
         if (args.contains(QStringLiteral("automatically_prepare"))) settings->automaticallyPrepare = args.value(QStringLiteral("automatically_prepare")).toBool();
-        if (args.contains(QStringLiteral("retained_package_versions"))) settings->retainedPackageVersions = args.value(QStringLiteral("retained_package_versions")).toInt();
-        if (args.contains(QStringLiteral("retained_complete_releases"))) settings->retainedCompleteReleases = args.value(QStringLiteral("retained_complete_releases")).toInt();
+        if (args.contains(QStringLiteral("retention_versions"))) settings->retentionVersions = args.value(QStringLiteral("retention_versions")).toInt();
+        if (args.contains(QStringLiteral("build_parallelism"))) settings->buildParallelism = args.value(QStringLiteral("build_parallelism")).toInt();
         if (settings->weekDay < 1 || settings->weekDay > 7 || !settings->localTime.isValid() ||
-            settings->retainedPackageVersions < -1 || settings->retainedCompleteReleases < -1) {
-            return fail(QStringLiteral("Invalid schedule or retention value"));
+            settings->retentionVersions < -1 || settings->buildParallelism < 1 ||
+            settings->buildParallelism > settings->availableBuildCores) {
+            return fail(QStringLiteral("Invalid schedule, retention, or build parallelism value"));
         }
         const auto saved = library_.saveLibrarySettings(*settings, &error);
         return saved ? toolResult(id, librarySettingsJson(*saved)) : fail(error);
@@ -955,6 +978,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         }
         if (args.contains(QStringLiteral("listen_port"))) settings->listenPort = args.value(QStringLiteral("listen_port")).toInt();
         if (args.contains(QStringLiteral("advertised_url"))) settings->advertisedUrl = argumentString(args, QStringLiteral("advertised_url")).trimmed();
+        if (args.contains(QStringLiteral("stable_enabled"))) settings->stableEnabled = args.value(QStringLiteral("stable_enabled")).toBool();
         if (args.contains(QStringLiteral("soak_seconds"))) settings->soakSeconds = args.value(QStringLiteral("soak_seconds")).toInteger();
         if (args.contains(QStringLiteral("package_name_prefix"))) settings->packageNamePrefix = argumentString(args, QStringLiteral("package_name_prefix")).trimmed();
         if (args.contains(QStringLiteral("trust_mode"))) settings->trustMode = argumentString(args, QStringLiteral("trust_mode")).trimmed();
@@ -1170,6 +1194,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
                               name == QStringLiteral("acknowledge_lifecycle_script") ||
                               name == QStringLiteral("acknowledge_vendor_script") ||
                               name == QStringLiteral("delete_custom_support_file") ||
+                              name == QStringLiteral("import_repository_signing_key") ||
                               name == QStringLiteral("start_build") ||
                               name == QStringLiteral("reanalyze_release") ||
                               name == QStringLiteral("delete_release");
@@ -1246,6 +1271,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     }
     if (name == QStringLiteral("get_build_results")) {
         return toolResult(id, QJsonObject{{QStringLiteral("status"), buildStatusName(release->buildStatus)},
+                                          {QStringLiteral("automatic"), release->automaticBuild},
                                           {QStringLiteral("last_log"), release->lastBuildLog},
                                           {QStringLiteral("builds"), release->toJson().value(QStringLiteral("builds"))},
                                           {QStringLiteral("built_artifact_ids"), release->toJson().value(QStringLiteral("builtArtifactIds"))}});
@@ -1257,6 +1283,11 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         if (!state) return fail(error);
         return toolResult(id, QJsonObject{{QStringLiteral("project_id"), loaded->id},
                                           {QStringLiteral("publish"), state->publish},
+                                          {QStringLiteral("stable_channel_enabled"), state->stableChannelEnabled},
+                                          {QStringLiteral("automatic_soak"), state->automaticSoak},
+                                          {QStringLiteral("soak_seconds_override"), state->soakSecondsOverride},
+                                          {QStringLiteral("library_soak_seconds"), state->librarySoakSeconds},
+                                          {QStringLiteral("effective_soak_seconds"), state->effectiveSoakSeconds},
                                           {QStringLiteral("effective_package_name"), state->effectivePackageName},
                                           {QStringLiteral("published_package_name"), state->publishedPackageName},
                                           {QStringLiteral("has_unstable"), state->hasUnstable},
@@ -1663,6 +1694,72 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         if (!saveReleaseProject(library_, project, &error)) return fail(error);
         return toolResult(id, result);
     }
+    if (name == QStringLiteral("import_repository_signing_key")) {
+        if (release == nullptr) return fail(QStringLiteral("release not found"));
+        const QUrl url(argumentString(args, QStringLiteral("url")), QUrl::StrictMode);
+        if (!isAcceptableRepositoryKeyUrl(url)) {
+            return fail(QStringLiteral("signing-key URL must be a valid HTTPS URL without credentials or a fragment"));
+        }
+        if (!PermissionPolicy::canProceedToConfirmation(name, elicitationSupported_, &error)) return fail(error);
+        QString downloadError;
+        const auto downloaded = downloadRepositorySigningKey(url, &downloadError);
+        if (!downloaded) return fail(downloadError);
+        QString inspectionError;
+        const auto inspection = RepositoryTrust::inspectKey(downloaded->contents, &inspectionError);
+        if (!inspection || inspection->fingerprints.isEmpty()) {
+            return fail(inspectionError.isEmpty() ? QStringLiteral("Downloaded file is not an OpenPGP public key")
+                                                  : inspectionError);
+        }
+        const auto resolvedNotice = downloaded->requestedUrl == downloaded->resolvedUrl
+            ? QString{}
+            : QStringLiteral("\nThe download redirected to %1.").arg(downloaded->resolvedUrl.toDisplayString());
+        const auto message = QStringLiteral(
+            "Trust and pin this repository signing key for PacSmith release %1?\n"
+            "The HTTPS URL identifies where the bytes came from; the pinned fingerprint is what protects future APT and RPM checks.%2\n\n"
+            "Requested URL: %3\nResolved URL: %4\nSHA256: %5\nOpenPGP fingerprint(s):\n%6")
+                                 .arg(releaseLabel(project, *release), resolvedNotice,
+                                      downloaded->requestedUrl.toString(),
+                                      downloaded->resolvedUrl.toString(), inspection->sha256,
+                                      inspection->fingerprints.join(QLatin1Char('\n')));
+        if (!confirm(name, releaseLabel(project, *release), message, &error)) return fail(error);
+        QString importError;
+        auto key = RepositoryTrust::importUserKey(library_.releasePath(*release), downloaded->contents,
+                                                  downloaded->requestedUrl.toString(), &importError);
+        if (!key || key->fingerprints.isEmpty()) return fail(importError);
+        const auto storedPath = QDir(QString::fromUtf8(library_.releasePath(*release).string().c_str()))
+                                    .filePath(key->relativePath);
+        QFile stored(storedPath);
+        if (stored.open(QIODevice::ReadOnly)) key->contents = stored.readAll();
+        const auto duplicate = std::find_if(release->update.signingKeys.begin(),
+                                            release->update.signingKeys.end(),
+                                            [&](const auto &candidate) { return candidate.sha256 == key->sha256; });
+        if (duplicate == release->update.signingKeys.end()) {
+            release->update.signingKeys.append(*key);
+        } else {
+            if (duplicate->contents.isEmpty()) duplicate->contents = key->contents;
+            duplicate->trusted = true;
+        }
+        release->update.aptSigningKeyring = key->relativePath;
+        release->update.trustedSigningFingerprint = key->fingerprints.first();
+        release->fieldProvenance.insert(QStringLiteral("update.aptSigningKeyring"), key->provenance);
+        release->fieldProvenance.insert(QStringLiteral("update.trustedSigningFingerprint"), key->provenance);
+        release->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("update-key"),
+                                 QStringLiteral("Trusted repository key %1 downloaded from %2")
+                                     .arg(key->fingerprints.first(), downloaded->requestedUrl.toString())});
+        if (!saveReleaseProject(library_, project, &error)) return fail(error);
+        return toolResult(id, QJsonObject{
+            {QStringLiteral("project_name"), projectLabel(project)},
+            {QStringLiteral("release_name"), release->debian.version.isEmpty()
+                                                 ? release->originalSourceFilename
+                                                 : release->debian.version},
+            {QStringLiteral("url"), downloaded->requestedUrl.toString()},
+            {QStringLiteral("resolved_url"), downloaded->resolvedUrl.toString()},
+            {QStringLiteral("sha256"), inspection->sha256},
+            {QStringLiteral("fingerprints"), stringArray(key->fingerprints)},
+            {QStringLiteral("signing_keyring"), release->update.aptSigningKeyring},
+            {QStringLiteral("trusted_signing_fingerprint"), release->update.trustedSigningFingerprint},
+        });
+    }
     if (name == QStringLiteral("set_update_configuration")) {
         const auto strategy = argumentString(args, QStringLiteral("strategy"));
         const auto previousStrategy = release->update.strategy;
@@ -1726,6 +1823,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     if (name == QStringLiteral("write_pkgbuild")) {
         const auto contents = argumentString(args, QStringLiteral("contents"));
         const auto validation = PkgbuildGenerator::validate(contents);
+        if (!confirm(name, releaseLabel(project, *release), &error)) return fail(error);
         if (!library_.saveCustomPkgbuild(project, *release, contents, &error)) return fail(error);
         return toolResult(id, QJsonObject{{QStringLiteral("release_id"), releaseId},
                                           {QStringLiteral("mode"), QStringLiteral("custom")},
@@ -1759,11 +1857,27 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         if (!confirm(name, projectLabel(*loaded), &error)) return fail(error);
         const auto current = library_.projectRepo(loaded->id, &error);
         if (!current) return fail(error);
+        const auto automaticSoak = current->stableChannelEnabled &&
+            (args.contains(QStringLiteral("automatic_soak"))
+                 ? args.value(QStringLiteral("automatic_soak")).toBool()
+                 : current->automaticSoak);
+        const auto soakSecondsOverride = args.contains(QStringLiteral("soak_seconds_override"))
+            ? args.value(QStringLiteral("soak_seconds_override")).toInteger()
+            : current->soakSecondsOverride;
+        const auto packageNameOverride = args.contains(QStringLiteral("package_name_override"))
+            ? argumentString(args, QStringLiteral("package_name_override"))
+            : current->packageNameOverride;
         const auto saved = library_.saveProjectRepo(loaded->id, args.value(QStringLiteral("publish")).toBool(),
-                                                    argumentString(args, QStringLiteral("package_name_override")),
+                                                    automaticSoak,
+                                                    soakSecondsOverride, packageNameOverride,
                                                     loaded->revision, &error);
         if (!saved) return fail(error);
-        return toolResult(id, QJsonObject{{QStringLiteral("project_id"), loaded->id}, {QStringLiteral("publish"), saved->publish}});
+        return toolResult(id, QJsonObject{{QStringLiteral("project_id"), loaded->id},
+                                          {QStringLiteral("publish"), saved->publish},
+                                          {QStringLiteral("stable_channel_enabled"), saved->stableChannelEnabled},
+                                          {QStringLiteral("automatic_soak"), saved->automaticSoak},
+                                          {QStringLiteral("soak_seconds_override"), saved->soakSecondsOverride},
+                                          {QStringLiteral("effective_soak_seconds"), saved->effectiveSoakSeconds}});
     }
     if (name == QStringLiteral("promote_repository_package")) {
         auto loaded = loadNamedProject(library_, argumentString(args, QStringLiteral("project_name")), &error);

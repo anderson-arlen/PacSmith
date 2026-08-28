@@ -12,6 +12,8 @@ namespace pacsmith {
 
 struct BackgroundUpdateState {
     bool checking{false};
+    qint64 activityProcessId{0};
+    quint64 activityProcessStartTicks{0};
     QString checkingProjectId;
     QString checkingProjectName;
     QString preparingProjectId;
@@ -40,6 +42,8 @@ bool notifyRunningGui(const QString &command, const QString &importPath = {});
 
 class BackgroundUpdateStateStore final {
 public:
+    static void claimActivity(BackgroundUpdateState &state);
+    static void clearActivityOwner(BackgroundUpdateState &state);
     [[nodiscard]] static QString defaultPath();
     [[nodiscard]] static BackgroundUpdateState load(QString *error = nullptr);
     [[nodiscard]] static bool save(const BackgroundUpdateState &state, QString *error = nullptr);

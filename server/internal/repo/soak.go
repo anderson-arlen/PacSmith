@@ -23,6 +23,13 @@ func (s *Service) EvaluateSoaksChanged(ctx context.Context) (bool, error) {
 
 func (s *Service) evaluateSoaksLocked(ctx context.Context) (bool, error) {
 	changed := false
+	settings, err := s.DB.Queries.GetRepoSettings(ctx)
+	if err != nil {
+		return false, err
+	}
+	if settings.StableEnabled == 0 {
+		return false, nil
+	}
 	now := s.now()
 	soaks, err := s.DB.Queries.ListSoaks(ctx)
 	if err != nil {
@@ -30,6 +37,16 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) (bool, error) {
 	}
 	for _, soak := range soaks {
 		if soak.Status != SoakSoaking {
+			continue
+		}
+		if !soak.ProjectID.Valid {
+			continue
+		}
+		policy, policyErr := s.projectPolicy(ctx, soak.ProjectID.String)
+		if policyErr != nil {
+			return false, policyErr
+		}
+		if !policy.AutomaticSoak {
 			continue
 		}
 		eligibleAt, err := parseTime(soak.EligibleAt)
@@ -54,6 +71,16 @@ func (s *Service) evaluateSoaksLocked(ctx context.Context) (bool, error) {
 	}
 	groups := map[string][]sqlcdb.RepoSoak{}
 	for _, soak := range soaks {
+		if !soak.ProjectID.Valid {
+			continue
+		}
+		policy, policyErr := s.projectPolicy(ctx, soak.ProjectID.String)
+		if policyErr != nil {
+			return false, policyErr
+		}
+		if !policy.AutomaticSoak {
+			continue
+		}
 		key := soak.Pkgname + "\x00" + soak.Arch
 		groups[key] = append(groups[key], soak)
 	}
@@ -156,6 +183,13 @@ func (s *Service) Promote(ctx context.Context, projectID, pkgver, arch string) (
 			return ProjectStatus{}, ErrNotFound
 		}
 		return ProjectStatus{}, err
+	}
+	settings, err := s.DB.Queries.GetRepoSettings(ctx)
+	if err != nil {
+		return ProjectStatus{}, err
+	}
+	if settings.StableEnabled == 0 {
+		return ProjectStatus{}, fmt.Errorf("%w: enable the stable channel before promoting", ErrInvalid)
 	}
 	soaks, err := s.DB.Queries.ListSoaks(ctx)
 	if err != nil {

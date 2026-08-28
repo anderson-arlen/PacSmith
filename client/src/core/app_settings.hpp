@@ -9,6 +9,12 @@
 namespace pacsmith {
 
 enum class CredentialSource { Environment, Keyring, Age };
+enum class AppearanceMode { Auto, Light, Dark };
+
+struct AppearanceSettings {
+    AppearanceMode interfaceTheme{AppearanceMode::Auto};
+    AppearanceMode trayTheme{AppearanceMode::Auto};
+};
 
 struct BackgroundUpdateSettings {
     bool enabled{false};
@@ -19,8 +25,7 @@ struct BackgroundUpdateSettings {
     int weekDay{1};
     QTime localTime{2, 0};
     bool automaticallyPrepare{false};
-    int retainedPackageVersions{2};
-    int retainedCompleteReleases{3};
+    int retentionVersions{2};
 };
 
 struct HarnessProfile {
@@ -32,6 +37,7 @@ struct HarnessProfile {
 
 struct AppSettings {
     QMap<QString, CredentialSource> credentialSources;
+    AppearanceSettings appearance;
     BackgroundUpdateSettings updates;
     QList<HarnessProfile> harnessProfiles;
     bool githubTokenConfigured{false};
@@ -64,6 +70,8 @@ private:
 
 [[nodiscard]] QString credentialSourceName(CredentialSource source);
 [[nodiscard]] CredentialSource credentialSourceFromName(const QString &name);
+[[nodiscard]] QString appearanceModeName(AppearanceMode mode);
+[[nodiscard]] AppearanceMode appearanceModeFromName(const QString &name);
 [[nodiscard]] bool githubTokenUsesAge(const AppSettings &settings);
 
 } // namespace pacsmith

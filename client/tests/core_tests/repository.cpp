@@ -233,6 +233,7 @@ void CoreTests::verifiesPinnedAptRepositorySignatures() {
     QVERIFY(runGpg({QStringLiteral("--batch"), QStringLiteral("--yes"),
                     QStringLiteral("--homedir"), keyHome, QStringLiteral("--pinentry-mode"),
                     QStringLiteral("loopback"), QStringLiteral("--passphrase"), QString{},
+                    QStringLiteral("--local-user"), fingerprints.constFirst(),
                     QStringLiteral("--output"), inReleasePath, QStringLiteral("--clearsign"),
                     releasePath}));
     QFile inReleaseFile(inReleasePath);
@@ -247,6 +248,7 @@ void CoreTests::verifiesPinnedAptRepositorySignatures() {
     QVERIFY(runGpg({QStringLiteral("--batch"), QStringLiteral("--yes"),
                     QStringLiteral("--homedir"), keyHome, QStringLiteral("--pinentry-mode"),
                     QStringLiteral("loopback"), QStringLiteral("--passphrase"), QString{},
+                    QStringLiteral("--local-user"), fingerprints.constFirst(),
                     QStringLiteral("--output"), signaturePath, QStringLiteral("--detach-sign"),
                     releasePath}));
     QFile signatureFile(signaturePath);
@@ -274,6 +276,23 @@ void CoreTests::validatesRepositorySigningKeyUrls() {
     QVERIFY(!pacsmith::isAcceptableRepositoryKeyUrl(
         QUrl(QStringLiteral("https://vendor.example/key.gpg#fingerprint"))));
     QVERIFY(!pacsmith::isAcceptableRepositoryKeyUrl(QUrl(QStringLiteral("https:///key.gpg"))));
+}
+
+void CoreTests::serializesImportedSigningKeyContents() {
+    pacsmith::RepositorySigningKey key;
+    key.relativePath = QStringLiteral("files/keys/vendor-abcd.gpg");
+    key.sha256 = QString(64, QLatin1Char('a'));
+    key.fingerprints = {QStringLiteral("ABCDEF0123456789ABCDEF0123456789ABCDEF01")};
+    key.trusted = true;
+    key.contents = QByteArrayLiteral("normalized-keyring");
+    const auto json = key.toJson();
+    QCOMPARE(json.value(QStringLiteral("contents")).toString(),
+             QString::fromLatin1(key.contents.toBase64()));
+    const auto restored = pacsmith::RepositorySigningKey::fromJson(json);
+    QCOMPARE(restored.contents, key.contents);
+    QCOMPARE(restored.trusted, true);
+    key.contents.clear();
+    QVERIFY(!key.toJson().contains(QStringLiteral("contents")));
 }
 
 void CoreTests::selectsGitHubReleaseAssets() {
@@ -382,4 +401,37 @@ void CoreTests::selectsGitHubReleaseAssets() {
     QCOMPARE(manifestFirst.matchingAssets.size(), 2);
     QVERIFY(manifestFirst.matchingAssets.contains(QStringLiteral("tool-2.0.0.x86_64.rpm")));
     QVERIFY(manifestFirst.matchingAssets.contains(QStringLiteral("tool_2.0.0_amd64.deb")));
+
+    const QJsonArray sourceOnlyReleases{QJsonObject{
+        {QStringLiteral("id"), 70},
+        {QStringLiteral("tag_name"), QStringLiteral("v2.0.0-beta")},
+        {QStringLiteral("prerelease"), true},
+        {QStringLiteral("draft"), false},
+        {QStringLiteral("assets"), QJsonArray{}},
+        {QStringLiteral("tarball_url"),
+         QStringLiteral("https://api.github.com/repos/vendor/tool/tarball/v2.0.0-beta")},
+        {QStringLiteral("zipball_url"),
+         QStringLiteral("https://api.github.com/repos/vendor/tool/zipball/v2.0.0-beta")}}};
+    current.update.githubRepository = QStringLiteral("tool");
+    current.update.githubAssetRegex = QStringLiteral("Source code \\(tar\\.gz\\)");
+    const auto sourceArchive = pacsmith::GitHubUpdateService::selectRelease(
+        sourceOnlyReleases, current, &error, QStringLiteral("v2.0.0-beta"));
+    QVERIFY2(sourceArchive.success, qPrintable(error));
+    QCOMPARE(sourceArchive.assetId, 0);
+    QCOMPARE(sourceArchive.tag, QStringLiteral("v2.0.0-beta"));
+    QCOMPARE(sourceArchive.detectedVersion, QStringLiteral("2.0.0_beta"));
+    QCOMPARE(sourceArchive.filename, QStringLiteral("tool-2.0.0_beta.tar.gz"));
+    QCOMPARE(sourceArchive.downloadUrl,
+             QStringLiteral("https://api.github.com/repos/vendor/tool/tarball/v2.0.0-beta"));
+    QVERIFY(sourceArchive.publisherDigest.isEmpty());
+    QCOMPARE(sourceArchive.availableAssets,
+             QStringList({QStringLiteral("Source code (tar.gz)"),
+                          QStringLiteral("Source code (zip)")}));
+
+    current.update.githubAssetRegex = QStringLiteral(".*");
+    const auto ambiguousSources = pacsmith::GitHubUpdateService::selectRelease(
+        sourceOnlyReleases, current, &error, QStringLiteral("v2.0.0-beta"));
+    QVERIFY(!ambiguousSources.success);
+    QVERIFY(ambiguousSources.message.contains(QStringLiteral("exactly one")));
+    QCOMPARE(ambiguousSources.matchingAssets.size(), 2);
 }

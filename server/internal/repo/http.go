@@ -37,6 +37,12 @@ func (s *Service) serveRepoFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) lookupRepoFile(r *http.Request, channel, arch, file string) (string, bool) {
 	ctx := r.Context()
+	if channel == ChannelStable {
+		settings, err := s.DB.Queries.GetRepoSettings(ctx)
+		if err != nil || settings.StableEnabled == 0 {
+			return "", false
+		}
+	}
 	switch file {
 	case RepoName + ".db", RepoName + ".db.tar.gz":
 		db, err := s.DB.Queries.GetRepoDatabase(ctx, sqlcdb.GetRepoDatabaseParams{Channel: channel, Arch: arch})
@@ -126,6 +132,10 @@ func (s *Service) serveBootstrap(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, name))
 		http.ServeContent(w, r, name, time.Time{}, strings.NewReader(string(body)))
 	case "setup-stable.sh":
+		if row.StableEnabled == 0 {
+			http.NotFound(w, r)
+			return
+		}
 		s.writeBootstrapScript(w, ChannelStable)
 	case "setup-unstable.sh":
 		s.writeBootstrapScript(w, ChannelUnstable)

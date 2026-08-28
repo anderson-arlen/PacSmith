@@ -17,6 +17,9 @@ func (s *Service) BootstrapScript(channel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if channel == ChannelStable && !settings.StableEnabled {
+		return "", fmt.Errorf("%w: stable channel is disabled", ErrInvalid)
+	}
 	return RenderBootstrap(settings, channel), nil
 }
 
@@ -70,6 +73,8 @@ func RenderBootstrap(settings Settings, channel string) string {
 	base := ClientBaseURL(settings)
 	pacmanFPR := NormalizeFingerprint(settings.Fingerprint)
 	rootFPR := NormalizeFingerprint(settings.RootFingerprint)
+	trustedFPR := pacmanFPR
+	ownerTrust := DirectKeyOwnerTrust
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("set -euo pipefail\n")
@@ -82,9 +87,13 @@ func RenderBootstrap(settings Settings, channel string) string {
 	fmt.Fprintf(&b, "EXPECTED_PACSMITH_FPR=%q\n", pacmanFPR)
 	if settings.TrustMode == TrustRootCertified && rootFPR != "" {
 		fmt.Fprintf(&b, "EXPECTED_ROOT_FPR=%q\n", rootFPR)
+		trustedFPR = rootFPR
+		ownerTrust = RootKeyOwnerTrust
 	} else {
 		b.WriteString("EXPECTED_ROOT_FPR=\n")
 	}
+	fmt.Fprintf(&b, "EXPECTED_TRUSTED_FPR=%q\n", trustedFPR)
+	fmt.Fprintf(&b, "EXPECTED_OWNER_TRUST=%q\n", ownerTrust)
 	b.WriteString(`
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "this script must run as root (for pacman-key and /etc/pacman.d)" >&2
@@ -98,8 +107,8 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$BASE_URL/bootstrap/pacsmith.gpg" -o "$tmp/pacsmith.gpg"
-curl -fsSL "$BASE_URL/bootstrap/pacsmith-trusted" -o "$tmp/pacsmith-trusted"
 curl -fsSL "$BASE_URL/bootstrap/pacsmith-revoked" -o "$tmp/pacsmith-revoked" || : >"$tmp/pacsmith-revoked"
+printf '%s:%s:\n' "$EXPECTED_TRUSTED_FPR" "$EXPECTED_OWNER_TRUST" >"$tmp/pacsmith-trusted"
 
 got=$(gpg --show-keys --with-colons "$tmp/pacsmith.gpg" | awk -F: '/^fpr:/ {print toupper($10)}')
 if ! grep -qx "$EXPECTED_PACSMITH_FPR" <<<"$got"; then
@@ -120,6 +129,9 @@ install -m644 "$tmp/pacsmith-revoked" /usr/share/pacman/keyrings/pacsmith-revoke
 
 pacman-key --init
 pacman-key --populate pacsmith
+gpgdir=$(pacman-conf --config=/etc/pacman.conf gpgdir)
+gpg --homedir "$gpgdir" --no-permission-warning --import-ownertrust "$tmp/pacsmith-trusted"
+pacman-key --updatedb
 
 umask 022
 cat >/etc/pacman.d/pacsmith <<EOF

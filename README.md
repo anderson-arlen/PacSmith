@@ -88,7 +88,7 @@ When a newer upstream version appears, PacSmith can notify you, optionally downl
 
 That is the difference between "I converted a `.deb` once" and "I can actually live without the AUR." The first is a weekend script. The second is why PacSmith exists.
 
-Update checks can run on demand or on a systemd user timer. An optional tray helper badges available updates. Cleanup can retain older built artifacts so rollback stays possible.
+Update checks can run on demand or on a systemd user timer. An optional tray helper badges available updates. One retention setting chooses how many completed versions to keep behind each package's oldest active distribution pointer. Stable is the boundary when it has a published version; otherwise Unstable is. PacSmith cleans up each excess older version's source artifact and built packages together while preserving the entire Stable-to-Unstable rollout window. Repository HTTP listening does not control these internal pointers.
 
 ### Bring your own AI harness
 
@@ -100,7 +100,7 @@ PacSmith is not an AI client. It has no provider login, API-key setting, model p
 
 `make install` installs the bundle and the shared standalone Skill. A Skill is guidance, not permission to execute an MCP server. If the Skill is visible but MCP is not, it must stop and ask whether you want the integration installed. After approval, the harness uses its native Agent Plugin or MCP installation control with the directory from `pacsmith plugin path`. It must not fall back to PacSmith CLI project commands, Unix sockets, D-Bus, daemon control, HTTP calls, or database access. PacSmith does not use ACP, a harness registry, or vendor-specific configuration.
 
-MCP exposes typed PacSmith reads and ordinary domain edits: project/release evidence, inspected dependency mappings, explicit Arch runtime dependencies, package description/homepage/licenses/compatibility relations, payload rules, lifecycle state, AppRun, launchers, desktop entries and icons, deterministic update checks and update sources, Guided/Custom mode, PKGBUILD and support files, builds/jobs/logs/artifacts, project and global repository state, library update/retention policy, repository signing, local-admin remote enrollment, the GitHub credential, this client's tray/login preferences, and the same generic external-harness launch profiles edited in the GUI. `check_updates` accepts an optional project and checks every project when omitted. Harness profiles are managed with `list_harness_profiles`, `upsert_harness_profile`, `remove_harness_profile`, and `set_default_harness_profile`; executable and arguments remain separate values and are never evaluated by a shell. MCP has no generic internal-state mutation tool and no setting that only an agent can edit.
+MCP exposes typed PacSmith reads and ordinary domain edits: project/release evidence, inspected dependency mappings, explicit Arch runtime dependencies, package description/homepage/licenses/compatibility relations, payload rules, lifecycle state, AppRun, launchers, desktop entries and icons, deterministic update checks and update sources, vendor APT/RPM signing-key import, Guided/Custom mode, PKGBUILD and support files, builds/jobs/logs/artifacts, project and global repository state, library update/retention policy, repository signing, local-admin remote enrollment, the GitHub credential, this client's tray/login preferences, and the same generic external-harness launch profiles edited in the GUI. `check_updates` accepts an optional project and checks every project when omitted. `import_repository_signing_key` is the same Fetch & Review path as the GUI: PacSmith downloads a first-party OpenPGP key, shows its fingerprint, and elicits confirmation before pinning it. Harness profiles are managed with `list_harness_profiles`, `upsert_harness_profile`, `remove_harness_profile`, and `set_default_harness_profile`; executable and arguments remain separate values and are never evaluated by a shell. MCP has no generic internal-state mutation tool and no setting that only an agent can edit.
 
 Agents inspect package contents through PacSmith itself: `get_payload` supplies the complete inventory and `get_payload_file_inspection` supplies metadata, hashes, bounded text, and static ELF details for an exact member. This works through local and remote connections without exporting or unpacking the vendor package in the harness workspace.
 
@@ -110,7 +110,7 @@ The running GUI watches its client settings file and subscribes to authenticated
 
 Custom support files are also directly manageable by a person with `pacsmith custom-file <project> list|read|write|delete`; MCP uses the same release-file API and validation.
 
-Routine recipe edits are ordinary work. Destructive deletion, release-reset reanalysis, published/global repository and signing changes, library automation/retention changes, login-autostart changes, remote-listener/client trust, and credential changes require PacSmith-enforced MCP form elicitation. If the client cannot present that confirmation, PacSmith fails closed. MCP exposes repository bootstrap scripts only as text for review; it does not execute them, change pacman trust, enable a repository on the machine, or install packages.
+Routine structured recipe edits are ordinary work. Writing a Custom PKGBUILD requires PacSmith-enforced MCP form elicitation because it replaces shell code that will execute during the build. Destructive deletion, release-reset reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login-autostart changes, remote-listener/client trust, and credential changes require the same confirmation. If the client cannot present it, PacSmith fails closed. MCP exposes repository bootstrap scripts only as text for review; it does not execute them, change pacman trust, enable a repository on the machine, or install packages.
 
 All mutating project/release tools use the display/package name and release version shown by `list_projects`, not opaque database IDs. This keeps harness preflight prompts understandable; PacSmith also uses the verified names in its own mandatory confirmation for sensitive operations. Read tools can continue using stable IDs without presenting an approval prompt.
 
@@ -130,14 +130,14 @@ Remote access is off until you enable it on the library host. Local management s
 
 The library host can serve completed builds as an ordinary pacman repository. Repository consumers do not run PacSmith, connect to the management API, or enroll as library clients. They use pacman normally after installing the PacSmith keyring and repository configuration.
 
-Repository publication is opt-in for each project. Once publication is enabled, a successful build is signed and added to the `unstable` channel. PacSmith maintains signed `pacsmith.db` and `pacsmith.files` databases for each architecture and includes architecture-independent packages where pacman expects them.
+Repository publication is project-wide and opt-in. Enabling it publishes every successful retained and future build to the system-wide `unstable` channel, including the latest successful build that already exists when publication is switched on. The repository may add one system-wide `stable` channel; each published project then independently chooses automatic soak promotion or manual-only promotion. PacSmith maintains signed `pacsmith.db` and `pacsmith.files` databases for each architecture and includes architecture-independent packages where pacman expects them.
 
 | Channel | Intended use | How it changes |
 | --- | --- | --- |
 | `unstable` | Immediate testing of the newest successful build | Updated as soon as an opted-in project produces a publishable package |
-| `stable` | The channel used by machines that should receive soaked releases | Updated after the version's soak period expires, or immediately when you choose **Promote to Stable** |
+| `stable` | Optional system-wide channel for machines that should receive promoted releases | Updated manually, or after the version's soak period when automatic promotion is enabled for the project |
 
-Each upstream version has its own soak timer. Rebuilding the same upstream version resets only that version's timer; a newer release does not restart an older release's soak. When candidates become eligible, PacSmith promotes the newest version that advances the stable channel. Automatic promotion never downgrades stable. The project Repository page shows the current package in each channel, active soak timers, and the manual promotion action.
+When a project enables automatic promotion, each upstream version has its own soak timer. The library-wide duration is the default, and a project may override it without changing other projects. Changing either duration recalculates an active inherited timer from its original start rather than restarting it. Rebuilding the same upstream version resets only that version's timer; a newer release does not restart an older release's soak. When candidates become eligible, PacSmith promotes the newest version that advances stable. Automatic promotion never downgrades stable. The project Repository page shows the version in each enabled channel and the remaining soak time on unstable.
 
 Package names can retain the generated Arch name, receive a library-wide prefix such as `pacsmith-`, or use a per-project override. The prefix is useful when repository packages might otherwise collide with names from the official repositories. Changing a name after publication is a package migration, so PacSmith keeps the originally published name visible and warns before the change.
 
@@ -159,7 +159,7 @@ The repository listener is disabled by default. Its initial configuration binds 
 On the library host:
 
 1. Open **Settings → Repository → Network**, choose the listen interfaces and port, enable the HTTP listener, and apply the network changes.
-2. Under **Publication**, choose the default stable soak period and optional package-name prefix.
+2. Under **Publication**, optionally add the system-wide Stable channel. Its default soak duration appears only when Stable exists; projects can inherit or override it. The optional package-name prefix applies independently.
 3. Under **Signing and trust**, initialize signing and choose direct or root-certified trust.
 4. Under **Client setup**, set the advertised URL that client machines can actually reach, choose `stable` or `unstable`, and copy the bootstrap script.
 5. Open a project, go to its **Repository** page, enable publication, save, and build the package.

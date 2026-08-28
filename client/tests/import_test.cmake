@@ -193,7 +193,8 @@ file(WRITE "${mcp_write_input}"
     "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"get_release_issues\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n"
     "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"set_package_metadata\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"description\":\"Smoke package\",\"homepage\":\"https://vendor.example/smoke\",\"licenses\":[\"MIT\"],\"provides\":[\"smoke-virtual\"],\"conflicts\":[]}}}\n"
     "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"add_runtime_dependency\",\"arguments\":{\"project_name\":\"pacsmith-smoke-bin\",\"release_name\":\"3:1.2.3~beta1-4\",\"arch_package\":\"libnotify\"}}}\n"
-    "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"get_package_metadata\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n")
+    "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"get_package_metadata\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"get_update_configuration\",\"arguments\":{\"release_id\":\"${release_id}\"}}}\n")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env ${test_env} "${PACSMITH_EXE}" mcp
     INPUT_FILE "${mcp_write_input}"
@@ -205,6 +206,7 @@ if(NOT mcp_write_result EQUAL 0 OR NOT mcp_write_output MATCHES "unknown-vendor-
    OR NOT mcp_write_output MATCHES "remaining_issue_count"
    OR NOT mcp_write_output MATCHES "review_complete"
    OR NOT mcp_write_output MATCHES "maintenance_complete"
+   OR NOT mcp_write_output MATCHES "lastChecked.*20[0-9][0-9]-"
    OR NOT mcp_write_output MATCHES "https://vendor.example/smoke"
    OR NOT mcp_write_output MATCHES "smoke-virtual"
    OR NOT mcp_write_output MATCHES "libnotify")

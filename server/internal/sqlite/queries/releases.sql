@@ -83,6 +83,9 @@ DELETE FROM release_artifacts WHERE release_id = ? AND role = ?;
 -- name: ListReleaseArtifacts :many
 SELECT artifact_id, role FROM release_artifacts WHERE release_id = ?;
 
+-- name: ListReleaseIconArtifacts :many
+SELECT release_id, artifact_id FROM release_artifacts WHERE role = 'icon';
+
 -- name: InsertBuild :one
 INSERT INTO builds (id, release_id, status, log_text, started_at, finished_at)
 VALUES (?, ?, ?, ?, ?, ?)

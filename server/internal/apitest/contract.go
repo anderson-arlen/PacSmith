@@ -388,11 +388,9 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 			"hour":                  4,
 			"minute":                15,
 			"automatically_prepare": true,
+			"retention_versions":    4,
 		}
-		settings["cleanup"] = map[string]any{
-			"retained_package_versions":  5,
-			"retained_complete_releases": 6,
-		}
+		settings["build"] = map[string]any{"parallelism": 1}
 		payload, err := json.Marshal(settings)
 		if err != nil {
 			t.Fatal(err)
@@ -406,18 +404,21 @@ func RunContract(t *testing.T, client *http.Client, origin string) {
 		}
 		var updated struct {
 			Revision int64 `json:"revision"`
-			Updates  struct {
-				Enabled bool `json:"enabled"`
-				Hour    int  `json:"hour"`
-				Weekday int  `json:"weekday"`
+			Build    struct {
+				Parallelism    int `json:"parallelism"`
+				AvailableCores int `json:"available_cores"`
+			} `json:"build"`
+			Updates struct {
+				Enabled           bool `json:"enabled"`
+				Hour              int  `json:"hour"`
+				Weekday           int  `json:"weekday"`
+				RetentionVersions int  `json:"retention_versions"`
 			} `json:"updates"`
-			Cleanup struct {
-				RetainedPackageVersions int `json:"retained_package_versions"`
-			} `json:"cleanup"`
 		}
 		decodeJSON(t, patched, &updated)
 		if !updated.Updates.Enabled || updated.Updates.Hour != 4 || updated.Updates.Weekday != 3 ||
-			updated.Cleanup.RetainedPackageVersions != 5 {
+			updated.Updates.RetentionVersions != 4 || updated.Build.Parallelism != 1 ||
+			updated.Build.AvailableCores < 1 {
 			t.Fatalf("updated %+v", updated)
 		}
 		conflict := mustDo(t, client, origin, http.MethodPatch, "/api/v1/settings", map[string]string{

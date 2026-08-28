@@ -70,7 +70,7 @@ func (s *Service) attachBuildRecords(ctx context.Context, release *Release,
 }
 
 func (s *Service) recordBuildSummary(ctx context.Context, releaseID, status, logText string,
-	producedPackages []string) error {
+	producedPackages []string, automatic bool) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		row, err := s.DB.Queries.GetRelease(ctx, releaseID)
 		if err != nil {
@@ -81,6 +81,7 @@ func (s *Service) recordBuildSummary(ctx context.Context, releaseID, status, log
 			return err
 		}
 		body["buildStatus"] = status
+		body["automaticBuild"] = automatic
 		body["lastBuildLog"] = logText
 		body["producedPackages"] = producedPackages
 		state := row.State

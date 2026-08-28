@@ -1,14 +1,17 @@
 package library
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
@@ -17,6 +20,146 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 )
+
+func TestBuildParallelismArguments(t *testing.T) {
+	arguments := buildParallelismArguments(6)
+	if got, want := strings.Join(arguments, " "),
+		"MAKEFLAGS=-j6 CMAKE_BUILD_PARALLEL_LEVEL=6"; got != want {
+		t.Fatalf("arguments %q, want %q", got, want)
+	}
+}
+
+func TestBuildResultKeepsJobPayloadCompact(t *testing.T) {
+	raw, err := json.Marshal(BuildResult{Status: "succeeded", Log: strings.Repeat("build output", 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "build output") {
+		t.Fatalf("job result includes streamed build log: %s", raw)
+	}
+}
+
+func TestReanalyzeAlignsIconWithExistingArchPackageName(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{DB: db, Artifacts: &artifact.Registry{DB: db, Store: store}}
+
+	png := []byte{
+		0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+		0, 0, 0, 13, 'I', 'H', 'D', 'R',
+		0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde,
+		0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82,
+	}
+	var source bytes.Buffer
+	tw := tar.NewWriter(&source)
+	for name, contents := range map[string][]byte{
+		"code-1.0/code.desktop": []byte("[Desktop Entry]\nName=Code\nExec=code\nIcon=vscode\n"),
+		"code-1.0/vscode.png":   png,
+	} {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(contents))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(contents); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	artifactRecord, err := svc.Artifacts.Put(ctx, "code-1.0.tar", "source", bytes.NewReader(source.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := nowUTC()
+	project, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "proj-reanalyze-icon", DisplayName: "Code", ArchPackageName: "custom-code-bin",
+		SourceIdentity: "local:code", HistoryJson: "[]", CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID: "rel-reanalyze-icon", ProjectID: project.ID, State: "needs-review", SourceType: "archive",
+		VendorVersion: "1.0", OriginalFilename: "code-1.0.tar",
+		SourceSha256: artifactRecord.SHA256, SourceArtifactID: sql.NullString{String: artifactRecord.ID, Valid: true},
+		ArchPackageName: project.ArchPackageName, ArchPkgrel: 1,
+		BodyJson:  `{"displayName":"Code","archPackageName":"custom-code-bin"}`,
+		CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Reanalyze(ctx, release.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.GetRelease(ctx, release.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	install, _ := mapValue(got.Document, "installMapping")
+	icon, _ := mapValue(install, "icon")
+	if stringValue(icon, "iconName") != "custom-code-bin" {
+		t.Fatalf("reanalyzed icon name %q", stringValue(icon, "iconName"))
+	}
+	desktops := objectSlice(install["desktopEntries"])
+	if len(desktops) != 1 || !strings.Contains(stringValue(desktops[0], "contents"), "Icon=custom-code-bin\n") {
+		t.Fatalf("reanalyzed desktop entries %+v", desktops)
+	}
+	if !strings.Contains(stringValue(got.Document, "generatedPkgbuild"),
+		"/usr/share/pixmaps/custom-code-bin.png") {
+		t.Fatalf("reanalyzed PKGBUILD did not install the normalized icon")
+	}
+}
+
+func TestListProjectSummariesOmitsReleaseDocuments(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := nowUTC()
+	if _, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "proj-summary", DisplayName: "Summary", ArchPackageName: "summary-bin",
+		SourceIdentity: "local:summary", HistoryJson: "[]", CreatedAt: now, ModifiedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID: "rel-summary", ProjectID: "proj-summary", State: "built", SourceType: "deb",
+		VendorVersion: "2.4.1", OriginalFilename: "summary.deb",
+		SourceSha256: strings.Repeat("a", 64), ArchPackageName: "summary-bin", ArchPkgrel: 3,
+		BodyJson:  `{"debian":{"version":"2.4.1"},"lastBuildLog":"large log"}`,
+		CreatedAt: now, ModifiedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := (&Service{DB: db}).ListProjectSummaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || len(projects[0].Releases) != 1 {
+		t.Fatalf("unexpected summaries: %+v", projects)
+	}
+	document := projects[0].Releases[0].Document
+	if _, present := document["lastBuildLog"]; present {
+		t.Fatal("summary included the full release document")
+	}
+	debian, ok := document["debian"].(map[string]any)
+	if !ok || debian["version"] != "2.4.1" || document["archPkgrel"] != int64(3) {
+		t.Fatalf("summary omitted version identity: %+v", document)
+	}
+}
 
 func TestWriteReleaseIconCopiesArtifact(t *testing.T) {
 	ctx := context.Background()
@@ -98,6 +241,20 @@ func TestWriteReleaseIconCopiesArtifact(t *testing.T) {
 		Role:       "icon",
 	}); err != nil {
 		t.Fatal(err)
+	}
+	summaries, err := svc.ListProjectSummaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || len(summaries[0].Releases) != 1 {
+		t.Fatalf("unexpected project summaries: %+v", summaries)
+	}
+	iconSummary := summaries[0].Releases[0].Document
+	if iconSummary["iconArtifactId"] != icon.ID {
+		t.Fatalf("summary icon artifact = %v, want %q", iconSummary["iconArtifactId"], icon.ID)
+	}
+	if !releaseIconConfigured(iconSummary) {
+		t.Fatalf("summary omitted configured icon metadata: %+v", iconSummary)
 	}
 
 	work := filepath.Join(root, "build")
@@ -524,5 +681,130 @@ func TestCleanupRespectsRepoRoots(t *testing.T) {
 	}
 	if _, err := registry.Get(ctx, orphan.ID); err == nil {
 		t.Fatal("unreferenced artifact survived cleanup")
+	}
+}
+
+func TestCleanupKeepsConfiguredNumberOfOutdatedVersionsAndPrunesArtifactsTogether(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &artifact.Registry{DB: db, Store: store}
+	svc := &Service{DB: db, Artifacts: registry}
+	if _, err := db.SQL.ExecContext(ctx, `UPDATE library_settings SET retention_versions = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stamp := func(daysAgo int) string {
+		return now.Add(-time.Duration(daysAgo) * 24 * time.Hour).
+			Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
+	}
+	project, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "retention-project", DisplayName: "Retention App", ArchPackageName: "retention-bin",
+		SourceIdentity: "local:retention", HistoryJson: "[]",
+		CreatedAt: stamp(100), ModifiedAt: stamp(5),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type retainedRelease struct {
+		id     string
+		source artifact.Record
+		built  artifact.Record
+	}
+	insertBuiltRelease := func(id, version string, createdDaysAgo, completedDaysAgo int) retainedRelease {
+		t.Helper()
+		source, putErr := registry.Put(ctx, id+".deb", "source", bytes.NewReader([]byte("source-"+id)))
+		if putErr != nil {
+			t.Fatal(putErr)
+		}
+		built, putErr := registry.Put(ctx, "retention-bin-"+version+"-1-x86_64.pkg.tar.zst",
+			"arch_package", bytes.NewReader([]byte("built-"+id)))
+		if putErr != nil {
+			t.Fatal(putErr)
+		}
+		release, insertErr := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+			ID: id, ProjectID: project.ID, State: "built", SourceType: "deb",
+			VendorVersion: version, OriginalFilename: id + ".deb",
+			SourceSha256: source.SHA256, SourceArtifactID: nullString(source.ID),
+			ArchPackageName: project.ArchPackageName, ArchPkgrel: 1, BodyJson: `{}`,
+			CreatedAt: stamp(createdDaysAgo), ModifiedAt: stamp(completedDaysAgo),
+		})
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		if insertErr = db.Queries.InsertReleaseArtifact(ctx, sqlcdb.InsertReleaseArtifactParams{
+			ReleaseID: release.ID, ArtifactID: built.ID, Role: "built_package",
+		}); insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		build, insertErr := db.Queries.InsertBuild(ctx, sqlcdb.InsertBuildParams{
+			ID: "build-" + id, ReleaseID: release.ID, Status: "succeeded", LogText: "done",
+			StartedAt:  nullString(stamp(completedDaysAgo)),
+			FinishedAt: nullString(stamp(completedDaysAgo)),
+		})
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		if insertErr = db.Queries.InsertBuildArtifact(ctx, sqlcdb.InsertBuildArtifactParams{
+			BuildID: build.ID, ArtifactID: built.ID,
+		}); insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		return retainedRelease{id: release.ID, source: source, built: built}
+	}
+	pruned := insertBuiltRelease("release-old", "1.0", 90, 1)
+	retained := insertBuiltRelease("release-recent", "2.0", 70, 90)
+	stable := insertBuiltRelease("release-stable", "3.0", 60, 60)
+	newest := insertBuiltRelease("release-newest", "4.0", 50, 50)
+	if _, err := db.SQL.ExecContext(ctx, `UPDATE repo_settings SET stable_enabled = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	for _, pointer := range []struct {
+		channel string
+		release retainedRelease
+		version string
+	}{
+		{channel: "stable", release: stable, version: "3.0"},
+		{channel: "unstable", release: newest, version: "4.0"},
+	} {
+		if err := db.Queries.UpsertChannelEntry(ctx, sqlcdb.UpsertChannelEntryParams{
+			Channel: pointer.channel, Arch: "x86_64", Pkgname: project.ArchPackageName,
+			ProjectID: nullString(project.ID), ReleaseID: nullString(pointer.release.id),
+			Pkgver: pointer.version, Pkgrel: "1", ArtifactID: pointer.release.built.ID,
+			Filename:    project.ArchPackageName + "-" + pointer.version + "-1-x86_64.pkg.tar.zst",
+			PublishedAt: stamp(0),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := svc.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Queries.GetRelease(ctx, pruned.id); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("excess outdated release still exists: %v", err)
+	}
+	for _, artifactID := range []string{pruned.source.ID, pruned.built.ID} {
+		if _, err := registry.Get(ctx, artifactID); err == nil {
+			t.Fatalf("pruned artifact %s still exists", artifactID)
+		}
+	}
+	for _, kept := range []retainedRelease{retained, stable, newest} {
+		if _, err := db.Queries.GetRelease(ctx, kept.id); err != nil {
+			t.Fatalf("retained release %s: %v", kept.id, err)
+		}
+		for _, artifactID := range []string{kept.source.ID, kept.built.ID} {
+			if _, err := registry.Get(ctx, artifactID); err != nil {
+				t.Fatalf("retained artifact %s: %v", artifactID, err)
+			}
+		}
 	}
 }

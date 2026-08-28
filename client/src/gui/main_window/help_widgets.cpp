@@ -199,13 +199,7 @@ QLabel *settingsSectionHelp(QWidget *parent, const QString &summary, const QStri
     auto font = label->font();
     if (font.pointSize() >= 10) font.setPointSize(font.pointSize() - 1);
     label->setFont(font);
-    auto palette = label->palette();
-    const auto link = palette.color(QPalette::Link);
-    const auto muted = palette.color(QPalette::PlaceholderText);
-    palette.setColor(QPalette::WindowText, muted.isValid() ? muted : palette.color(QPalette::Mid));
-    palette.setColor(QPalette::Link, link);
-    palette.setColor(QPalette::LinkVisited, link);
-    label->setPalette(palette);
+    label->setForegroundRole(QPalette::PlaceholderText);
     setSettingsSectionHelp(label, summary, details, commands);
     QObject::connect(label, &QLabel::linkActivated, label, [label](const QString &) {
         const auto more = label->property("helpDetails").toString();

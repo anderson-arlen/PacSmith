@@ -27,6 +27,22 @@ func requireRepoTools(t *testing.T) {
 	}
 }
 
+func secretKeyFingerprint(t *testing.T, ctx context.Context, home string) string {
+	t.Helper()
+	out, err := runGPGHome(ctx, home, nil, "--with-colons", "--list-secret-keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) > 9 && fields[0] == "fpr" {
+			return fields[9]
+		}
+	}
+	t.Fatal("generated secret key has no fingerprint")
+	return ""
+}
+
 type repoFixture struct {
 	svc  *Service
 	db   *sqlite.DB
@@ -68,8 +84,10 @@ func newRepoFixture(t *testing.T) *repoFixture {
 
 func (fx *repoFixture) setSoak(t *testing.T, seconds int64) {
 	t.Helper()
-	zero := seconds
-	if _, err := fx.svc.PatchSettings(fx.ctx, SettingsPatch{SoakSeconds: &zero}); err != nil {
+	stable := true
+	if _, err := fx.svc.PatchSettings(fx.ctx, SettingsPatch{
+		StableEnabled: &stable, SoakSeconds: &seconds,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -89,7 +107,10 @@ func (fx *repoFixture) insertProject(t *testing.T, id, pkgname string) {
 		t.Fatal(err)
 	}
 	publish := true
-	if _, err := fx.svc.PatchProject(fx.ctx, id, ProjectPatch{Publish: &publish}); err != nil {
+	automatic := true
+	if _, err := fx.svc.PatchProject(fx.ctx, id, ProjectPatch{
+		Publish: &publish, AutomaticSoak: &automatic,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fx.db.Queries.InsertRelease(fx.ctx, sqlcdb.InsertReleaseParams{
@@ -160,6 +181,131 @@ func TestPublishableBuildBecomesUnstable(t *testing.T) {
 	}
 }
 
+func TestStableChannelIsSystemWideAndDisabledByDefault(t *testing.T) {
+	fx := newRepoFixture(t)
+	if _, err := fx.svc.BootstrapScript(ChannelStable); err == nil {
+		t.Fatal("stable bootstrap should be unavailable while the system-wide channel is disabled")
+	}
+	fx.insertProject(t, "proj-a", "demo-bin")
+	fx.publish(t, "proj-a", "1.5.0", "1")
+	status, err := fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.StableChannelEnabled || status.AutomaticSoak || status.Stable != nil || len(status.Soaks) != 0 {
+		t.Fatalf("stable should be absent by default: %+v", status)
+	}
+	if status.Unstable == nil || status.Unstable.Pkgver != "1.5.0" {
+		t.Fatalf("unstable should remain available: %+v", status.Unstable)
+	}
+	stable := true
+	if _, err := fx.svc.PatchSettings(fx.ctx, SettingsPatch{StableEnabled: &stable}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.StableChannelEnabled {
+		t.Fatal("enabling Stable globally should make it available to every project")
+	}
+	if _, err := fx.svc.BootstrapScript(ChannelStable); err != nil {
+		t.Fatalf("stable bootstrap should be available after enabling the channel: %v", err)
+	}
+	status, err = fx.svc.Promote(fx.ctx, "proj-a", "", "")
+	if err != nil || status.Stable == nil {
+		t.Fatalf("promote into globally enabled Stable: status=%+v err=%v", status, err)
+	}
+	stable = false
+	if _, err := fx.svc.PatchSettings(fx.ctx, SettingsPatch{StableEnabled: &stable}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fx.db.Queries.ListChannelEntries(fx.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Channel == ChannelStable && entry.ProjectID.Valid {
+			t.Fatalf("disabled Stable retained project pointer: %+v", entry)
+		}
+	}
+}
+
+func TestEnablingPublicationPublishesLatestSuccessfulBuild(t *testing.T) {
+	fx := newRepoFixture(t)
+	fx.insertProject(t, "proj-a", "demo-bin")
+	publish := false
+	if _, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{Publish: &publish}); err != nil {
+		t.Fatal(err)
+	}
+	artifactID := fx.putPackage(t, "demo-bin", "1.5.0", "1", "x86_64")
+	stamp := fx.now.Format("2006-01-02T15:04:05.000Z07:00")
+	build, err := fx.db.Queries.InsertBuild(fx.ctx, sqlcdb.InsertBuildParams{
+		ID: "build-1", ReleaseID: "proj-a-rel", Status: "succeeded", LogText: "ok",
+		StartedAt: ns(stamp), FinishedAt: ns(stamp),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.db.Queries.InsertBuildArtifact(fx.ctx, sqlcdb.InsertBuildArtifactParams{
+		BuildID: build.ID, ArtifactID: artifactID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publish = true
+	if _, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{Publish: &publish}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Unstable == nil || status.Unstable.Artifact != artifactID {
+		t.Fatalf("latest successful build was not published: %+v", status.Unstable)
+	}
+}
+
+func TestDeferredPublicationWaitsForReconciliation(t *testing.T) {
+	fx := newRepoFixture(t)
+	fx.insertProject(t, "proj-a", "demo-bin")
+	publish := false
+	if _, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{Publish: &publish}); err != nil {
+		t.Fatal(err)
+	}
+	artifactID := fx.putPackage(t, "demo-bin", "1.5.0", "1", "x86_64")
+	stamp := fx.now.Format("2006-01-02T15:04:05.000Z07:00")
+	build, err := fx.db.Queries.InsertBuild(fx.ctx, sqlcdb.InsertBuildParams{
+		ID: "build-deferred", ReleaseID: "proj-a-rel", Status: "succeeded", LogText: "ok",
+		StartedAt: ns(stamp), FinishedAt: ns(stamp),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.db.Queries.InsertBuildArtifact(fx.ctx, sqlcdb.InsertBuildArtifactParams{
+		BuildID: build.ID, ArtifactID: artifactID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publish = true
+	status, err := fx.svc.PatchProjectDeferred(fx.ctx, "proj-a", ProjectPatch{Publish: &publish})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Publish || status.Unstable != nil {
+		t.Fatalf("deferred patch should update configuration without publishing: %+v", status)
+	}
+	if err := fx.svc.ReconcileProjectDistribution(fx.ctx, "proj-a"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Unstable == nil || status.Unstable.Artifact != artifactID {
+		t.Fatalf("reconciliation did not publish latest successful build: %+v", status.Unstable)
+	}
+}
+
 func TestFailedBuildLeavesRepoUnchanged(t *testing.T) {
 	fx := newRepoFixture(t)
 	fx.insertProject(t, "proj-a", "demo-bin")
@@ -215,6 +361,81 @@ func TestIndependentSoakTimers(t *testing.T) {
 	if status.Stable == nil || status.Stable.Pkgver != "1.6.0" {
 		t.Fatalf("1.6.0 should be stable: %+v", status.Stable)
 	}
+}
+
+func TestProjectSoakDurationOverridesLibraryDefault(t *testing.T) {
+	fx := newRepoFixture(t)
+	fx.setSoak(t, 30*24*60*60)
+	fx.insertProject(t, "proj-a", "demo-bin")
+	override := int64(10 * 24 * 60 * 60)
+	status, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{
+		SoakSecondsOverride: &override,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.SoakSecondsOverride != override || status.LibrarySoakSeconds != 30*24*60*60 ||
+		status.EffectiveSoakSeconds != override {
+		t.Fatalf("unexpected project soak settings: %+v", status)
+	}
+	fx.publish(t, "proj-a", "1.5.0", "1")
+	status, err = fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil || len(status.Soaks) != 1 {
+		t.Fatalf("initial soak: status=%+v err=%v", status, err)
+	}
+	started, err := parseTime(status.Soaks[0].StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireDuration := func(want time.Duration) {
+		t.Helper()
+		current, viewErr := fx.svc.ProjectView(fx.ctx, "proj-a")
+		if viewErr != nil || len(current.Soaks) != 1 {
+			t.Fatalf("soak view: status=%+v err=%v", current, viewErr)
+		}
+		currentStarted, parseErr := parseTime(current.Soaks[0].StartedAt)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		eligible, parseErr := parseTime(current.Soaks[0].EligibleAt)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if !currentStarted.Equal(started) || eligible.Sub(started) != want {
+			t.Fatalf("soak duration=%s started=%s, want duration=%s started=%s",
+				eligible.Sub(started), currentStarted, want, started)
+		}
+	}
+	requireDuration(10 * 24 * time.Hour)
+
+	fx.now = fx.now.Add(5 * 24 * time.Hour)
+	override = 20 * 24 * 60 * 60
+	if _, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{
+		SoakSecondsOverride: &override,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requireDuration(20 * 24 * time.Hour)
+
+	inherit := int64(-1)
+	if _, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{
+		SoakSecondsOverride: &inherit,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requireDuration(30 * 24 * time.Hour)
+
+	fx.setSoak(t, 40*24*60*60)
+	requireDuration(40 * 24 * time.Hour)
+
+	override = 25 * 24 * 60 * 60
+	if _, err := fx.svc.PatchProject(fx.ctx, "proj-a", ProjectPatch{
+		SoakSecondsOverride: &override,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fx.setSoak(t, 50*24*60*60)
+	requireDuration(25 * 24 * time.Hour)
 }
 
 func TestSameUpstreamRebuildResetsOnlyThatSoak(t *testing.T) {
@@ -416,6 +637,7 @@ func TestRootCertifiedVerification(t *testing.T) {
 		"Example Org Root <security@example.com>", "ed25519", "default", "never"); err != nil {
 		t.Fatal(err)
 	}
+	rootFingerprint := secretKeyFingerprint(t, fx.ctx, rootHome)
 	rootPub, err := runGPGHome(fx.ctx, rootHome, nil, "--export", "--armor")
 	if err != nil {
 		t.Fatal(err)
@@ -434,7 +656,8 @@ func TestRootCertifiedVerification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runGPGHome(fx.ctx, rootHome, nil, "--quick-sign-key", settings.Fingerprint); err != nil {
+	if _, err := runGPGHome(fx.ctx, rootHome, nil, "--local-user", rootFingerprint,
+		"--quick-sign-key", settings.Fingerprint); err != nil {
 		t.Fatal(err)
 	}
 	certified, err := runGPGHome(fx.ctx, rootHome, nil, "--export", "--armor", settings.Fingerprint)
@@ -443,6 +666,50 @@ func TestRootCertifiedVerification(t *testing.T) {
 	}
 	if _, err := fx.svc.UploadCertifiedKey(fx.ctx, certified); err != nil {
 		t.Fatal(err)
+	}
+	trustedSettings, err := fx.db.Queries.GetRepoSettings(fx.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedBody, err := fx.readArtifact(trustedSettings.KeyringTrustedArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(trustedBody), NormalizeFingerprint(rootFingerprint)+":"+RootKeyOwnerTrust+":") {
+		t.Fatalf("root-certified keyring does not fully trust its certification root: %s", trustedBody)
+	}
+	keyringBody, err := fx.readArtifact(trustedSettings.KeyringGpgArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientHome := filepath.Join(fx.root, "client-gnupg")
+	if err := os.MkdirAll(clientHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGPGHome(fx.ctx, clientHome, nil, "--quick-generate-key",
+		"Pacman Client Key <client@example.com>", "ed25519", "default", "never"); err != nil {
+		t.Fatal(err)
+	}
+	clientFingerprint := secretKeyFingerprint(t, fx.ctx, clientHome)
+	if _, err := runGPGHome(fx.ctx, clientHome, keyringBody, "--import"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGPGHome(fx.ctx, clientHome, nil, "--local-user", clientFingerprint,
+		"--quick-lsign-key", rootFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGPGHome(fx.ctx, clientHome, trustedBody, "--import-ownertrust"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGPGHome(fx.ctx, clientHome, nil, "--check-trustdb"); err != nil {
+		t.Fatal(err)
+	}
+	keyListing, err := runGPGHome(fx.ctx, clientHome, nil, "--with-colons", "--list-keys", settings.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(keyListing), "tru:") || !strings.Contains(string(keyListing), "\npub:f:") {
+		t.Fatalf("root certification did not make the PacSmith signing key fully valid:\n%s", keyListing)
 	}
 	wrongHome := filepath.Join(fx.root, "wrong-gnupg")
 	if err := os.MkdirAll(wrongHome, 0o700); err != nil {
@@ -467,10 +734,12 @@ func TestRootCertifiedVerification(t *testing.T) {
 		"Other Root <other@example.com>", "ed25519", "default", "never"); err != nil {
 		t.Fatal(err)
 	}
+	otherRootFingerprint := secretKeyFingerprint(t, fx.ctx, otherRoot)
 	if _, err := runGPGHome(fx.ctx, otherRoot, pacsmithPub, "--import"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runGPGHome(fx.ctx, otherRoot, nil, "--quick-sign-key", settings.Fingerprint); err != nil {
+	if _, err := runGPGHome(fx.ctx, otherRoot, nil, "--local-user", otherRootFingerprint,
+		"--quick-sign-key", settings.Fingerprint); err != nil {
 		t.Fatal(err)
 	}
 	otherCertified, err := runGPGHome(fx.ctx, otherRoot, nil, "--export", "--armor", settings.Fingerprint)

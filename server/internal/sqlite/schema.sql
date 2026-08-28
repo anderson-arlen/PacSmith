@@ -41,6 +41,15 @@ CREATE TABLE projects (
 
 CREATE INDEX projects_source_identity_idx ON projects (source_identity);
 
+CREATE TABLE project_repo_policies (
+    project_id TEXT PRIMARY KEY NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    stable_enabled INTEGER NOT NULL DEFAULT 1,
+    automatic_soak INTEGER NOT NULL DEFAULT 0,
+    soak_seconds_override INTEGER NOT NULL DEFAULT -1,
+    CHECK (automatic_soak = 0 OR stable_enabled = 1),
+    CHECK (soak_seconds_override >= -1)
+);
+
 CREATE TABLE releases (
     id TEXT PRIMARY KEY NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
@@ -152,7 +161,10 @@ CREATE TABLE library_settings (
     updates_minute INTEGER NOT NULL DEFAULT 0 CHECK (updates_minute BETWEEN 0 AND 59),
     updates_auto_prepare INTEGER NOT NULL DEFAULT 0,
     retained_package_versions INTEGER NOT NULL DEFAULT 2,
-    retained_complete_releases INTEGER NOT NULL DEFAULT 3
+    retained_complete_releases INTEGER NOT NULL DEFAULT 3,
+    retention_days INTEGER NOT NULL DEFAULT 30 CHECK (retention_days >= -1),
+    retention_versions INTEGER NOT NULL DEFAULT 2 CHECK (retention_versions >= -1),
+    build_parallelism INTEGER NOT NULL DEFAULT 1 CHECK (build_parallelism BETWEEN 1 AND 1024)
 );
 
 CREATE TABLE update_check_state (
@@ -176,6 +188,7 @@ CREATE TABLE repo_settings (
     listen_hosts TEXT NOT NULL DEFAULT '["127.0.0.1"]',
     listen_port INTEGER NOT NULL DEFAULT 8080,
     advertised_url TEXT NOT NULL DEFAULT '',
+    stable_enabled INTEGER NOT NULL DEFAULT 0 CHECK (stable_enabled IN (0, 1)),
     soak_seconds INTEGER NOT NULL DEFAULT 2592000,
     package_name_prefix TEXT NOT NULL DEFAULT '',
     trust_mode TEXT NOT NULL DEFAULT 'direct',

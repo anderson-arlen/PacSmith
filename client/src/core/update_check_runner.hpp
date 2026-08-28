@@ -16,6 +16,7 @@ struct UpdateCheckRunResult {
     QString message;
     QString detectedVersion;
     bool prepared{false};
+    bool built{false};
     int exitCode{0};
 };
 

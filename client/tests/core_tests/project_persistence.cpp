@@ -233,6 +233,7 @@ void CoreTests::serializesProjectsAndOverrides() {
                               QStringLiteral("reason")});
     project.history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("created"), QStringLiteral("test")});
     project.buildStatus = pacsmith::BuildStatus::Canceled;
+    project.automaticBuild = true;
 
     const auto json = QJsonDocument(project.toJson()).toJson();
     const auto restored = pacsmith::PackageRelease::fromJson(QJsonDocument::fromJson(json).object());
@@ -281,6 +282,7 @@ void CoreTests::serializesProjectsAndOverrides() {
     QCOMPARE(restored.aiChanges.size(), 1);
     QCOMPARE(restored.history.size(), 1);
     QCOMPARE(restored.buildStatus, pacsmith::BuildStatus::Canceled);
+    QVERIFY(restored.automaticBuild);
 }
 
 void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
@@ -374,11 +376,12 @@ void CoreTests::persistsBackgroundUpdateSettings() {
     settings.updates.weekDay = 5;
     settings.updates.localTime = QTime(4, 25);
     settings.updates.automaticallyPrepare = true;
-    settings.updates.retainedPackageVersions = 5;
-    settings.updates.retainedCompleteReleases = 3;
+    settings.updates.retentionVersions = 4;
     settings.updates.startAtLogin = true;
     settings.updates.startMinimized = true;
     settings.updates.keepInTray = true;
+    settings.appearance.interfaceTheme = pacsmith::AppearanceMode::Dark;
+    settings.appearance.trayTheme = pacsmith::AppearanceMode::Light;
     settings.debAssociationPrompted = true;
     settings.selfTrackingPrompted = true;
     QString error;
@@ -390,11 +393,12 @@ void CoreTests::persistsBackgroundUpdateSettings() {
     QCOMPARE(restored.updates.weekDay, 5);
     QCOMPARE(restored.updates.localTime, QTime(4, 25));
     QVERIFY(restored.updates.automaticallyPrepare);
-    QCOMPARE(restored.updates.retainedPackageVersions, 5);
-    QCOMPARE(restored.updates.retainedCompleteReleases, 5);
+    QCOMPARE(restored.updates.retentionVersions, 4);
     QVERIFY(restored.updates.startAtLogin);
     QVERIFY(restored.updates.startMinimized);
     QVERIFY(restored.updates.keepInTray);
+    QCOMPARE(restored.appearance.interfaceTheme, pacsmith::AppearanceMode::Dark);
+    QCOMPARE(restored.appearance.trayTheme, pacsmith::AppearanceMode::Light);
     QVERIFY(restored.debAssociationPrompted);
     QVERIFY(restored.selfTrackingPrompted);
 }
@@ -431,6 +435,7 @@ void CoreTests::roundTripsBackgroundUpdateCheckActivity() {
     QVERIFY(qputenv("XDG_STATE_HOME", QFile::encodeName(temporary.path())));
     pacsmith::BackgroundUpdateState state;
     state.checking = true;
+    pacsmith::BackgroundUpdateStateStore::claimActivity(state);
     state.checkingProjectId = QStringLiteral("cursor");
     state.checkingProjectName = QStringLiteral("Cursor");
     state.preparingProjectId = QStringLiteral("cursor");
@@ -444,6 +449,8 @@ void CoreTests::roundTripsBackgroundUpdateCheckActivity() {
     const auto restored = pacsmith::BackgroundUpdateStateStore::load(&error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(restored.checking);
+    QCOMPARE(restored.activityProcessId, state.activityProcessId);
+    QCOMPARE(restored.activityProcessStartTicks, state.activityProcessStartTicks);
     QCOMPARE(restored.checkingProjectId, QStringLiteral("cursor"));
     QCOMPARE(restored.checkingProjectName, QStringLiteral("Cursor"));
     QCOMPARE(restored.preparingProjectId, QStringLiteral("cursor"));
@@ -452,6 +459,16 @@ void CoreTests::roundTripsBackgroundUpdateCheckActivity() {
     QCOMPARE(restored.preparationBytesReceived, static_cast<qint64>(12 * 1024 * 1024));
     QCOMPARE(restored.preparationBytesTotal, static_cast<qint64>(40 * 1024 * 1024));
     QCOMPARE(restored.message, QStringLiteral("Checking Cursor for updates"));
+
+    state.activityProcessId = 0;
+    state.activityProcessStartTicks = 0;
+    QVERIFY2(pacsmith::BackgroundUpdateStateStore::save(state, &error), qPrintable(error));
+    const auto orphaned = pacsmith::BackgroundUpdateStateStore::load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!orphaned.checking);
+    QCOMPARE(orphaned.activityProcessId, static_cast<qint64>(0));
+    QVERIFY(orphaned.checkingProjectId.isEmpty());
+    QVERIFY(orphaned.preparingProjectId.isEmpty());
     if (previous.isEmpty()) qunsetenv("XDG_STATE_HOME");
     else QVERIFY(qputenv("XDG_STATE_HOME", previous));
 }

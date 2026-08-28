@@ -133,6 +133,7 @@ RepoSettings repoSettingsFromObject(const QJsonObject &object) {
     if (settings.listenHosts.isEmpty()) settings.listenHosts.append(QStringLiteral("127.0.0.1"));
     settings.listenPort = object.value(QStringLiteral("listen_port")).toInt(8080);
     settings.advertisedUrl = object.value(QStringLiteral("advertised_url")).toString();
+    settings.stableEnabled = object.value(QStringLiteral("stable_enabled")).toBool();
     settings.soakSeconds = object.value(QStringLiteral("soak_seconds")).toInteger(2592000);
     settings.packageNamePrefix = object.value(QStringLiteral("package_name_prefix")).toString();
     settings.trustMode = object.value(QStringLiteral("trust_mode")).toString();
@@ -159,6 +160,7 @@ QJsonObject repoSettingsToObject(const RepoSettings &settings) {
         {QStringLiteral("listen_hosts"), jsonStringArray(settings.listenHosts)},
         {QStringLiteral("listen_port"), settings.listenPort},
         {QStringLiteral("advertised_url"), settings.advertisedUrl},
+        {QStringLiteral("stable_enabled"), settings.stableEnabled},
         {QStringLiteral("soak_seconds"), settings.soakSeconds},
         {QStringLiteral("package_name_prefix"), settings.packageNamePrefix},
     };
@@ -174,13 +176,16 @@ LibraryClient::LibraryClient(ConnectionConfig config)
     : config_(std::move(config)), transport_(config_) {}
 
 QList<Project> LibraryClient::list(QString *error) const {
-    const auto object = getJson(QStringLiteral("/api/v1/projects"), error);
+    const auto object = getJson(QStringLiteral("/api/v1/projects?summary=1"), error);
     if (!object) return {};
+    QString packageError;
+    const auto installed = ManagedPackageRegistry::snapshot(&packageError);
+    if (!packageError.isEmpty() && error != nullptr && error->isEmpty()) *error = packageError;
     QList<Project> projects;
     const auto array = object->value(QStringLiteral("projects")).toArray();
     for (const auto &entry : array) {
         auto project = projectFromObject(*this, entry.toObject(), false);
-        static_cast<void>(reconcileInstalled(project, nullptr));
+        static_cast<void>(reconcileInstalled(project, installed, nullptr));
         projects.append(std::move(project));
     }
     return projects;
@@ -358,11 +363,12 @@ bool LibraryClient::deleteFile(const QString &releaseId, const QString &name,
     return true;
 }
 
-std::optional<JobStatus> LibraryClient::startBuild(const QString &releaseId, QString *error) const {
+std::optional<JobStatus> LibraryClient::startBuild(const QString &releaseId, QString *error,
+                                                   const bool automatic) const {
     const auto accepted = sendJson(QStringLiteral("POST"),
                                    QStringLiteral("/api/v1/releases/") + releaseId +
                                        QStringLiteral("/builds"),
-                                   {}, error, 202);
+                                   {{QStringLiteral("automatic"), automatic}}, error, 202);
     if (!accepted) return std::nullopt;
     JobStatus job;
     job.id = accepted->value(QStringLiteral("job_id")).toString();
@@ -382,6 +388,28 @@ std::optional<JobStatus> LibraryClient::getJob(const QString &jobId, QString *er
     job.error = object->value(QStringLiteral("error")).toString();
     job.result = object->value(QStringLiteral("result")).toObject();
     return job;
+}
+
+QList<JobStatus> LibraryClient::activeJobs(const QString &kind, QString *error) const {
+    const auto encoded = QString::fromUtf8(QUrl::toPercentEncoding(kind));
+    const auto object = getJson(QStringLiteral("/api/v1/jobs?kind=") + encoded, error);
+    if (!object) return {};
+    QList<JobStatus> result;
+    for (const auto &entry : object->value(QStringLiteral("jobs")).toArray()) {
+        const auto value = entry.toObject();
+        JobStatus job;
+        job.id = value.value(QStringLiteral("id")).toString();
+        job.kind = value.value(QStringLiteral("kind")).toString();
+        job.status = value.value(QStringLiteral("status")).toString();
+        job.projectId = value.value(QStringLiteral("project_id")).toString();
+        job.projectName = value.value(QStringLiteral("project_name")).toString();
+        job.packageName = value.value(QStringLiteral("package_name")).toString();
+        job.releaseId = value.value(QStringLiteral("release_id")).toString();
+        job.error = value.value(QStringLiteral("error")).toString();
+        job.result = value.value(QStringLiteral("result")).toObject();
+        result.append(std::move(job));
+    }
+    return result;
 }
 
 std::optional<JobStatus> LibraryClient::waitForJob(const QString &jobId, QString *error) const {
@@ -545,8 +573,7 @@ void LibrarySettings::applyTo(AppSettings &settings) const {
     settings.updates.weekDay = weekDay;
     settings.updates.localTime = localTime;
     settings.updates.automaticallyPrepare = automaticallyPrepare;
-    settings.updates.retainedPackageVersions = retainedPackageVersions;
-    settings.updates.retainedCompleteReleases = retainedCompleteReleases;
+    settings.updates.retentionVersions = retentionVersions;
 }
 
 LibrarySettings librarySettingsFromObject(const QJsonObject &object) {
@@ -559,11 +586,13 @@ LibrarySettings librarySettingsFromObject(const QJsonObject &object) {
     settings.localTime = QTime(std::clamp(updates.value(QStringLiteral("hour")).toInt(2), 0, 23),
                                std::clamp(updates.value(QStringLiteral("minute")).toInt(0), 0, 59));
     settings.automaticallyPrepare = updates.value(QStringLiteral("automatically_prepare")).toBool();
-    const auto cleanup = object.value(QStringLiteral("cleanup")).toObject();
-    settings.retainedPackageVersions =
-        std::max(-1, cleanup.value(QStringLiteral("retained_package_versions")).toInt(2));
-    settings.retainedCompleteReleases =
-        std::max(-1, cleanup.value(QStringLiteral("retained_complete_releases")).toInt(3));
+    settings.retentionVersions =
+        std::max(-1, updates.value(QStringLiteral("retention_versions")).toInt(2));
+    const auto build = object.value(QStringLiteral("build")).toObject();
+    settings.availableBuildCores =
+        std::max(1, build.value(QStringLiteral("available_cores")).toInt(1));
+    settings.buildParallelism = std::clamp(
+        build.value(QStringLiteral("parallelism")).toInt(1), 1, settings.availableBuildCores);
     return settings;
 }
 
@@ -576,11 +605,10 @@ QJsonObject librarySettingsToObject(const LibrarySettings &settings) {
                      {QStringLiteral("weekday"), settings.weekDay},
                      {QStringLiteral("hour"), settings.localTime.hour()},
                      {QStringLiteral("minute"), settings.localTime.minute()},
-                     {QStringLiteral("automatically_prepare"), settings.automaticallyPrepare}}},
-        {QStringLiteral("cleanup"),
-         QJsonObject{{QStringLiteral("retained_package_versions"), settings.retainedPackageVersions},
-                     {QStringLiteral("retained_complete_releases"),
-                      settings.retainedCompleteReleases}}},
+                     {QStringLiteral("automatically_prepare"), settings.automaticallyPrepare},
+                     {QStringLiteral("retention_versions"), settings.retentionVersions}}},
+        {QStringLiteral("build"),
+         QJsonObject{{QStringLiteral("parallelism"), settings.buildParallelism}}},
     };
 }
 
@@ -663,12 +691,15 @@ std::optional<ProjectRepository> LibraryClient::projectRepo(const QString &proje
 }
 
 std::optional<ProjectRepository> LibraryClient::saveProjectRepo(const QString &projectId,
-                                                               bool publish,
+                                                               bool publish, bool automaticSoak,
+                                                               qint64 soakSecondsOverride,
                                                                const QString &packageNameOverride,
                                                                qint64 revision,
                                                                QString *error) const {
     QJsonObject body{{QStringLiteral("revision"), revision},
                      {QStringLiteral("publish"), publish},
+                     {QStringLiteral("automatic_soak"), automaticSoak},
+                     {QStringLiteral("soak_seconds_override"), soakSecondsOverride},
                      {QStringLiteral("package_name_override"), packageNameOverride}};
     const auto object = sendJson(QStringLiteral("PATCH"),
                                  QStringLiteral("/api/v1/projects/") + projectId +
@@ -762,19 +793,25 @@ bool LibraryClient::deleteCredential(const QString &name, QString *error) const 
 }
 
 bool LibraryClient::reconcileInstalled(Project &project, QString *error) const {
-    QString queryError;
-    const auto installed = ProjectStore::queryInstalledVersion(project.archPackageName, &queryError);
-    if (!installed) {
-        if (error != nullptr) *error = queryError;
-        return queryError.isEmpty();
+    QString packageError;
+    const auto packages = ManagedPackageRegistry::snapshot(&packageError);
+    if (!packageError.isEmpty()) {
+        if (error != nullptr) *error = packageError;
+        return false;
     }
-    project.installedVersion = *installed;
+    return reconcileInstalled(project, packages, error);
+}
+
+bool LibraryClient::reconcileInstalled(
+    Project &project, const QHash<QString, ManagedPackageInfo> &packages, QString *error) const {
+    Q_UNUSED(error);
+    const auto installed = packages.constFind(project.archPackageName);
+    project.installedVersion = installed == packages.cend() ? QString{} : installed->packageVersion;
     project.installedReleaseId.clear();
     project.externallyInstalled = false;
     if (project.installedVersion.isEmpty()) return true;
-    const auto managed = ManagedPackageRegistry::find(project.archPackageName, &queryError);
-    if (managed && managed->projectId() == project.id) {
-        project.installedReleaseId = managed->releaseId();
+    if (installed->projectId() == project.id) {
+        project.installedReleaseId = installed->releaseId();
     } else {
         project.externallyInstalled = true;
     }
@@ -1046,10 +1083,12 @@ PackageRelease *LibraryClient::recordDiscoveredRelease(
     const QString &filename, const QString &sha256, const QString &downloadUrl,
     QString *error, qint64 providerReleaseId, qint64 providerAssetId,
     const QString &providerTag, const QString &publisherDigest, bool providerPrerelease) const {
-    for (auto &existing : project.releases) {
+    for (const auto &existing : project.releases) {
         if (existing.sourceSha256 == sha256 ||
             (existing.debian.version == version && existing.sourceSha256.isEmpty())) {
-            return &existing;
+            const auto existingId = existing.id;
+            if (!save(project, error)) return nullptr;
+            return project.release(existingId);
         }
     }
     PackageRelease discovered = tracker;
@@ -1081,12 +1120,17 @@ PackageRelease *LibraryClient::recordDiscoveredRelease(
     return &project.releases.last();
 }
 
-CleanupResult LibraryClient::cleanup(Project &project, const RetentionPolicy &, QString *error) const {
+CleanupResult LibraryClient::cleanup(QString *error) const {
     CleanupResult result;
-    result.skipped = true;
-    result.message = QStringLiteral("Retention cleanup runs on pacsmithd and is not a client filesystem walk.");
-    static_cast<void>(project);
-    static_cast<void>(error);
+    const auto response = transport_.request(QStringLiteral("POST"), QStringLiteral("/api/v1/cleanup"));
+    if (isError(response, error) || response.status != 200) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = apiError(response.body, QStringLiteral("could not clean up outdated versions"));
+        }
+        result.skipped = true;
+        return result;
+    }
+    result.message = QStringLiteral("Excess outdated versions and artifacts were cleaned up.");
     return result;
 }
 

@@ -289,6 +289,44 @@ func (q *Queries) InsertUpdateSource(ctx context.Context, arg InsertUpdateSource
 	return i, err
 }
 
+const listBuildArtifactsForBuild = `-- name: ListBuildArtifactsForBuild :many
+SELECT artifacts.id, artifacts.sha256, artifacts.size_bytes, artifacts.original_filename, artifacts.kind, artifacts.created_at
+FROM build_artifacts
+JOIN artifacts ON artifacts.id = build_artifacts.artifact_id
+WHERE build_artifacts.build_id = ?
+ORDER BY artifacts.created_at, artifacts.id
+`
+
+func (q *Queries) ListBuildArtifactsForBuild(ctx context.Context, buildID string) ([]Artifact, error) {
+	rows, err := q.db.QueryContext(ctx, listBuildArtifactsForBuild, buildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artifact
+	for rows.Next() {
+		var i Artifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sha256,
+			&i.SizeBytes,
+			&i.OriginalFilename,
+			&i.Kind,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listBuildsForRelease = `-- name: ListBuildsForRelease :many
 SELECT id, release_id, status, log_text, started_at, finished_at FROM builds WHERE release_id = ? ORDER BY started_at
 `
@@ -323,38 +361,6 @@ func (q *Queries) ListBuildsForRelease(ctx context.Context, releaseID string) ([
 	return items, nil
 }
 
-const listBuildArtifactsForBuild = `-- name: ListBuildArtifactsForBuild :many
-SELECT artifacts.id, artifacts.sha256, artifacts.size_bytes, artifacts.original_filename, artifacts.kind, artifacts.created_at
-FROM build_artifacts
-JOIN artifacts ON artifacts.id = build_artifacts.artifact_id
-WHERE build_artifacts.build_id = ?
-ORDER BY artifacts.created_at, artifacts.id
-`
-
-func (q *Queries) ListBuildArtifactsForBuild(ctx context.Context, buildID string) ([]Artifact, error) {
-	rows, err := q.db.QueryContext(ctx, listBuildArtifactsForBuild, buildID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Artifact
-	for rows.Next() {
-		var i Artifact
-		if err := rows.Scan(&i.ID, &i.Sha256, &i.SizeBytes, &i.OriginalFilename,
-			&i.Kind, &i.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listReleaseArtifacts = `-- name: ListReleaseArtifacts :many
 SELECT artifact_id, role FROM release_artifacts WHERE release_id = ?
 `
@@ -374,6 +380,38 @@ func (q *Queries) ListReleaseArtifacts(ctx context.Context, releaseID string) ([
 	for rows.Next() {
 		var i ListReleaseArtifactsRow
 		if err := rows.Scan(&i.ArtifactID, &i.Role); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReleaseIconArtifacts = `-- name: ListReleaseIconArtifacts :many
+SELECT release_id, artifact_id FROM release_artifacts WHERE role = 'icon'
+`
+
+type ListReleaseIconArtifactsRow struct {
+	ReleaseID  string `json:"release_id"`
+	ArtifactID string `json:"artifact_id"`
+}
+
+func (q *Queries) ListReleaseIconArtifacts(ctx context.Context) ([]ListReleaseIconArtifactsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReleaseIconArtifacts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReleaseIconArtifactsRow
+	for rows.Next() {
+		var i ListReleaseIconArtifactsRow
+		if err := rows.Scan(&i.ReleaseID, &i.ArtifactID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

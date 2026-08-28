@@ -22,17 +22,20 @@ type HistoryEntry struct {
 }
 
 type Project struct {
-	ID              string         `json:"id"`
-	Revision        int64          `json:"revision"`
-	DisplayName     string         `json:"displayName"`
-	ArchPackageName string         `json:"archPackageName"`
-	VendorName      string         `json:"vendorName"`
-	SourceIdentity  string         `json:"sourceIdentity"`
-	IconSha256      string         `json:"iconSha256"`
-	History         []HistoryEntry `json:"history"`
-	CreatedAt       string         `json:"createdAt"`
-	ModifiedAt      string         `json:"modifiedAt"`
-	Releases        []Release      `json:"releases,omitempty"`
+	ID                   string         `json:"id"`
+	Revision             int64          `json:"revision"`
+	DisplayName          string         `json:"displayName"`
+	ArchPackageName      string         `json:"archPackageName"`
+	VendorName           string         `json:"vendorName"`
+	SourceIdentity       string         `json:"sourceIdentity"`
+	IconSha256           string         `json:"iconSha256"`
+	History              []HistoryEntry `json:"history"`
+	CreatedAt            string         `json:"createdAt"`
+	ModifiedAt           string         `json:"modifiedAt"`
+	Releases             []Release      `json:"releases,omitempty"`
+	RepoPublish          bool           `json:"-"`
+	RepoPkgnameOverride  string         `json:"-"`
+	RepoPublishedPkgname string         `json:"-"`
 }
 
 type Release struct {

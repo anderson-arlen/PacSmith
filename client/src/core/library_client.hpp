@@ -2,6 +2,7 @@
 
 #include "core/http_transport.hpp"
 #include "core/import_progress.hpp"
+#include "core/managed_package.hpp"
 #include "core/model.hpp"
 #include "core/app_settings.hpp"
 #include "core/project_store/project_store.hpp"
@@ -23,6 +24,8 @@ struct JobStatus {
     QString kind;
     QString status;
     QString projectId;
+    QString projectName;
+    QString packageName;
     QString releaseId;
     QString error;
     QJsonObject result;
@@ -71,8 +74,9 @@ struct LibrarySettings {
     int weekDay{1};
     QTime localTime{2, 0};
     bool automaticallyPrepare{false};
-    int retainedPackageVersions{2};
-    int retainedCompleteReleases{3};
+    int retentionVersions{2};
+    int buildParallelism{1};
+    int availableBuildCores{1};
 
     void applyTo(AppSettings &settings) const;
 };
@@ -83,6 +87,7 @@ struct RepoSettings {
     QStringList listenHosts{QStringLiteral("127.0.0.1")};
     int listenPort{8080};
     QString advertisedUrl;
+    bool stableEnabled{false};
     qint64 soakSeconds{2592000};
     QString packageNamePrefix;
     QString trustMode{QStringLiteral("direct")};
@@ -148,8 +153,7 @@ public:
         QString *error = nullptr, qint64 providerReleaseId = 0,
         qint64 providerAssetId = 0, const QString &providerTag = {},
         const QString &publisherDigest = {}, bool providerPrerelease = false) const;
-    [[nodiscard]] CleanupResult cleanup(Project &project, const RetentionPolicy &policy,
-                                        QString *error = nullptr) const;
+    [[nodiscard]] CleanupResult cleanup(QString *error = nullptr) const;
     [[nodiscard]] std::optional<ImportResult> reanalyzeRelease(
         const QString &releaseId, QString *error = nullptr) const;
     [[nodiscard]] std::optional<QString> readFile(const QString &releaseId, const QString &name,
@@ -162,9 +166,12 @@ public:
     [[nodiscard]] bool deleteFile(const QString &releaseId, const QString &name,
                                   qint64 revision, QString *error = nullptr) const;
     [[nodiscard]] std::optional<JobStatus> startBuild(const QString &releaseId,
-                                                      QString *error = nullptr) const;
+                                                      QString *error = nullptr,
+                                                      bool automatic = false) const;
     [[nodiscard]] std::optional<JobStatus> getJob(const QString &jobId,
                                                   QString *error = nullptr) const;
+    [[nodiscard]] QList<JobStatus> activeJobs(const QString &kind,
+                                              QString *error = nullptr) const;
     [[nodiscard]] std::optional<JobStatus> waitForJob(const QString &jobId,
                                                       QString *error = nullptr) const;
     [[nodiscard]] bool cancelJob(const QString &jobId, QString *error = nullptr) const;
@@ -200,7 +207,8 @@ public:
     [[nodiscard]] std::optional<ProjectRepository> projectRepo(const QString &projectId,
                                                               QString *error = nullptr) const;
     [[nodiscard]] std::optional<ProjectRepository> saveProjectRepo(const QString &projectId,
-                                                                  bool publish,
+                                                                  bool publish, bool automaticSoak,
+                                                                  qint64 soakSecondsOverride,
                                                                   const QString &packageNameOverride,
                                                                   qint64 revision,
                                                                   QString *error = nullptr) const;
@@ -222,6 +230,9 @@ public:
     [[nodiscard]] const ConnectionConfig &config() const noexcept { return config_; }
 
 private:
+    [[nodiscard]] bool reconcileInstalled(
+        Project &project, const QHash<QString, ManagedPackageInfo> &packages,
+        QString *error = nullptr) const;
     [[nodiscard]] std::optional<QJsonObject> getJson(const QString &path, QString *error) const;
     [[nodiscard]] std::optional<QJsonObject> sendJson(const QString &method, const QString &path,
                                                       const QJsonObject &body,

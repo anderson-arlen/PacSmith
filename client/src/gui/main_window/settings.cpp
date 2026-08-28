@@ -1,4 +1,6 @@
 #include "gui/main_window/common.hpp"
+#include "gui/future_button_guard.hpp"
+#include "gui/appearance.hpp"
 
 namespace pacsmith::gui {
 namespace {
@@ -108,6 +110,17 @@ bool sameListenTarget(const ListenSettings &left, const ListenSettings &right) {
            normalizedListenHosts(left.hosts) == normalizedListenHosts(right.hosts);
 }
 
+void populateAppearanceModes(QComboBox *combo, const AppearanceMode selected) {
+    combo->addItem(QStringLiteral("Auto"), QStringLiteral("auto"));
+    combo->addItem(QStringLiteral("Light"), QStringLiteral("light"));
+    combo->addItem(QStringLiteral("Dark"), QStringLiteral("dark"));
+    combo->setCurrentIndex(combo->findData(appearanceModeName(selected)));
+}
+
+AppearanceMode selectedAppearanceMode(const QComboBox *combo) {
+    return appearanceModeFromName(combo->currentData().toString());
+}
+
 QStringList selectedListenHosts(const QListWidget *list) {
     QStringList hosts;
     if (list == nullptr) return {QStringLiteral("0.0.0.0")};
@@ -188,6 +201,15 @@ void MainWindow::showSettings() {
 
     auto *generalPage = new QWidget(settingsTabs);
     auto *generalLayout = new QVBoxLayout(generalPage);
+    auto *appearanceGroup = new QGroupBox(QStringLiteral("Appearance"), generalPage);
+    auto *appearanceForm = new QFormLayout(appearanceGroup);
+    auto *interfaceTheme = new QComboBox(appearanceGroup);
+    auto *trayTheme = new QComboBox(appearanceGroup);
+    populateAppearanceModes(interfaceTheme, appSettings_.appearance.interfaceTheme);
+    populateAppearanceModes(trayTheme, appSettings_.appearance.trayTheme);
+    appearanceForm->addRow(QStringLiteral("Interface theme"), interfaceTheme);
+    appearanceForm->addRow(QStringLiteral("System tray theme"), trayTheme);
+    generalLayout->addWidget(appearanceGroup);
     auto *sessionGroup = new QGroupBox(QStringLiteral("This machine"), generalPage);
     auto *sessionLayout = new QVBoxLayout(sessionGroup);
     sessionLayout->addWidget(
@@ -420,7 +442,12 @@ void MainWindow::showSettings() {
     updatesForm->addRow(
         settingsSectionHelp(scheduleGroup, QStringLiteral("The schedule is stored on the library daemon."),
                             QStringLiteral("Each project release still owns its own update source. This "
-                                           "schedule is shared by every client of this library.")));
+                                           "schedule is shared by every client of this library. When automatic "
+                                           "handling is enabled, PacSmith carries forward the reviewed package "
+                                           "configuration and builds only when dependencies, lifecycle behavior, "
+                                           "and all structured review checks remain unchanged. Successful builds "
+                                           "are published to the project's unstable repository channel. PacSmith "
+                                           "never installs an update automatically.")));
     auto *backgroundEnabled = new QCheckBox(QStringLiteral("Check for updates periodically"), scheduleGroup);
     backgroundEnabled->setChecked(appSettings_.updates.enabled);
     auto *schedule = new QComboBox(scheduleGroup);
@@ -437,15 +464,30 @@ void MainWindow::showSettings() {
     updatesForm->addRow(QStringLiteral("Frequency"), schedule);
     updatesForm->addRow(QStringLiteral("Weekday"), weekday);
     updatesForm->addRow(QStringLiteral("Local time"), checkTime);
-    updatesLayout->addWidget(scheduleGroup);
-    auto *behaviorGroup = new QGroupBox(QStringLiteral("When updates are found"), updatesPage);
-    auto *behaviorForm = new QFormLayout(behaviorGroup);
-    auto *automaticPrepare = new QCheckBox(QStringLiteral("Download and prepare newly discovered "
-                                                          "vendor artifacts automatically"),
-                                           behaviorGroup);
+    auto *automaticPrepare = new QCheckBox(
+        QStringLiteral("Download, prepare, and build new updates automatically when no review is required"),
+        scheduleGroup);
     automaticPrepare->setChecked(appSettings_.updates.automaticallyPrepare);
-    behaviorForm->addRow(QString{}, automaticPrepare);
-    updatesLayout->addWidget(behaviorGroup);
+    updatesForm->addRow(QString{}, automaticPrepare);
+    updatesLayout->addWidget(scheduleGroup);
+
+    auto *retentionGroup = new QGroupBox(QStringLiteral("Retention"), updatesPage);
+    auto *retentionForm = new QFormLayout(retentionGroup);
+    retentionForm->addRow(settingsSectionHelp(
+        retentionGroup,
+        QStringLiteral("Keep a rollback tail behind each package's oldest distribution-channel version."),
+        QStringLiteral("When Stable has a published version, completed releases older than Stable are outdated. "
+                       "Otherwise, completed releases older than Unstable are outdated. Versions from Stable "
+                       "through Unstable remain protected, even when repository HTTP serving is off. PacSmith "
+                       "removes each excess outdated version's source artifact and built packages together.")));
+    auto *retentionVersions = new QSpinBox(retentionGroup);
+    retentionVersions->setRange(-1, 1000);
+    retentionVersions->setSuffix(QStringLiteral(" versions"));
+    retentionVersions->setSpecialValueText(QStringLiteral("Forever"));
+    retentionVersions->setValue(appSettings_.updates.retentionVersions);
+    retentionForm->addRow(QStringLiteral("Keep outdated versions per package"), retentionVersions);
+    updatesLayout->addWidget(retentionGroup);
+
     auto *checkNow = new QPushButton(QStringLiteral("Check Now"), updatesPage);
     auto *serviceStatus = new QLabel(updatesPage);
     serviceStatus->setWordWrap(true);
@@ -454,24 +496,24 @@ void MainWindow::showSettings() {
     updatesLayout->addStretch();
     settingsTabs->addTab(updatesPage, QStringLiteral("Updates"));
 
-    auto *cleanupPage = new QWidget(settingsTabs);
-    auto *cleanupLayout = new QVBoxLayout(cleanupPage);
-    auto *cleanupGroup = new QGroupBox(QStringLiteral("Cleanup"), cleanupPage);
-    auto *cleanupForm = new QFormLayout(cleanupGroup);
-    cleanupForm->addRow(settingsSectionHelp(cleanupGroup,
-                                            QStringLiteral("Retention is a library policy on the daemon."),
-                                            QStringLiteral("These counts apply to versions older than the currently "
-                                                           "installed PacSmith release. "
-                                                           "Complete-release retention cannot be lower than artifact "
-                                                           "retention.")));
-    auto *retainedPackages = new QSpinBox(cleanupPage);
-    retainedPackages->setRange(-1, 50);
-    retainedPackages->setSpecialValueText(QStringLiteral("Unlimited"));
-    retainedPackages->setValue(appSettings_.updates.retainedPackageVersions);
-    auto *retainedReleases = new QSpinBox(cleanupPage);
-    retainedReleases->setRange(-1, 50);
-    retainedReleases->setSpecialValueText(QStringLiteral("Unlimited"));
-    retainedReleases->setValue(appSettings_.updates.retainedCompleteReleases);
+    auto *buildsPage = new QWidget(settingsTabs);
+    auto *buildsLayout = new QVBoxLayout(buildsPage);
+    auto *buildsGroup = new QGroupBox(QStringLiteral("Package builds"), buildsPage);
+    auto *buildsForm = new QFormLayout(buildsGroup);
+    buildsForm->addRow(settingsSectionHelp(
+        buildsGroup, QStringLiteral("Compile parallelism is stored on the library daemon."),
+        QStringLiteral("The limit applies to builds started after it is saved. More jobs can shorten "
+                       "source builds, but they also increase CPU and memory use on the library host.")));
+    auto *buildParallelism = new QSpinBox(buildsGroup);
+    buildParallelism->setRange(1, 1);
+    buildParallelism->setValue(1);
+    buildsForm->addRow(QStringLiteral("Parallel compile jobs"), buildParallelism);
+    auto *availableBuildCores = new QLabel(QStringLiteral("Loading..."), buildsGroup);
+    buildsForm->addRow(QStringLiteral("Available on library host"), availableBuildCores);
+    buildsLayout->addWidget(buildsGroup);
+    buildsLayout->addStretch();
+    settingsTabs->addTab(buildsPage, QStringLiteral("Builds"));
+
     bool applyingLibraryFields = false;
     bool libraryFieldsDirty = false;
     const auto markLibraryDirty = [&] {
@@ -487,15 +529,10 @@ void MainWindow::showSettings() {
                      [&](const QTime &) { markLibraryDirty(); });
     QObject::connect(automaticPrepare, &QCheckBox::toggled, &dialog,
                      [&](bool) { markLibraryDirty(); });
-    QObject::connect(retainedPackages, &QSpinBox::valueChanged, &dialog,
+    QObject::connect(retentionVersions, &QSpinBox::valueChanged, &dialog,
                      [&](int) { markLibraryDirty(); });
-    QObject::connect(retainedReleases, &QSpinBox::valueChanged, &dialog,
+    QObject::connect(buildParallelism, &QSpinBox::valueChanged, &dialog,
                      [&](int) { markLibraryDirty(); });
-    cleanupForm->addRow(QStringLiteral("Old package artifacts"), retainedPackages);
-    cleanupForm->addRow(QStringLiteral("Old complete releases"), retainedReleases);
-    cleanupLayout->addWidget(cleanupGroup);
-    cleanupLayout->addStretch();
-    settingsTabs->addTab(cleanupPage, QStringLiteral("Cleanup"));
 
     auto *repoScroll = new QScrollArea(settingsTabs);
     repoScroll->setWidgetResizable(true);
@@ -573,6 +610,14 @@ void MainWindow::showSettings() {
     auto *repoPolicyGroup = new QGroupBox(QStringLiteral("Publication"), repoPage);
     auto *repoPolicyForm = new QFormLayout(repoPolicyGroup);
     configureRepositoryForm(repoPolicyForm);
+    auto *repoStableEnabled = new QCheckBox(QStringLiteral("Add a Stable channel"), repoPolicyGroup);
+    auto *repoSoakHelp = settingsSectionHelp(
+        repoPolicyGroup,
+        QStringLiteral("Stable adds a second repository channel. Each project can then use manual promotion or "
+                       "automatically promote after this default soak period."),
+        QStringLiteral("A newer upstream release does not reset an older version's soak. A project can override "
+                       "this duration. Stable is never automatically downgraded."));
+    auto *repoSoakLabel = new QLabel(QStringLiteral("Default soak duration"), repoPolicyGroup);
     auto *repoSoakDays = new QSpinBox(repoPolicyGroup);
     repoSoakDays->setRange(0, 3650);
     repoSoakDays->setSuffix(QStringLiteral(" days"));
@@ -580,18 +625,11 @@ void MainWindow::showSettings() {
     auto *repoPrefixEnabled = new QCheckBox(QStringLiteral("Prefix published package names"), repoPolicyGroup);
     auto *repoPrefixEdit = new QLineEdit(repoPolicyGroup);
     repoPrefixEdit->setPlaceholderText(QStringLiteral("pacsmith-"));
-    repoPolicyForm->addRow(
-        settingsSectionHelp(repoPolicyGroup,
-                            QStringLiteral("Each upstream version has its own soak timer. Rebuilding the same "
-                                           "upstream version resets only that version's timer."),
-                            QStringLiteral("A newer upstream release does not reset an older version's soak. "
-                                           "When a candidate finishes soaking it is promoted only if it would "
-                                           "advance stable; stable is never automatically downgraded. Prefixing "
-                                           "is optional. PacSmith never publishes two projects under the same "
-                                           "effective package name.")));
-    repoPolicyForm->addRow(QStringLiteral("Default stable soak"), repoSoakDays);
     repoPolicyForm->addRow(QString{}, repoPrefixEnabled);
     repoPolicyForm->addRow(QStringLiteral("Package-name prefix"), repoPrefixEdit);
+    repoPolicyForm->addRow(QString{}, repoStableEnabled);
+    repoPolicyForm->addRow(repoSoakHelp);
+    repoPolicyForm->addRow(repoSoakLabel, repoSoakDays);
     repoLayout->addWidget(repoPolicyGroup);
     QObject::connect(repoPrefixEnabled, &QCheckBox::toggled, repoPrefixEdit, &QLineEdit::setEnabled);
 
@@ -686,7 +724,7 @@ void MainWindow::showSettings() {
     auto *repoBootstrapLayout = new QVBoxLayout(repoBootstrapGroup);
     repoBootstrapLayout->addWidget(
         settingsSectionHelp(repoBootstrapGroup,
-                            QStringLiteral("Copy a bootstrap script for the selected channel. "
+                            QStringLiteral("Copy a bootstrap script for the repository channel. "
                                            "Deliver it through a channel you already trust."),
                             QStringLiteral("The advertised URL is written into the script as pacman's Server. "
                                            "Use the address consuming machines will actually fetch from, which "
@@ -701,16 +739,19 @@ void MainWindow::showSettings() {
     configureRepositoryForm(repoBootstrapForm);
     repoBootstrapForm->addRow(QStringLiteral("Advertised URL"), repoAdvertisedUrl);
     auto *repoBootstrapChannel = new QComboBox(repoBootstrapGroup);
-    repoBootstrapChannel->addItem(QStringLiteral("Stable"), QStringLiteral("stable"));
     repoBootstrapChannel->addItem(QStringLiteral("Unstable"), QStringLiteral("unstable"));
+    repoBootstrapChannel->addItem(QStringLiteral("Stable"), QStringLiteral("stable"));
+    auto *repoBootstrapOnlyChannel = new QLabel(QStringLiteral("Unstable"), repoBootstrapGroup);
     auto *copyBootstrap = new QPushButton(QStringLiteral("Copy bootstrap script"), repoBootstrapGroup);
     auto *repoBootstrapRow = new QWidget(repoBootstrapGroup);
     auto *repoBootstrapRowLayout = new QHBoxLayout(repoBootstrapRow);
     repoBootstrapRowLayout->setContentsMargins(0, 0, 0, 0);
     repoBootstrapRowLayout->setSpacing(8);
+    repoBootstrapRowLayout->addWidget(repoBootstrapOnlyChannel, 1);
     repoBootstrapRowLayout->addWidget(repoBootstrapChannel, 1);
     repoBootstrapRowLayout->addWidget(copyBootstrap);
-    repoBootstrapForm->addRow(QStringLiteral("Channel"), repoBootstrapRow);
+    auto *repoBootstrapChannelLabel = new QLabel(QStringLiteral("Channel"), repoBootstrapGroup);
+    repoBootstrapForm->addRow(repoBootstrapChannelLabel, repoBootstrapRow);
     repoBootstrapLayout->addLayout(repoBootstrapForm);
     repoLayout->addWidget(repoBootstrapGroup);
     repoLayout->addStretch(1);
@@ -736,6 +777,13 @@ void MainWindow::showSettings() {
         }
         setListeningStatus(repoBound, settings.enabled, settings.bound);
         repoAdvertisedUrl->setText(settings.advertisedUrl);
+        repoStableEnabled->setChecked(settings.stableEnabled);
+        repoSoakHelp->setVisible(settings.stableEnabled);
+        repoSoakLabel->setVisible(settings.stableEnabled);
+        repoSoakDays->setVisible(settings.stableEnabled);
+        repoBootstrapOnlyChannel->setVisible(!settings.stableEnabled);
+        repoBootstrapChannel->setVisible(settings.stableEnabled);
+        if (!settings.stableEnabled) repoBootstrapChannel->setCurrentIndex(0);
         repoSoakDays->setValue(static_cast<int>(settings.soakSeconds / 86400));
         repoPrefixEnabled->setChecked(!settings.packageNamePrefix.isEmpty());
         repoPrefixEdit->setText(settings.packageNamePrefix.isEmpty() ? QStringLiteral("pacsmith-")
@@ -756,8 +804,10 @@ void MainWindow::showSettings() {
             const auto package = settings.keyringPackage.isEmpty()
                                      ? QStringLiteral("pacsmith-keyring version %1").arg(settings.keyringVersion)
                                      : settings.keyringPackage;
-            setLinkedLabel(repoKeyringStatus, QStringLiteral("Published on stable and unstable as "
-                                                             "pacsmith-keyring version %1<br>")
+            setLinkedLabel(repoKeyringStatus, QStringLiteral("Published on %1 as pacsmith-keyring version %2<br>")
+                                                      .arg(settings.stableEnabled
+                                                               ? QStringLiteral("Stable and Unstable")
+                                                               : QStringLiteral("Unstable"))
                                                       .arg(settings.keyringVersion) +
                                                   htmlLink(settings.keyringUrl, package));
         } else if (settings.keyringVersion > 0) {
@@ -844,6 +894,17 @@ void MainWindow::showSettings() {
                      [&](QListWidgetItem *) { markRepoDirty(); });
     QObject::connect(repoAdvertisedUrl, &QLineEdit::textEdited, &dialog,
                      [&](const QString &) { markRepoDirty(); });
+    QObject::connect(repoStableEnabled, &QCheckBox::toggled, &dialog,
+                     [&, repoSoakHelp, repoSoakLabel, repoSoakDays,
+                      repoBootstrapOnlyChannel, repoBootstrapChannel](bool enabled) {
+        repoSoakHelp->setVisible(enabled);
+        repoSoakLabel->setVisible(enabled);
+        repoSoakDays->setVisible(enabled);
+        repoBootstrapOnlyChannel->setVisible(!enabled);
+        repoBootstrapChannel->setVisible(enabled);
+        if (!enabled) repoBootstrapChannel->setCurrentIndex(0);
+        markRepoDirty();
+    });
     QObject::connect(repoSoakDays, &QSpinBox::valueChanged, &dialog,
                      [&](int) { markRepoDirty(); });
     QObject::connect(repoPrefixEnabled, &QCheckBox::toggled, &dialog,
@@ -853,14 +914,15 @@ void MainWindow::showSettings() {
     QObject::connect(repoTrustMode, &QComboBox::currentIndexChanged, &dialog,
                      [&](int) { markRepoDirty(); });
 
-    auto collectRepoSettings = [&, repoEnabled, repoListenPort, repoListenInterfaces, repoAdvertisedUrl, repoSoakDays,
-                                repoPrefixEnabled, repoPrefixEdit, repoTrustMode]() {
+    auto collectRepoSettings = [&, repoEnabled, repoListenPort, repoListenInterfaces, repoAdvertisedUrl,
+                                repoStableEnabled, repoSoakDays, repoPrefixEnabled, repoPrefixEdit, repoTrustMode]() {
         RepoSettings next;
         next.revision = repo ? repo->revision : 1;
         next.enabled = repoEnabled->isChecked();
         next.listenHosts = selectedListenHosts(repoListenInterfaces);
         next.listenPort = repoListenPort->value();
         next.advertisedUrl = repoAdvertisedUrl->text().trimmed();
+        next.stableEnabled = repoStableEnabled->isChecked();
         next.soakSeconds = static_cast<qint64>(repoSoakDays->value()) * 86400;
         next.packageNamePrefix = repoPrefixEnabled->isChecked() ? repoPrefixEdit->text().trimmed() : QString{};
         next.trustMode = repoTrustMode->currentData().toString();
@@ -1022,7 +1084,9 @@ void MainWindow::showSettings() {
         pendingTable = new QTableWidget(0, 3, clientsPage);
         pendingTable->setHorizontalHeaderLabels(
             {QStringLiteral("Name"), QStringLiteral("Registration"), QStringLiteral("")});
-        pendingTable->horizontalHeader()->setStretchLastSection(true);
+        pendingTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        pendingTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        pendingTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         pendingTable->verticalHeader()->setVisible(false);
         pendingTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         pendingTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1030,7 +1094,9 @@ void MainWindow::showSettings() {
         clientsTable = new QTableWidget(0, 4, clientsPage);
         clientsTable->setHorizontalHeaderLabels(
             {QStringLiteral("Name"), QStringLiteral("Status"), QStringLiteral("Certificate"), QStringLiteral("")});
-        clientsTable->horizontalHeader()->setStretchLastSection(true);
+        clientsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        clientsTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        clientsTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         clientsTable->verticalHeader()->setVisible(false);
         clientsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         clientsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1156,25 +1222,14 @@ void MainWindow::showSettings() {
                     });
                 }
             }
-            pendingTable->resizeColumnsToContents();
-            clientsTable->resizeColumnsToContents();
             clientsError->setText(error);
             clientsError->setVisible(!error.isEmpty());
         };
-        refreshClientsTables = [&] {
-            refreshClients->setEnabled(false);
+        refreshClientsTables = [&, refreshClients] {
             clientsError->setText(QStringLiteral("Loading library clients…"));
             clientsError->setVisible(true);
             const auto config = library_.config();
-            auto *watcher = new QFutureWatcher<ClientsRefreshResult>(&dialog);
-            QObject::connect(watcher, &QFutureWatcher<ClientsRefreshResult>::finished,
-                             &dialog, [&, watcher] {
-                const auto result = watcher->result();
-                watcher->deleteLater();
-                refreshClients->setEnabled(true);
-                applyClientsTables(result.registrations, result.clients, result.error);
-            });
-            watcher->setFuture(QtConcurrent::run([config] {
+            auto future = QtConcurrent::run([config] {
                 LibraryClient client(config);
                 ClientsRefreshResult result;
                 result.registrations = client.pendingRegistrations(&result.error);
@@ -1182,7 +1237,11 @@ void MainWindow::showSettings() {
                 result.clients = client.clients(&clientError);
                 if (result.error.isEmpty()) result.error = clientError;
                 return result;
-            }));
+            });
+            watchFutureWithDisabledButton(
+                refreshClients, &dialog, std::move(future), [&](const ClientsRefreshResult &result) {
+                applyClientsTables(result.registrations, result.clients, result.error);
+            });
         };
         QObject::connect(refreshClients, &QPushButton::clicked, &dialog, refreshClientsTables);
         updateListenVisibility(info ? info->listen : ListenSettings{});
@@ -1268,6 +1327,12 @@ void MainWindow::showSettings() {
         if (checked) keepInTray->setChecked(true);
         refreshSessionControls();
     });
+    QObject::connect(interfaceTheme, &QComboBox::currentIndexChanged, &dialog, [&](int) {
+        if (!applyingClientFields) sessionDirty = true;
+    });
+    QObject::connect(trayTheme, &QComboBox::currentIndexChanged, &dialog, [&](int) {
+        if (!applyingClientFields) sessionDirty = true;
+    });
     refreshSessionControls();
 
     QObject::connect(this, &MainWindow::clientSettingsReloaded, &dialog, [&] {
@@ -1277,6 +1342,10 @@ void MainWindow::showSettings() {
                                    appSettings_.updates.startMinimized);
             startAtLogin->setChecked(appSettings_.updates.startAtLogin);
             startMinimized->setChecked(appSettings_.updates.startMinimized);
+            interfaceTheme->setCurrentIndex(
+                interfaceTheme->findData(appearanceModeName(appSettings_.appearance.interfaceTheme)));
+            trayTheme->setCurrentIndex(
+                trayTheme->findData(appearanceModeName(appSettings_.appearance.trayTheme)));
             refreshSessionControls();
         }
         if (!harnessDirty) {
@@ -1300,12 +1369,6 @@ void MainWindow::showSettings() {
     };
     QObject::connect(schedule, &QComboBox::currentIndexChanged, &dialog, [&](int) { refreshScheduleControls(); });
     QObject::connect(backgroundEnabled, &QCheckBox::toggled, &dialog, [&](bool) { refreshScheduleControls(); });
-    QObject::connect(retainedPackages, &QSpinBox::valueChanged, &dialog, [retainedReleases](const int value) {
-        if (value < 0) retainedReleases->setValue(-1);
-        else if (retainedReleases->value() >= 0 && retainedReleases->value() < value) {
-            retainedReleases->setValue(value);
-        }
-    });
     QObject::connect(checkNow, &QPushButton::clicked, &dialog, [&] {
         if (GuiInstanceServer::requestCheck()) {
             serviceStatus->setText(QStringLiteral("✓ Update check started."));
@@ -1362,8 +1425,14 @@ void MainWindow::showSettings() {
                 weekday->setCurrentIndex(std::clamp(latest.library->weekDay, 1, 7) - 1);
                 checkTime->setTime(latest.library->localTime);
                 automaticPrepare->setChecked(latest.library->automaticallyPrepare);
-                retainedPackages->setValue(latest.library->retainedPackageVersions);
-                retainedReleases->setValue(latest.library->retainedCompleteReleases);
+                retentionVersions->setValue(latest.library->retentionVersions);
+                buildParallelism->setRange(1, latest.library->availableBuildCores);
+                buildParallelism->setValue(latest.library->buildParallelism);
+                availableBuildCores->setText(
+                    latest.library->availableBuildCores == 1
+                        ? QStringLiteral("1 logical core")
+                        : QStringLiteral("%1 logical cores")
+                              .arg(latest.library->availableBuildCores));
                 refreshScheduleControls();
                 updated = true;
             }
@@ -1494,10 +1563,8 @@ void MainWindow::showSettings() {
         next.weekDay = weekday->currentIndex() + 1;
         next.localTime = checkTime->time();
         next.automaticallyPrepare = automaticPrepare->isChecked();
-        next.retainedPackageVersions = retainedPackages->value();
-        next.retainedCompleteReleases = retainedPackages->value() < 0 || retainedReleases->value() < 0
-                                            ? -1
-                                            : std::max(retainedReleases->value(), retainedPackages->value());
+        next.retentionVersions = retentionVersions->value();
+        next.buildParallelism = buildParallelism->value();
         QString error;
         auto saved = library_.saveLibrarySettings(next, &error);
         if (!saved) {
@@ -1511,6 +1578,8 @@ void MainWindow::showSettings() {
         appSettings_.updates.startAtLogin = startAtLogin->isChecked();
         appSettings_.updates.startMinimized = startMinimized->isChecked();
         appSettings_.updates.keepInTray = keepInTray->isChecked();
+        appSettings_.appearance.interfaceTheme = selectedAppearanceMode(interfaceTheme);
+        appSettings_.appearance.trayTheme = selectedAppearanceMode(trayTheme);
         appSettings_.harnessProfiles = harnessProfiles;
         if (!settingsStore_.save(appSettings_, &error) ||
             !BackgroundUpdateManager::apply(appSettings_.updates, QCoreApplication::applicationFilePath(), &error)) {
@@ -1518,6 +1587,7 @@ void MainWindow::showSettings() {
             return;
         }
         const bool runInTray = appSettings_.updates.keepInTray && QSystemTrayIcon::isSystemTrayAvailable();
+        applyInterfaceTheme(appSettings_.appearance.interfaceTheme);
         setKeepRunningInTray(runInTray);
         QApplication::setQuitOnLastWindowClosed(!runInTray);
         static_cast<void>(GuiInstanceServer::requestTray());

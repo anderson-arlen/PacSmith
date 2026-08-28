@@ -2,6 +2,7 @@
 
 #include "core/apt_update_service.hpp"
 #include "core/app_settings.hpp"
+#include "core/background_updates.hpp"
 #include "core/credential_store.hpp"
 #include "core/deb_download_service.hpp"
 #include "core/direct_url_update_service.hpp"
@@ -39,6 +40,7 @@ class QPlainTextEdit;
 class QProgressDialog;
 class QProgressBar;
 class QPushButton;
+class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
 class QTabWidget;
@@ -69,6 +71,7 @@ signals:
     void serverTopicsChanged(const QStringList &topics);
 
 protected:
+    [[nodiscard]] QSize minimumSizeHint() const override;
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
@@ -155,6 +158,10 @@ private:
     void setProjectListBusy(bool busy, const QString &message = {});
     void applyProjectList(QList<Project> projects, const QString &selectId,
                           const QString &error = {}, bool preserveCurrent = false);
+    [[nodiscard]] QListWidgetItem *projectListItem(const QString &projectId) const;
+    void updateProjectListItem(const Project &project,
+                               const BackgroundUpdateState &updateState);
+    void removeProjectListItem(const QString &projectId);
     void loadProject(const QString &id);
     void loadProjectInteractively(const QString &id);
     void applyLoadedProject(Project project);
@@ -164,9 +171,14 @@ private:
     void prefetchSigningKeys(const Project &project);
     void refreshCurrentProject();
     void handleServerEvent(const ServerEvent &event);
+    void updateBuildJobStatus(const ServerEvent &event);
+    void restoreActiveBuildJobs();
+    bool updateRepositoryDistributionStatus(const ServerEvent &event);
     void runEventRefresh();
     void applyEventProjects(QList<Project> projects, const QString &error,
-                            const QSet<QString> &topics);
+                            const QSet<QString> &topics,
+                            const QSet<QString> &missingProjectIds,
+                            bool fullRefresh);
     void reloadExternalProject();
     void showExternalChange(bool deleted);
     [[nodiscard]] bool hasUnsavedProjectDraft() const;
@@ -197,7 +209,7 @@ private:
     [[nodiscard]] QString currentPkgbuildText() const;
     void saveInstallMapping();
     void populateDependencies();
-    void loadRepositoryPackageCatalog();
+    void loadRepositoryPackageCatalog(std::function<void()> completed = {});
     void scheduleRepositoryPackageValidation(const QStringList &packages);
     void populateScripts();
     void updateSelectedScript();
@@ -259,9 +271,12 @@ private:
     void startUpdateCheck();
     void applyUpdateCheckResult(const UpdateCheckResult &result, const QString &sourceName);
     void applyRetentionCleanup();
-    void startBuild(bool installWhenSuccessful = false);
+    void startBuild(bool installWhenSuccessful = false, bool automatic = false);
     void pollBuildJob();
     void finishBuildJob();
+    void showBuildOutput();
+    [[nodiscard]] bool releaseBuildInProgress(const QString &releaseId) const;
+    [[nodiscard]] QString buildActivityForProject(const QString &projectId) const;
     void cancelRemoteBuild();
     [[nodiscard]] bool buildInProgress() const;
     [[nodiscard]] bool packageOperationInProgress() const;
@@ -302,6 +317,7 @@ private:
     void showSettings();
     void showConnectionDialog();
     void refreshConnectionStatus();
+    void refreshConnectionStatus(std::function<void()> completed);
     void applyLibrarySettings(const LibrarySettings &settings);
     void reloadClientSettings();
     [[nodiscard]] QString sessionCredential(const QString &name) const;
@@ -323,12 +339,18 @@ private:
     qint64 librarySettingsRevision_{1};
     QFileSystemWatcher *clientSettingsWatcher_{nullptr};
     QTimer *clientSettingsReloadTimer_{nullptr};
+    QFileSystemWatcher *pacmanDatabaseWatcher_{nullptr};
+    QTimer *pacmanDatabaseReloadTimer_{nullptr};
     LibraryEventStream *libraryEventStream_{nullptr};
     QTimer *eventRefreshTimer_{nullptr};
     QSet<QString> pendingEventTopics_;
+    QSet<QString> pendingEventProjectIds_;
+    bool pendingFullEventRefresh_{false};
     bool eventRefreshInFlight_{false};
     bool eventRefreshAgain_{false};
     bool applyingServerRefresh_{false};
+    QHash<QString, QString> repositoryDistributionJobs_;
+    QHash<QString, QString> repositoryDistributionJobProjects_;
     bool projectStale_{false};
     bool pendingExternalDeletion_{false};
     std::optional<Project> pendingExternalProject_;
@@ -349,7 +371,13 @@ private:
     InstallService installService_;
     bool installPreparationInFlight_{false};
     bool packageOperationFinishInFlight_{false};
+    bool retentionCleanupInFlight_{false};
     QString buildJobId_;
+    QString buildProjectId_;
+    QString buildReleaseId_;
+    QString buildProjectName_;
+    QString buildLogContents_;
+    QHash<QString, ServerEvent> activeBuildJobs_;
     qint64 buildLogAfter_{0};
     QTimer *buildPollTimer_{nullptr};
     bool buildPollInFlight_{false};
@@ -373,6 +401,8 @@ private:
     QTimer *preparationSpinnerTimer_{nullptr};
     QString preparingProjectId_;
     QString preparingReleaseId_;
+    QString preparationSourceReleaseId_;
+    bool automaticPreparationBuild_{false};
     QString preparationPhase_;
     qint64 preparationBytesReceived_{0};
     qint64 preparationBytesTotal_{-1};
@@ -434,6 +464,7 @@ private:
     QLabel *overviewIcon_{nullptr};
     QLabel *overviewChecklist_{nullptr};
     QLabel *projectStateLabel_{nullptr};
+    QLabel *projectRepositoryStateLabel_{nullptr};
     QLabel *activeTrackerLabel_{nullptr};
     QLabel *projectAcquisitionLabel_{nullptr};
     QLabel *projectActionNotice_{nullptr};
@@ -445,6 +476,8 @@ private:
     QPushButton *rollbackButton_{nullptr};
     QPushButton *uninstallButton_{nullptr};
     QPushButton *projectPrimaryButton_{nullptr};
+    QPushButton *projectBuildOutputButton_{nullptr};
+    QPushButton *projectBuildCancelButton_{nullptr};
     QPushButton *historyCheckUpdatesButton_{nullptr};
     QPushButton *editConfigurationButton_{nullptr};
     QPushButton *deleteReleaseButton_{nullptr};
@@ -548,21 +581,25 @@ private:
     QPushButton *updateSaveButton_{nullptr};
     QPushButton *updateCheckButton_{nullptr};
     QCheckBox *repoPublishCheck_{nullptr};
+    QWidget *repoStablePolicy_{nullptr};
+    QCheckBox *repoAutomaticSoakCheck_{nullptr};
+    QCheckBox *repoSoakOverrideCheck_{nullptr};
+    QSpinBox *repoSoakDays_{nullptr};
+    QLabel *repoSoakDefaultLabel_{nullptr};
     QLabel *repoOriginalName_{nullptr};
     QLabel *repoPrefixDefault_{nullptr};
     QLineEdit *repoOverrideEdit_{nullptr};
     QLabel *repoEffectiveName_{nullptr};
     QLabel *repoPublishedName_{nullptr};
     QLabel *repoNameWarning_{nullptr};
-    QLabel *repoUnstableLabel_{nullptr};
-    QLabel *repoStableLabel_{nullptr};
-    QTableWidget *repoSoakTable_{nullptr};
+    QTableWidget *repoChannelTable_{nullptr};
     QPushButton *repoSaveButton_{nullptr};
     QPushButton *repoPromoteButton_{nullptr};
     QLabel *repoStatusLabel_{nullptr};
     QLabel *buildChecklist_{nullptr};
     QLabel *builtPackage_{nullptr};
     QPushButton *buildButton_{nullptr};
+    QPushButton *viewBuildOutputButton_{nullptr};
     QPushButton *installButton_{nullptr};
     QPushButton *pkgbuildBuildButton_{nullptr};
     QPushButton *resultPkgbuildBuildButton_{nullptr};

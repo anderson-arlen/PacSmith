@@ -165,7 +165,7 @@ func (q *Queries) GetRepoPackageByProject(ctx context.Context, projectID sql.Nul
 }
 
 const getRepoSettings = `-- name: GetRepoSettings :one
-SELECT id, revision, enabled, listen_hosts, listen_port, advertised_url, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at FROM repo_settings WHERE id = 1
+SELECT id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at FROM repo_settings WHERE id = 1
 `
 
 func (q *Queries) GetRepoSettings(ctx context.Context) (RepoSetting, error) {
@@ -178,6 +178,7 @@ func (q *Queries) GetRepoSettings(ctx context.Context) (RepoSetting, error) {
 		&i.ListenHosts,
 		&i.ListenPort,
 		&i.AdvertisedUrl,
+		&i.StableEnabled,
 		&i.SoakSeconds,
 		&i.PackageNamePrefix,
 		&i.TrustMode,
@@ -669,6 +670,7 @@ SET revision = revision + 1,
     listen_hosts = ?,
     listen_port = ?,
     advertised_url = ?,
+    stable_enabled = ?,
     soak_seconds = ?,
     package_name_prefix = ?,
     trust_mode = ?,
@@ -686,7 +688,7 @@ SET revision = revision + 1,
     keyring_version = ?,
     modified_at = ?
 WHERE id = 1 AND revision = ?
-RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at
+RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at
 `
 
 type UpdateRepoSettingsParams struct {
@@ -694,6 +696,7 @@ type UpdateRepoSettingsParams struct {
 	ListenHosts                 string         `json:"listen_hosts"`
 	ListenPort                  int64          `json:"listen_port"`
 	AdvertisedUrl               string         `json:"advertised_url"`
+	StableEnabled               int64          `json:"stable_enabled"`
 	SoakSeconds                 int64          `json:"soak_seconds"`
 	PackageNamePrefix           string         `json:"package_name_prefix"`
 	TrustMode                   string         `json:"trust_mode"`
@@ -719,6 +722,7 @@ func (q *Queries) UpdateRepoSettings(ctx context.Context, arg UpdateRepoSettings
 		arg.ListenHosts,
 		arg.ListenPort,
 		arg.AdvertisedUrl,
+		arg.StableEnabled,
 		arg.SoakSeconds,
 		arg.PackageNamePrefix,
 		arg.TrustMode,
@@ -745,6 +749,7 @@ func (q *Queries) UpdateRepoSettings(ctx context.Context, arg UpdateRepoSettings
 		&i.ListenHosts,
 		&i.ListenPort,
 		&i.AdvertisedUrl,
+		&i.StableEnabled,
 		&i.SoakSeconds,
 		&i.PackageNamePrefix,
 		&i.TrustMode,
@@ -783,7 +788,7 @@ SET revision = revision + 1,
     keyring_version = ?,
     modified_at = ?
 WHERE id = 1
-RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at
+RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at
 `
 
 type UpdateRepoTrustParams struct {
@@ -828,6 +833,7 @@ func (q *Queries) UpdateRepoTrust(ctx context.Context, arg UpdateRepoTrustParams
 		&i.ListenHosts,
 		&i.ListenPort,
 		&i.AdvertisedUrl,
+		&i.StableEnabled,
 		&i.SoakSeconds,
 		&i.PackageNamePrefix,
 		&i.TrustMode,

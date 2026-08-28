@@ -291,10 +291,11 @@ void MainWindow::populateDependencies() {
     scheduleRepositoryPackageValidation(packagesToValidate);
 }
 
-void MainWindow::loadRepositoryPackageCatalog() {
+void MainWindow::loadRepositoryPackageCatalog(std::function<void()> completed) {
     repositoryCatalogLoaded_ = false;
     auto *watcher = new QFutureWatcher<QStringList>(this);
-    connect(watcher, &QFutureWatcher<QStringList>::finished, this, [this, watcher] {
+    connect(watcher, &QFutureWatcher<QStringList>::finished, this,
+            [this, watcher, completed = std::move(completed)] {
         repositoryPackageNames_ = watcher->result();
         watcher->deleteLater();
         repositoryPackages_ = QSet<QString>(repositoryPackageNames_.cbegin(),
@@ -319,6 +320,7 @@ void MainWindow::loadRepositoryPackageCatalog() {
                 QStringLiteral("Could not read configured pacman repositories; dependency availability checks are unavailable"),
                 10000);
         }
+        if (completed) completed();
     });
     watcher->setFuture(QtConcurrent::run([] {
         return SystemPackageQuery::repositoryPackageNames();

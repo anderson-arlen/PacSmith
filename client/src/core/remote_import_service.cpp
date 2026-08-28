@@ -21,7 +21,7 @@ bool validHttpsUrl(const QUrl &url) {
 
 QString availableAssetSuffix(const UpdateCheckResult &result) {
     if (result.availableAssets.isEmpty()) return {};
-    return QStringLiteral(" Available assets: %1. Supply asset_regex that full-matches exactly one artifact.")
+    return QStringLiteral(" Available artifacts: %1. Supply asset_regex that full-matches exactly one artifact.")
         .arg(result.availableAssets.join(QStringLiteral(", ")));
 }
 
@@ -105,7 +105,7 @@ std::optional<GitHubImportRequest> RemoteImportService::parseGitHubUrl(
     const QRegularExpression expression(request.assetRegex);
     if (!expression.isValid() || request.assetRegex.size() > 512) {
         if (error != nullptr) {
-            *error = QStringLiteral("GitHub asset regular expression is invalid or too long: %1")
+            *error = QStringLiteral("GitHub artifact regular expression is invalid or too long: %1")
                          .arg(expression.errorString());
         }
         return std::nullopt;

@@ -21,6 +21,9 @@ QWidget *MainWindow::createProjectInfoPage() {
     projectStateLabel_ = new QLabel(page);
     projectStateLabel_->setWordWrap(true);
     projectStateLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    projectRepositoryStateLabel_ = new QLabel(page);
+    projectRepositoryStateLabel_->setWordWrap(true);
+    projectRepositoryStateLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     activeTrackerLabel_ = new QLabel(page);
     activeTrackerLabel_->setWordWrap(true);
     activeTrackerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -28,6 +31,7 @@ QWidget *MainWindow::createProjectInfoPage() {
     projectAcquisitionLabel_->setWordWrap(true);
     projectAcquisitionLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     details->addWidget(projectStateLabel_);
+    details->addWidget(projectRepositoryStateLabel_);
     details->addWidget(activeTrackerLabel_);
     details->addWidget(projectAcquisitionLabel_);
 
@@ -75,7 +79,9 @@ QWidget *MainWindow::createOverviewPage() {
     releaseTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     releaseTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     releaseTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    releaseTable_->horizontalHeader()->setStretchLastSection(true);
+    releaseTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    releaseTable_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    releaseTable_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     releaseTable_->setMinimumHeight(180);
     layout->addWidget(releaseTable_, 1);
     overviewChecklist_ = new QLabel(page);
@@ -270,9 +276,9 @@ QWidget *MainWindow::createInstallPlanPage() {
     appImageInstallPlan_->setHeaderLabels(
         {QStringLiteral("Installed path"), QStringLiteral("Source"),
          QStringLiteral("Purpose")});
-    appImageInstallPlan_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    appImageInstallPlan_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-    appImageInstallPlan_->header()->setSectionResizeMode(2, QHeaderView::Stretch);
+    appImageInstallPlan_->header()->setSectionResizeMode(QHeaderView::Stretch);
+    appImageInstallPlan_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    appImageInstallPlan_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     appImageInstallPlan_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     appImageInstallPlan_->setItemsExpandable(true);
     appImageInstallPlan_->setExpandsOnDoubleClick(true);
@@ -295,11 +301,9 @@ QWidget *MainWindow::createDependenciesPage() {
     dependenciesTable_->setHorizontalHeaderLabels({QStringLiteral("Debian dependency"), QStringLiteral("Arch package"),
                                                     QStringLiteral("Status"), QStringLiteral("Source / confidence"),
                                                     QStringLiteral("Treatment")});
-    dependenciesTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    dependenciesTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    dependenciesTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    dependenciesTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
-    dependenciesTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    dependenciesTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    dependenciesTable_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    dependenciesTable_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     dependenciesTable_->verticalHeader()->setVisible(false);
     dependenciesTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     dependenciesTable_->setItemDelegateForColumn(1, new PackageNameDelegate(dependenciesTable_));
@@ -412,10 +416,9 @@ QWidget *MainWindow::createConfigScriptsPage() {
     scriptFindingsTable_->setHorizontalHeaderLabels(
         {QStringLiteral("Source script"), QStringLiteral("Responsibility"),
          QStringLiteral("Arch handling"), QStringLiteral("Provenance")});
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    scriptFindingsTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    scriptFindingsTable_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scriptFindingsTable_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     scriptFindingsTable_->verticalHeader()->setVisible(false);
     scriptFindingsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     scriptFindingsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -491,10 +494,9 @@ QWidget *MainWindow::createPayloadPage() {
     payloadTree_ = new QTreeWidget(page);
     payloadTree_->setHeaderLabels({QStringLiteral("Path"), QStringLiteral("Type"), QStringLiteral("Size"),
                                    QStringLiteral("Review")});
-    payloadTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    payloadTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    payloadTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    payloadTree_->header()->setSectionResizeMode(3, QHeaderView::Stretch);
+    payloadTree_->header()->setSectionResizeMode(QHeaderView::Stretch);
+    payloadTree_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    payloadTree_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     auto *details = new QWidget(splitter);
     auto *detailsLayout = new QVBoxLayout(details);
     payloadStatus_ = new QLabel(details);
@@ -538,12 +540,9 @@ QWidget *MainWindow::createCommandsPage() {
         {QStringLiteral("Expose"), QStringLiteral("Payload executable"),
          QStringLiteral("Command"), QStringLiteral("Destination"),
          QStringLiteral("Method"), QStringLiteral("Status")});
-    commandsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    commandsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    commandsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    commandsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
-    commandsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    commandsTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    commandsTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    commandsTable_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    commandsTable_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     commandsTable_->verticalHeader()->setVisible(false);
     commandsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     commandsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -890,6 +889,17 @@ QWidget *MainWindow::createUpdatesPage() {
     githubAssetRegex_ = new QLineEdit(page);
     githubAssetRegex_->setPlaceholderText(
         QStringLiteral("Exactly one full asset name must match, e.g. app-.*-linux-amd64\\.tar\\.gz"));
+    const QList<QWidget *> compressibleFields{
+        updateUrl_, aptSuite_, aptComponent_, aptArchitecture_, aptPackageName_,
+        rpmArchitecture_, rpmPackageName_, aptSigningKeyring_, aptSigningKeyUrl_,
+        githubOwner_, githubRepository_, githubAssetRegex_, keyUrlRow, keyringRow,
+    };
+    for (auto *field : compressibleFields) {
+        auto policy = field->sizePolicy();
+        policy.setHorizontalPolicy(QSizePolicy::Ignored);
+        field->setSizePolicy(policy);
+        field->setMinimumWidth(0);
+    }
     githubPrereleases_ = new QCheckBox(
         QStringLiteral("Track prereleases even after a stable release exists"), page);
     githubPrereleases_->setToolTip(QStringLiteral(
@@ -914,6 +924,7 @@ QWidget *MainWindow::createUpdatesPage() {
     form->addRow(QStringLiteral("GitHub repository"), githubRepository_);
     form->addRow(QStringLiteral("Asset-name regex"), githubAssetRegex_);
     form->addRow(QString{}, githubPrereleases_);
+    form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     updateNotice_ = new QLabel(page);
     updateNotice_->setWordWrap(true);
     updateCandidates_ = new QListWidget(page);
@@ -1074,6 +1085,9 @@ QWidget *MainWindow::createBuildPage() {
     buildChecklist_ = new QLabel(page);
     buildChecklist_->setWordWrap(true);
     buildButton_ = new QPushButton(QStringLiteral("Build"), page);
+    viewBuildOutputButton_ = new QPushButton(QStringLiteral("View Build Output"), page);
+    viewBuildOutputButton_->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    viewBuildOutputButton_->setVisible(false);
     installButton_ = new QPushButton(QStringLiteral("Install"), page);
     applyPrimaryActionStyle(installButton_);
     builtPackage_ = new QLabel(page);
@@ -1085,11 +1099,15 @@ QWidget *MainWindow::createBuildPage() {
     packageRow->addWidget(installButton_, 0, Qt::AlignTop);
     packageRow->addStretch(1);
     layout->addWidget(buildChecklist_);
-    layout->addWidget(buildButton_, 0, Qt::AlignLeft);
+    auto *buildActions = new QHBoxLayout;
+    buildActions->addWidget(buildButton_);
+    buildActions->addWidget(viewBuildOutputButton_);
+    buildActions->addStretch(1);
+    layout->addLayout(buildActions);
     layout->addLayout(packageRow);
     layout->addStretch(1);
     connect(buildButton_, &QPushButton::clicked, this, [this] {
-        if (buildInProgress()) {
+        if (currentRelease() != nullptr && releaseBuildInProgress(currentRelease()->id)) {
             buildButton_->setText(QStringLiteral("Canceling…"));
             buildButton_->setEnabled(false);
             cancelRemoteBuild();
@@ -1098,6 +1116,8 @@ QWidget *MainWindow::createBuildPage() {
         }
     });
     connect(installButton_, &QPushButton::clicked, this, &MainWindow::startInstall);
+    connect(viewBuildOutputButton_, &QPushButton::clicked,
+            this, &MainWindow::showBuildOutput);
     return page;
 }
 
@@ -1105,12 +1125,33 @@ QWidget *MainWindow::createRepositoryPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Publish this project's successful builds to the PacSmith pacman repository."),
+        QStringLiteral("Project-wide repository settings for every retained and future version."),
         page,
-        QStringLiteral("The PacSmith client manages packages. Consuming machines install them with ordinary pacman operations. Repository setup is not embedded in generated packages. Changing a package name after it has already been published is a migration: installed machines keep the old name until they are updated.")));
+        QStringLiteral("Enabling publication adds successful builds to Unstable. The system-wide repository settings determine whether Stable exists; when it does, this project can use manual or automatic promotion. These settings and the published package name belong to the project, not the selected release. Changing a package name after publication is a migration: installed machines keep the old name until they are updated.")));
 
-    repoPublishCheck_ = new QCheckBox(QStringLiteral("Publish successful builds to the PacSmith repository"), page);
+    repoPublishCheck_ = new QCheckBox(QStringLiteral("Publish this project's builds to the repository"), page);
     layout->addWidget(repoPublishCheck_);
+    repoStablePolicy_ = new QWidget(page);
+    auto *stablePolicyLayout = new QVBoxLayout(repoStablePolicy_);
+    stablePolicyLayout->setContentsMargins(0, 0, 0, 0);
+    repoAutomaticSoakCheck_ = new QCheckBox(
+        QStringLiteral("Automatically promote unstable builds to stable after the soak period"), page);
+    stablePolicyLayout->addWidget(repoAutomaticSoakCheck_);
+    auto *soakRow = new QHBoxLayout;
+    repoSoakOverrideCheck_ = new QCheckBox(
+        QStringLiteral("Use a project-specific soak duration"), page);
+    repoSoakDays_ = new QSpinBox(page);
+    repoSoakDays_->setRange(0, 3650);
+    repoSoakDays_->setSuffix(QStringLiteral(" days"));
+    repoSoakDays_->setSpecialValueText(QStringLiteral("Immediate"));
+    soakRow->addWidget(repoSoakOverrideCheck_);
+    soakRow->addWidget(repoSoakDays_);
+    soakRow->addStretch();
+    stablePolicyLayout->addLayout(soakRow);
+    repoSoakDefaultLabel_ = new QLabel(page);
+    repoSoakDefaultLabel_->setWordWrap(true);
+    stablePolicyLayout->addWidget(repoSoakDefaultLabel_);
+    layout->addWidget(repoStablePolicy_);
 
     auto *names = new QFormLayout;
     repoOriginalName_ = new QLabel(page);
@@ -1136,37 +1177,28 @@ QWidget *MainWindow::createRepositoryPage() {
     repoNameWarning_->setVisible(false);
     layout->addWidget(repoNameWarning_);
 
-    auto *channels = new QFormLayout;
-    repoUnstableLabel_ = new QLabel(page);
-    repoUnstableLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    repoUnstableLabel_->setWordWrap(true);
-    repoStableLabel_ = new QLabel(page);
-    repoStableLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    repoStableLabel_->setWordWrap(true);
-    channels->addRow(QStringLiteral("Current unstable"), repoUnstableLabel_);
-    channels->addRow(QStringLiteral("Current stable"), repoStableLabel_);
-    layout->addLayout(channels);
-
-    layout->addWidget(new QLabel(QStringLiteral("Active soak candidates"), page));
-    repoSoakTable_ = new QTableWidget(page);
-    repoSoakTable_->setColumnCount(5);
-    repoSoakTable_->setHorizontalHeaderLabels({QStringLiteral("Version"), QStringLiteral("Arch"),
-                                               QStringLiteral("Status"), QStringLiteral("Soak started"),
-                                               QStringLiteral("Eligible for stable")});
-    repoSoakTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    repoSoakTable_->setSelectionMode(QAbstractItemView::SingleSelection);
-    repoSoakTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    repoSoakTable_->horizontalHeader()->setStretchLastSection(true);
-    repoSoakTable_->verticalHeader()->setVisible(false);
-    repoSoakTable_->setMinimumHeight(140);
-    layout->addWidget(repoSoakTable_, 1);
+    layout->addWidget(new QLabel(QStringLiteral("Repository channels"), page));
+    repoChannelTable_ = new QTableWidget(page);
+    repoChannelTable_->setColumnCount(4);
+    repoChannelTable_->setHorizontalHeaderLabels(
+        {QStringLiteral("Channel"), QStringLiteral("Version"), QStringLiteral("Architecture"),
+         QStringLiteral("Promotion status")});
+    repoChannelTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    repoChannelTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    repoChannelTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    repoChannelTable_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    repoChannelTable_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    repoChannelTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    repoChannelTable_->verticalHeader()->setVisible(false);
+    repoChannelTable_->setMinimumHeight(120);
+    layout->addWidget(repoChannelTable_, 1);
 
     repoStatusLabel_ = new QLabel(page);
     repoStatusLabel_->setWordWrap(true);
     layout->addWidget(repoStatusLabel_);
 
     auto *buttons = new QHBoxLayout;
-    repoSaveButton_ = new QPushButton(QStringLiteral("Save Repository Settings"), page);
+    repoSaveButton_ = new QPushButton(QStringLiteral("Apply Project Repository Settings"), page);
     repoPromoteButton_ = new QPushButton(QStringLiteral("Promote to Stable"), page);
     repoPromoteButton_->setToolTip(
         QStringLiteral("Promote the newest package that would advance stable, bypassing remaining soak time. Stable is never automatically downgraded."));
@@ -1194,6 +1226,32 @@ QWidget *MainWindow::createRepositoryPage() {
             }
         }
     });
+    const auto updateChannelControls = [this] {
+        if (repoStablePolicy_ == nullptr || repoAutomaticSoakCheck_ == nullptr ||
+            repoSoakOverrideCheck_ == nullptr || repoSoakDays_ == nullptr) return;
+        const bool publishing = repoPublishCheck_->isChecked();
+        const bool stableAvailable = project_ && project_->repository.stableChannelEnabled;
+        repoStablePolicy_->setVisible(stableAvailable);
+        repoAutomaticSoakCheck_->setEnabled(publishing && stableAvailable);
+        if (!repoAutomaticSoakCheck_->isEnabled()) {
+            const QSignalBlocker blocker(repoAutomaticSoakCheck_);
+            repoAutomaticSoakCheck_->setChecked(false);
+        }
+        const bool automatic = repoAutomaticSoakCheck_->isEnabled() &&
+                               repoAutomaticSoakCheck_->isChecked();
+        repoSoakOverrideCheck_->setEnabled(automatic);
+        repoSoakDays_->setEnabled(automatic && repoSoakOverrideCheck_->isChecked());
+        if (repoStatusLabel_ != nullptr && !populating_) {
+            repoStatusLabel_->setText(
+                QStringLiteral("Project repository settings have unsaved changes."));
+        }
+    };
+    connect(repoPublishCheck_, &QCheckBox::toggled, this,
+            [updateChannelControls](const bool) { updateChannelControls(); });
+    connect(repoAutomaticSoakCheck_, &QCheckBox::toggled, this,
+            [updateChannelControls](const bool) { updateChannelControls(); });
+    connect(repoSoakOverrideCheck_, &QCheckBox::toggled, this,
+            [updateChannelControls](const bool) { updateChannelControls(); });
     return page;
 }
 

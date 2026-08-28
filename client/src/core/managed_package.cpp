@@ -35,7 +35,7 @@ QString ManagedPackageInfo::sourceIdentity() const {
     return decode(xdata.value(QStringLiteral("pacsmith.source")));
 }
 
-QList<ManagedPackageInfo> ManagedPackageRegistry::installed(QString *error) {
+QHash<QString, ManagedPackageInfo> ManagedPackageRegistry::snapshot(QString *error) {
     alpm_errno_t code = ALPM_ERR_OK;
     std::unique_ptr<alpm_handle_t, HandleDeleter> handle(
         alpm_initialize("/", "/var/lib/pacman", &code));
@@ -48,7 +48,7 @@ QList<ManagedPackageInfo> ManagedPackageRegistry::installed(QString *error) {
         if (error != nullptr) *error = QStringLiteral("libalpm could not open the local package database");
         return {};
     }
-    QList<ManagedPackageInfo> result;
+    QHash<QString, ManagedPackageInfo> result;
     for (auto *node = alpm_db_get_pkgcache(database); node != nullptr; node = alpm_list_next(node)) {
         auto *package = static_cast<alpm_pkg_t *>(node->data);
         ManagedPackageInfo info;
@@ -60,8 +60,17 @@ QList<ManagedPackageInfo> ManagedPackageRegistry::installed(QString *error) {
                 info.xdata.insert(QString::fromUtf8(data->name), QString::fromUtf8(data->value));
             }
         }
+        result.insert(info.packageName, std::move(info));
+    }
+    return result;
+}
+
+QList<ManagedPackageInfo> ManagedPackageRegistry::installed(QString *error) {
+    QList<ManagedPackageInfo> result;
+    const auto packages = snapshot(error);
+    for (const auto &info : packages) {
         if (info.xdata.value(QStringLiteral("pacsmith.schema")) == QStringLiteral("1")) {
-            result.append(std::move(info));
+            result.append(info);
         }
     }
     return result;
@@ -69,12 +78,10 @@ QList<ManagedPackageInfo> ManagedPackageRegistry::installed(QString *error) {
 
 std::optional<ManagedPackageInfo> ManagedPackageRegistry::find(const QString &packageName,
                                                                QString *error) {
-    const auto packages = installed(error);
-    const auto iterator = std::find_if(packages.cbegin(), packages.cend(), [&](const auto &candidate) {
-        return candidate.packageName == packageName;
-    });
+    const auto packages = snapshot(error);
+    const auto iterator = packages.constFind(packageName);
     if (iterator == packages.cend()) return std::nullopt;
-    return *iterator;
+    return iterator.value();
 }
 
 } // namespace pacsmith

@@ -26,6 +26,11 @@ type Build struct {
 	FinishedAt sql.NullString `json:"finished_at"`
 }
 
+type BuildArtifact struct {
+	BuildID    string `json:"build_id"`
+	ArtifactID string `json:"artifact_id"`
+}
+
 type Client struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -70,6 +75,9 @@ type LibrarySetting struct {
 	UpdatesAutoPrepare       int64  `json:"updates_auto_prepare"`
 	RetainedPackageVersions  int64  `json:"retained_package_versions"`
 	RetainedCompleteReleases int64  `json:"retained_complete_releases"`
+	RetentionDays            int64  `json:"retention_days"`
+	RetentionVersions        int64  `json:"retention_versions"`
+	BuildParallelism         int64  `json:"build_parallelism"`
 }
 
 type Project struct {
@@ -87,6 +95,13 @@ type Project struct {
 	RepoPublish          int64          `json:"repo_publish"`
 	RepoPkgnameOverride  string         `json:"repo_pkgname_override"`
 	RepoPublishedPkgname string         `json:"repo_published_pkgname"`
+}
+
+type ProjectRepoPolicy struct {
+	ProjectID           string `json:"project_id"`
+	StableEnabled       int64  `json:"stable_enabled"`
+	AutomaticSoak       int64  `json:"automatic_soak"`
+	SoakSecondsOverride int64  `json:"soak_seconds_override"`
 }
 
 type Registration struct {
@@ -164,6 +179,7 @@ type RepoSetting struct {
 	ListenHosts                 string         `json:"listen_hosts"`
 	ListenPort                  int64          `json:"listen_port"`
 	AdvertisedUrl               string         `json:"advertised_url"`
+	StableEnabled               int64          `json:"stable_enabled"`
 	SoakSeconds                 int64          `json:"soak_seconds"`
 	PackageNamePrefix           string         `json:"package_name_prefix"`
 	TrustMode                   string         `json:"trust_mode"`

@@ -3,9 +3,33 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 )
+
+func (s *Server) listActiveJobs(w http.ResponseWriter, r *http.Request) {
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "job kind is required")
+		return
+	}
+	active, err := s.Jobs.Active(r.Context(), kind)
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	for index := range active {
+		if active[index].ProjectID == "" {
+			continue
+		}
+		if project, projectErr := s.DB.Queries.GetProject(r.Context(), active[index].ProjectID); projectErr == nil {
+			active[index].ProjectName = project.DisplayName
+			active[index].PackageName = project.ArchPackageName
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": active})
+}
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	job, err := s.Jobs.Get(r.Context(), r.PathValue("id"))

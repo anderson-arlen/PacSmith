@@ -64,6 +64,8 @@ constexpr int projectSubtitleRole = Qt::UserRole + 1;
 constexpr int projectVisualStateRole = Qt::UserRole + 2;
 constexpr int projectCheckingRole = Qt::UserRole + 3;
 constexpr int projectActivityRole = Qt::UserRole + 4;
+constexpr int projectRepositoryEnabledRole = Qt::UserRole + 5;
+constexpr int projectRepositoryBusyRole = Qt::UserRole + 6;
 constexpr int sectionBaseLabelRole = Qt::UserRole + 1;
 
 enum class ProjectVisualState { NotInstalled, Current, UpdateAvailable, Attention, Preparing };

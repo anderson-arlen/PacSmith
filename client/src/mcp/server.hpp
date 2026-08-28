@@ -18,6 +18,8 @@ private:
     QJsonObject handleRequest(const QJsonObject &request);
     QJsonObject callTool(const QJsonValue &id, const QJsonObject &params);
     bool confirm(const QString &toolName, const QString &target, QString *error);
+    bool confirm(const QString &toolName, const QString &target, const QString &message,
+                 QString *error);
     bool writeMessage(const QJsonObject &message);
     std::optional<QJsonObject> readMessage();
 

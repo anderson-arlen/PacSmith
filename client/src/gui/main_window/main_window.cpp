@@ -26,8 +26,7 @@ bool sameBackgroundSettings(const BackgroundUpdateSettings &left,
            left.daily == right.daily && left.weekDay == right.weekDay &&
            left.localTime == right.localTime &&
            left.automaticallyPrepare == right.automaticallyPrepare &&
-           left.retainedPackageVersions == right.retainedPackageVersions &&
-           left.retainedCompleteReleases == right.retainedCompleteReleases;
+           left.retentionVersions == right.retentionVersions;
 }
 
 bool sameHarnessProfiles(const QList<HarnessProfile> &left,
@@ -58,8 +57,21 @@ void preserveLibrarySettings(const BackgroundUpdateSettings &current,
     loaded.weekDay = current.weekDay;
     loaded.localTime = current.localTime;
     loaded.automaticallyPrepare = current.automaticallyPrepare;
-    loaded.retainedPackageVersions = current.retainedPackageVersions;
-    loaded.retainedCompleteReleases = current.retainedCompleteReleases;
+    loaded.retentionVersions = current.retentionVersions;
+}
+
+QWidget *scrollablePage(QWidget *content, QWidget *parent) {
+    if (content->layout() != nullptr) {
+        content->layout()->setSizeConstraint(QLayout::SetMinimumSize);
+    }
+    auto *scroll = new QScrollArea(parent);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    scroll->setWidget(content);
+    return scroll;
 }
 
 } // namespace
@@ -86,6 +98,23 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
             this, scheduleSettingsReload);
     connect(clientSettingsReloadTimer_, &QTimer::timeout,
             this, &MainWindow::reloadClientSettings);
+    pacmanDatabaseWatcher_ = new QFileSystemWatcher(this);
+    pacmanDatabaseReloadTimer_ = new QTimer(this);
+    pacmanDatabaseReloadTimer_->setSingleShot(true);
+    pacmanDatabaseReloadTimer_->setInterval(500);
+    const auto pacmanDatabasePath = QStringLiteral("/var/lib/pacman/local");
+    if (QFileInfo::exists(pacmanDatabasePath)) {
+        pacmanDatabaseWatcher_->addPath(pacmanDatabasePath);
+    }
+    connect(pacmanDatabaseWatcher_, &QFileSystemWatcher::directoryChanged,
+            this, [this] { pacmanDatabaseReloadTimer_->start(); });
+    connect(pacmanDatabaseReloadTimer_, &QTimer::timeout, this, [this] {
+        if (QFileInfo::exists(QStringLiteral("/var/lib/pacman/db.lck"))) {
+            pacmanDatabaseReloadTimer_->start();
+            return;
+        }
+        reloadVisibleProjects(false);
+    });
     qRegisterMetaType<UpdateCheckResult>();
     networkIoThread_.setObjectName(QStringLiteral("pacsmith-network-io"));
     debDownloadService_ = new DebDownloadService;
@@ -141,7 +170,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     packagesHeader->addWidget(projectListProgress_, 0, Qt::AlignRight);
     packagesHeader->addWidget(refreshProjectListButton_, 0, Qt::AlignRight);
     projectList_ = new QListWidget(leftPanel);
-    projectList_->setMinimumWidth(260);
+    projectList_->setMinimumWidth(160);
     projectList_->setIconSize(QSize(44, 44));
     projectList_->setSpacing(2);
     projectList_->setItemDelegate(new ProjectListDelegate(projectList_));
@@ -151,6 +180,14 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         preparationSpinnerFrame_ = (preparationSpinnerFrame_ + 1) % 4;
         updatePreparationIndicators();
         updateUpdateCheckIndicators();
+        if (buildInProgress()) {
+            updateDashboardActions();
+            if (currentRelease() != nullptr &&
+                releaseBuildInProgress(currentRelease()->id)) populateBuild();
+        }
+        if (!repositoryDistributionJobs_.isEmpty() && projectList_ != nullptr) {
+            projectList_->viewport()->update();
+        }
         syncActivityTimer();
     });
     deleteProjectButton_ = new QPushButton(QStringLiteral("Delete"), leftPanel);
@@ -193,6 +230,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     connect(externalReloadButton_, &QPushButton::clicked,
             this, &MainWindow::reloadExternalProject);
     rightStack_ = new QStackedWidget(rightPanel);
+    rightStack_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
 
     auto *dashboard = new QWidget(rightStack_);
     auto *dashboardLayout = new QVBoxLayout(dashboard);
@@ -202,6 +240,12 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     projectPrimaryButton_ = new QPushButton(dashboard);
     applyPrimaryActionStyle(projectPrimaryButton_);
     projectPrimaryButton_->setVisible(false);
+    projectBuildOutputButton_ = new QPushButton(QStringLiteral("View Output"), dashboard);
+    projectBuildOutputButton_->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    projectBuildOutputButton_->setVisible(false);
+    projectBuildCancelButton_ = new QPushButton(QStringLiteral("Cancel Build"), dashboard);
+    projectBuildCancelButton_->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
+    projectBuildCancelButton_->setVisible(false);
     uninstallButton_ = new QPushButton(QStringLiteral("Uninstall"), dashboard);
     uninstallButton_->setVisible(false);
     auto *dashboardHeader = new QHBoxLayout;
@@ -209,10 +253,19 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     dashboardHeading->addWidget(projectTitle_);
     dashboardHeading->addWidget(projectSubtitle_);
     dashboardHeader->addLayout(dashboardHeading, 1);
+    dashboardHeader->addWidget(projectBuildOutputButton_, 0, Qt::AlignTop);
+    dashboardHeader->addWidget(projectBuildCancelButton_, 0, Qt::AlignTop);
     dashboardHeader->addWidget(projectPrimaryButton_, 0, Qt::AlignTop);
     dashboardHeader->addWidget(uninstallButton_, 0, Qt::AlignTop);
     connect(projectPrimaryButton_, &QPushButton::clicked, this,
             &MainWindow::handleProjectPrimaryAction);
+    connect(projectBuildOutputButton_, &QPushButton::clicked,
+            this, &MainWindow::showBuildOutput);
+    connect(projectBuildCancelButton_, &QPushButton::clicked, this, [this] {
+        projectBuildCancelButton_->setText(QStringLiteral("Canceling..."));
+        projectBuildCancelButton_->setEnabled(false);
+        cancelRemoteBuild();
+    });
     connect(uninstallButton_, &QPushButton::clicked, this, &MainWindow::startUninstall);
     projectTabs_ = new QTabWidget(dashboard);
     dashboardUpdatesHost_ = emptyPageHost(dashboard);
@@ -221,16 +274,22 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     dashboardRepositoryHost_ = emptyPageHost(dashboard);
     repositoryEditor_ = createRepositoryPage();
     dashboardRepositoryHost_->layout()->addWidget(repositoryEditor_);
-    projectTabs_->addTab(createProjectInfoPage(), QStringLiteral("Project Info"));
-    projectTabs_->addTab(createOverviewPage(), QStringLiteral("Versions"));
-    projectTabs_->addTab(dashboardUpdatesHost_, QStringLiteral("Update Monitoring"));
-    projectTabs_->addTab(dashboardRepositoryHost_, QStringLiteral("Repository"));
+    projectTabs_->addTab(scrollablePage(createProjectInfoPage(), projectTabs_),
+                         QStringLiteral("Project Info"));
+    projectTabs_->addTab(scrollablePage(createOverviewPage(), projectTabs_),
+                         QStringLiteral("Versions"));
+    projectTabs_->addTab(scrollablePage(dashboardUpdatesHost_, projectTabs_),
+                         QStringLiteral("Update Monitoring"));
+    projectTabs_->addTab(scrollablePage(dashboardRepositoryHost_, projectTabs_),
+                         QStringLiteral("Repository"));
     connect(projectTabs_, &QTabWidget::currentChanged, this, [this] {
         if (rightStack_ == nullptr || rightStack_->currentIndex() != 0) return;
-        if (projectTabs_->currentWidget() == dashboardUpdatesHost_) {
+        auto *currentPage = projectTabs_->currentWidget();
+        if (currentPage != nullptr && currentPage->isAncestorOf(dashboardUpdatesHost_)) {
             placeUpdatesEditor();
             if (project_) populateUpdates();
-        } else if (projectTabs_->currentWidget() == dashboardRepositoryHost_) {
+        } else if (currentPage != nullptr &&
+                   currentPage->isAncestorOf(dashboardRepositoryHost_)) {
             placeRepositoryEditor();
             if (project_) populateRepository();
         }
@@ -396,8 +455,12 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     rightLayout->addWidget(rightStack_, 1);
     splitter->addWidget(leftPanel);
     splitter->addWidget(rightPanel);
+    splitter->setChildrenCollapsible(true);
+    splitter->setCollapsible(1, false);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
+    splitter->setSizes({260, 920});
+    rightPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     setCentralWidget(splitter);
 
     connect(projectList_, &QListWidget::currentItemChanged, this,
@@ -806,7 +869,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
         applyUpdateCheckResult(result, QStringLiteral("GitHub"));
     });
 
-    loadRepositoryPackageCatalog();
     statusBar()->setSizeGripEnabled(false);
     auto *connectionSlot = new QWidget(this);
     auto *connectionSlotLayout = new QHBoxLayout(connectionSlot);
@@ -827,32 +889,13 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     connect(connectionButton_, &QPushButton::clicked, this, &MainWindow::showConnectionDialog);
     connectionStatusTimer_ = new QTimer(this);
     connectionStatusTimer_->setInterval(5000);
-    connect(connectionStatusTimer_, &QTimer::timeout, this, &MainWindow::refreshConnectionStatus);
-    connectionStatusTimer_->start();
+    connect(connectionStatusTimer_, &QTimer::timeout, this,
+            [this] { refreshConnectionStatus(); });
     QString runtimeError;
     if (!applyLibraryRuntime(library_.config(), &runtimeError) && !runtimeError.isEmpty()) {
         statusBar()->showMessage(runtimeError, 10000);
     }
     const auto config = library_.config();
-    auto *settingsWatcher = new QFutureWatcher<LibrarySettingsLoadResult>(this);
-    connect(settingsWatcher, &QFutureWatcher<LibrarySettingsLoadResult>::finished, this,
-            [this, settingsWatcher, runtimeError] {
-        const auto result = settingsWatcher->result();
-        settingsWatcher->deleteLater();
-        if (result.settings) {
-            applyLibrarySettings(*result.settings);
-        } else if (!result.error.isEmpty() && runtimeError.isEmpty()) {
-            statusBar()->showMessage(result.error, 8000);
-        }
-    });
-    settingsWatcher->setFuture(QtConcurrent::run([config] {
-        LibraryClient client(config);
-        LibrarySettingsLoadResult result;
-        result.settings = client.librarySettings(&result.error);
-        return result;
-    }));
-    refreshConnectionStatus();
-    refreshProjectList();
     eventRefreshTimer_ = new QTimer(this);
     eventRefreshTimer_->setSingleShot(true);
     eventRefreshTimer_->setInterval(75);
@@ -860,7 +903,34 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, CredentialStore &credent
     libraryEventStream_ = new LibraryEventStream(library_.config(), this);
     connect(libraryEventStream_, &LibraryEventStream::eventReceived,
             this, &MainWindow::handleServerEvent);
-    libraryEventStream_->start();
+    // Keep the initial snapshot, settings, connection, and repository-catalog reads sequential.
+    // Running them together caused release-only heap corruption while the snapshot was parsed.
+    refreshProjectList({}, [this, config, runtimeError](bool) {
+        auto *settingsWatcher = new QFutureWatcher<LibrarySettingsLoadResult>(this);
+        connect(settingsWatcher, &QFutureWatcher<LibrarySettingsLoadResult>::finished, this,
+                [this, settingsWatcher, runtimeError] {
+            const auto result = settingsWatcher->result();
+            settingsWatcher->deleteLater();
+            if (result.settings) {
+                applyLibrarySettings(*result.settings);
+            } else if (!result.error.isEmpty() && runtimeError.isEmpty()) {
+                statusBar()->showMessage(result.error, 8000);
+            }
+            refreshConnectionStatus([this] {
+                loadRepositoryPackageCatalog([this] {
+                    connectionStatusTimer_->start();
+                    libraryEventStream_->start();
+                    restoreActiveBuildJobs();
+                });
+            });
+        });
+        settingsWatcher->setFuture(QtConcurrent::run([config] {
+            LibraryClient client(config);
+            LibrarySettingsLoadResult result;
+            result.settings = client.librarySettings(&result.error);
+            return result;
+        }));
+    });
     QTimer::singleShot(0, this, [this] { syncActivityTimer(); });
 }
 
@@ -904,6 +974,10 @@ QString remoteConnectionCaption(const ConnectionConfig &config, const QFontMetri
 } // namespace
 
 void MainWindow::refreshConnectionStatus() {
+    refreshConnectionStatus({});
+}
+
+void MainWindow::refreshConnectionStatus(std::function<void()> completed) {
     if (connectionButton_ == nullptr || connectionStatusInFlight_) return;
     const auto config = library_.config();
     const bool remote = config.mode == ConnectionConfig::Mode::Remote;
@@ -913,12 +987,12 @@ void MainWindow::refreshConnectionStatus() {
     connectionButton_->setToolTip(QStringLiteral("Checking the library connection…"));
     auto *watcher = new QFutureWatcher<ConnectionStatusResult>(this);
     connect(watcher, &QFutureWatcher<ConnectionStatusResult>::finished, this,
-            [this, watcher] {
+            [this, watcher, completed = std::move(completed)]() mutable {
         const auto result = watcher->result();
         watcher->deleteLater();
         connectionStatusInFlight_ = false;
         if (result.config.summary() != library_.config().summary()) {
-            refreshConnectionStatus();
+            refreshConnectionStatus(std::move(completed));
             return;
         }
         const auto resultIsRemote = result.config.mode == ConnectionConfig::Mode::Remote;
@@ -936,6 +1010,7 @@ void MainWindow::refreshConnectionStatus() {
                     ? QStringLiteral("Not connected to %1. Click to change library connection.").arg(target)
                     : result.error);
         }
+        if (completed) completed();
     });
     watcher->setFuture(QtConcurrent::run([config] {
         LibraryClient client(config);
@@ -944,6 +1019,10 @@ void MainWindow::refreshConnectionStatus() {
         result.reachable = client.reachable(&result.error);
         return result;
     }));
+}
+
+QSize MainWindow::minimumSizeHint() const {
+    return QSize(320, 240);
 }
 
 QWidget *MainWindow::createStageHost(QListWidget **nav, QStackedWidget **stack, QWidget *navHeader) {
@@ -992,7 +1071,7 @@ void MainWindow::addWorkbenchPage(const int stage, QListWidget *nav, QStackedWid
     auto *item = new QListWidgetItem(label, nav);
     item->setData(Qt::UserRole, static_cast<int>(section));
     item->setData(sectionBaseLabelRole, label);
-    stack->addWidget(page);
+    stack->addWidget(scrollablePage(page, stack));
     SectionLocation location;
     location.stage = stage;
     location.page = nav->count() - 1;

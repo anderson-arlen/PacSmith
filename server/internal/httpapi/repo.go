@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 )
 
@@ -121,7 +122,7 @@ func (s *Server) getRepoBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	channel := r.URL.Query().Get("channel")
 	if channel == "" {
-		channel = repo.ChannelStable
+		channel = repo.ChannelUnstable
 	}
 	if !repo.ValidChannel(channel) {
 		writeError(w, http.StatusBadRequest, "bad_request", "unknown channel")
@@ -130,6 +131,10 @@ func (s *Server) getRepoBootstrap(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.Repo.Settings(r.Context())
 	if err != nil {
 		writeRequestError(w, err)
+		return
+	}
+	if channel == repo.ChannelStable && !settings.StableEnabled {
+		writeError(w, http.StatusBadRequest, "bad_request", "stable channel is disabled")
 		return
 	}
 	if s.RepoBound != nil {
@@ -165,8 +170,18 @@ func (s *Server) patchProjectRepo(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &patch) {
 		return
 	}
-	status, err := s.Repo.PatchProject(r.Context(), r.PathValue("id"), patch)
+	projectID := r.PathValue("id")
+	status, err := s.Repo.PatchProjectDeferred(r.Context(), projectID, patch)
 	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	if s.Jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "job queue is not configured")
+		return
+	}
+	if _, err := s.Jobs.Enqueue(r.Context(), jobs.KindRepositoryDistribution,
+		map[string]string{"project_id": projectID}, projectID, ""); err != nil {
 		writeRequestError(w, err)
 		return
 	}
@@ -220,6 +235,7 @@ func (s *Server) repoJSON(settings repo.Settings) map[string]any {
 		"listen_hosts":            settings.ListenHosts,
 		"listen_port":             settings.ListenPort,
 		"advertised_url":          settings.AdvertisedURL,
+		"stable_enabled":          settings.StableEnabled,
 		"soak_seconds":            settings.SoakSeconds,
 		"package_name_prefix":     settings.PackageNamePrefix,
 		"trust_mode":              settings.TrustMode,

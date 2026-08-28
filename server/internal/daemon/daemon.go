@@ -214,20 +214,25 @@ func JobHandler(lib *library.Service) jobs.Handler {
 		case jobs.KindBuild:
 			var req struct {
 				ReleaseID string `json:"release_id"`
+				Automatic string `json:"automatic"`
 			}
 			if err := json.Unmarshal(payload, &req); err != nil {
 				return nil, err
 			}
 			log("Running makepkg…\n")
-			result, err := lib.BuildRelease(ctx, req.ReleaseID)
-			if result.Log != "" {
-				log(result.Log)
-			}
+			result, err := lib.BuildRelease(ctx, req.ReleaseID, log, req.Automatic == "true")
 			raw, marshalErr := json.Marshal(result)
 			if err != nil {
 				return raw, err
 			}
 			return raw, marshalErr
+		case jobs.KindRepositoryDistribution:
+			log("Reconciling repository distribution…\n")
+			if err := lib.Repo.ReconcileProjectDistribution(ctx, job.ProjectID); err != nil {
+				return nil, err
+			}
+			log("Repository distribution is up to date\n")
+			return json.Marshal(map[string]string{"project_id": job.ProjectID})
 		default:
 			return nil, fmt.Errorf("unknown job kind %q", job.Kind)
 		}

@@ -15,7 +15,7 @@ SET revision = revision + 1,
     updates_hour = ?,
     updates_minute = ?,
     updates_auto_prepare = ?,
-    retained_package_versions = ?,
-    retained_complete_releases = ?
+    retention_versions = ?,
+    build_parallelism = ?
 WHERE id = 1 AND revision = ?
 RETURNING *;

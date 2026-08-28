@@ -54,6 +54,7 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
     QVERIFY(names.contains(QStringLiteral("prepare_release")));
     QVERIFY(names.contains(QStringLiteral("import_github_release")));
     QVERIFY(names.contains(QStringLiteral("import_direct_url")));
+    QVERIFY(names.contains(QStringLiteral("import_repository_signing_key")));
     QVERIFY(names.contains(QStringLiteral("list_harness_profiles")));
     QVERIFY(names.contains(QStringLiteral("upsert_harness_profile")));
     QVERIFY(names.contains(QStringLiteral("remove_harness_profile")));
@@ -89,12 +90,24 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         }
         return QJsonObject{};
     };
+    const auto pkgbuildAnnotations = findTool(QStringLiteral("write_pkgbuild"))
+                                         .value(QStringLiteral("annotations")).toObject();
+    QCOMPARE(pkgbuildAnnotations.value(QStringLiteral("destructiveHint")).toBool(), true);
+    QCOMPARE(pkgbuildAnnotations.value(QStringLiteral("idempotentHint")).toBool(), true);
     const auto updateAnnotations =
         findTool(QStringLiteral("check_updates")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(updateAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), false);
     QCOMPARE(updateAnnotations.value(QStringLiteral("destructiveHint")).toBool(), false);
     QCOMPARE(updateAnnotations.value(QStringLiteral("idempotentHint")).toBool(), false);
     QCOMPARE(updateAnnotations.value(QStringLiteral("openWorldHint")).toBool(), true);
+    const auto librarySettingsProperties = findTool(QStringLiteral("set_library_settings"))
+                                               .value(QStringLiteral("inputSchema")).toObject()
+                                               .value(QStringLiteral("properties")).toObject();
+    QVERIFY(librarySettingsProperties.contains(QStringLiteral("retention_versions")));
+    QVERIFY(librarySettingsProperties.contains(QStringLiteral("build_parallelism")));
+    QVERIFY(!librarySettingsProperties.contains(QStringLiteral("retention_days")));
+    QVERIFY(!librarySettingsProperties.contains(QStringLiteral("retained_package_versions")));
+    QVERIFY(!librarySettingsProperties.contains(QStringLiteral("retained_complete_releases")));
     const auto issueAnnotations =
         findTool(QStringLiteral("get_release_issues")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(issueAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), true);
@@ -123,6 +136,25 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         QCOMPARE(remoteImport.value(QStringLiteral("annotations")).toObject()
                      .value(QStringLiteral("openWorldHint")).toBool(), true);
     }
+    const auto signingKeyImport = findTool(QStringLiteral("import_repository_signing_key"));
+    const auto signingKeySchema = signingKeyImport.value(QStringLiteral("inputSchema")).toObject();
+    const auto signingKeyProperties = signingKeySchema.value(QStringLiteral("properties")).toObject();
+    QVERIFY(signingKeyProperties.contains(QStringLiteral("project_name")));
+    QVERIFY(signingKeyProperties.contains(QStringLiteral("release_name")));
+    QVERIFY(signingKeyProperties.contains(QStringLiteral("url")));
+    QVERIFY(!signingKeyProperties.contains(QStringLiteral("release_id")));
+    QVERIFY(signingKeySchema.value(QStringLiteral("required")).toArray()
+                .contains(QStringLiteral("url")));
+    QVERIFY(signingKeyImport.value(QStringLiteral("description")).toString()
+                .contains(QStringLiteral("Never download the key")));
+    QCOMPARE(signingKeyImport.value(QStringLiteral("annotations")).toObject()
+                 .value(QStringLiteral("openWorldHint")).toBool(), true);
+    QCOMPARE(signingKeyImport.value(QStringLiteral("annotations")).toObject()
+                 .value(QStringLiteral("destructiveHint")).toBool(), true);
+    QVERIFY(pacsmith::mcp::PermissionPolicy::confirmationMessage(
+                QStringLiteral("import_repository_signing_key"),
+                QStringLiteral("Signal (signal-desktop-bin), release 8.24.1"))
+                .contains(QStringLiteral("Signal (signal-desktop-bin), release 8.24.1")));
     QVERIFY(findTool(QStringLiteral("import_github_release"))
                 .value(QStringLiteral("inputSchema")).toObject()
                 .value(QStringLiteral("properties")).toObject()
@@ -138,6 +170,25 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                                       .value(QStringLiteral("inputSchema")).toObject();
     QVERIFY(repositorySchema.value(QStringLiteral("properties")).toObject()
                 .contains(QStringLiteral("project_name")));
+    QVERIFY(repositorySchema.value(QStringLiteral("properties")).toObject()
+                .contains(QStringLiteral("automatic_soak")));
+    QVERIFY(!repositorySchema.value(QStringLiteral("properties")).toObject()
+                 .contains(QStringLiteral("stable_enabled")));
+    const auto globalRepositorySchema = findTool(QStringLiteral("set_repository_configuration"))
+                                            .value(QStringLiteral("inputSchema")).toObject();
+    QVERIFY(globalRepositorySchema.value(QStringLiteral("properties")).toObject()
+                .contains(QStringLiteral("stable_enabled")));
+    QVERIFY(repositorySchema.value(QStringLiteral("properties")).toObject()
+                .contains(QStringLiteral("soak_seconds_override")));
+    const auto repositoryState = pacsmith::ProjectRepository::fromJson(
+        {{QStringLiteral("stable_channel_enabled"), true},
+         {QStringLiteral("soak_seconds_override"), 604800},
+         {QStringLiteral("library_soak_seconds"), 2592000},
+         {QStringLiteral("effective_soak_seconds"), 604800}});
+    QCOMPARE(repositoryState.soakSecondsOverride, 604800);
+    QVERIFY(repositoryState.stableChannelEnabled);
+    QCOMPARE(repositoryState.librarySoakSeconds, 2592000);
+    QCOMPARE(repositoryState.effectiveSoakSeconds, 604800);
     QVERIFY(!repositorySchema.value(QStringLiteral("properties")).toObject()
                  .contains(QStringLiteral("project")));
     QVERIFY(pacsmith::mcp::PermissionPolicy::confirmationMessage(
@@ -161,6 +212,13 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
              pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
     QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("reanalyze_release")),
              pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
+    QCOMPARE(pacsmith::mcp::PermissionPolicy::level(QStringLiteral("write_pkgbuild")),
+             pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
+    const auto pkgbuildConfirmation = pacsmith::mcp::PermissionPolicy::confirmationMessage(
+        QStringLiteral("write_pkgbuild"), QStringLiteral("Demo 1.2.3"));
+    QVERIFY(pkgbuildConfirmation.contains(QStringLiteral("Demo 1.2.3")));
+    QVERIFY(pkgbuildConfirmation.contains(QStringLiteral("shell code")));
+    QVERIFY(pkgbuildConfirmation.contains(QStringLiteral("execute during the package build")));
     for (const auto &name : {QStringLiteral("set_library_settings"),
                              QStringLiteral("set_client_preferences"),
                              QStringLiteral("set_repository_configuration"),
@@ -170,7 +228,9 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                              QStringLiteral("approve_remote_registration"),
                              QStringLiteral("revoke_remote_client"),
                              QStringLiteral("set_github_credential"),
-                             QStringLiteral("delete_github_credential")}) {
+                             QStringLiteral("delete_github_credential"),
+                             QStringLiteral("import_repository_signing_key"),
+                             QStringLiteral("write_pkgbuild")}) {
         QCOMPARE(pacsmith::mcp::PermissionPolicy::level(name),
                  pacsmith::mcp::PermissionLevel::MandatoryConfirmation);
         QString denied;
@@ -226,6 +286,72 @@ void CoreTests::reportsStructuredReleaseReviewIssues() {
     pacsmith::PayloadReview::decide(release, QStringLiteral("etc/vendor.conf"), false);
     release.maintainerScripts.first().acknowledge();
     QVERIFY(pacsmith::releaseReviewIssues(release).isEmpty());
+}
+
+void CoreTests::gatesAutomaticUpdateBuildsOnReviewedConfigurationChanges() {
+    pacsmith::PackageRelease previous;
+    previous.sourceType = pacsmith::SourcePackageType::Debian;
+    previous.buildStatus = pacsmith::BuildStatus::Succeeded;
+    pacsmith::DependencyMapping dependency;
+    dependency.rawExpression = QStringLiteral("vendor-runtime (>= 1)");
+    dependency.archPackage = QStringLiteral("vendor-runtime");
+    dependency.status = pacsmith::MappingStatus::Resolved;
+    previous.dependencies.append(dependency);
+    pacsmith::MaintainerScript script;
+    script.name = QStringLiteral("postinst");
+    script.contents = QStringLiteral("#!/bin/sh\nupdate-desktop-database\n");
+    script.acknowledge();
+    previous.maintainerScripts.append(script);
+    previous.lifecycleScript.fileName = QStringLiteral("vendor.install");
+    previous.lifecycleScript.contents = QStringLiteral("post_install() { update-desktop-database; }\n");
+    previous.lifecycleScript.validationPassed = true;
+    previous.lifecycleScript.sourceFingerprints = {script.contentFingerprint()};
+    previous.lifecycleScript.acknowledge();
+
+    auto next = previous;
+    next.buildStatus = pacsmith::BuildStatus::NeverBuilt;
+    next.builtArtifactIds.clear();
+    QVERIFY(pacsmith::automaticUpdateBuildBlockers(previous, next).isEmpty());
+
+    next.dependencies.first().rawExpression = QStringLiteral("vendor-runtime (>= 2)");
+    QVERIFY(pacsmith::automaticUpdateBuildBlockers(previous, next)
+                .contains(QStringLiteral("The vendor dependency declarations changed.")));
+
+    next = previous;
+    next.buildStatus = pacsmith::BuildStatus::NeverBuilt;
+    next.maintainerScripts.first().contents.append(QStringLiteral("gtk-update-icon-cache\n"));
+    QVERIFY(pacsmith::automaticUpdateBuildBlockers(previous, next)
+                .contains(QStringLiteral("The vendor lifecycle scripts changed.")));
+
+    next = previous;
+    next.buildStatus = pacsmith::BuildStatus::NeverBuilt;
+    next.lifecycleScript.contents.append(QStringLiteral("post_upgrade() {}\n"));
+    QVERIFY(pacsmith::automaticUpdateBuildBlockers(previous, next)
+                .contains(QStringLiteral("The generated Arch lifecycle behavior changed.")));
+
+    next = previous;
+    next.buildStatus = pacsmith::BuildStatus::NeverBuilt;
+    next.dependencies.first().status = pacsmith::MappingStatus::Unresolved;
+    QVERIFY(!pacsmith::automaticUpdateBuildBlockers(previous, next).isEmpty());
+
+    pacsmith::Project project;
+    previous.id = QStringLiteral("previous");
+    previous.debian.version = QStringLiteral("1.0");
+    next = previous;
+    next.id = QStringLiteral("prepared");
+    next.debian.version = QStringLiteral("1.1");
+    next.buildStatus = pacsmith::BuildStatus::NeverBuilt;
+    next.state = pacsmith::ReleaseState::NeedsReview;
+    project.releases = {previous, next};
+    const auto retry = pacsmith::automaticUpdateBuildSelection(project);
+    QVERIFY(retry.has_value());
+    QCOMPARE(retry->previousReleaseId, previous.id);
+    QCOMPARE(retry->preparedReleaseId, next.id);
+
+    next.buildStatus = pacsmith::BuildStatus::Succeeded;
+    next.state = pacsmith::ReleaseState::Built;
+    project.releases = {previous, next};
+    QVERIFY(!pacsmith::automaticUpdateBuildSelection(project).has_value());
 }
 
 void CoreTests::validatesGuiAndMcpDomainEditsConsistently() {
@@ -327,8 +453,19 @@ void CoreTests::validatesPortableAgentPluginBundle() {
     QVERIFY(instructions.contains(QStringLiteral("check_updates")));
     QVERIFY(instructions.contains(QStringLiteral("upsert_harness_profile")));
     QVERIFY(instructions.contains(QStringLiteral("Never substitute `pacsmith check`")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "Prefer a first-party signed APT or RPM repository")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "Direct URL monitoring is a last resort")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "one version-agnostic URL whose response or redirect changes")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "importing from such a URL does not make it a valid Direct URL update source")));
     QVERIFY(instructions.contains(QStringLiteral("import_github_release")));
     QVERIFY(instructions.contains(QStringLiteral("import_direct_url")));
+    QVERIFY(instructions.contains(QStringLiteral("import_repository_signing_key")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "Treat `write_pkgbuild` as a sensitive executable-code change")));
     QVERIFY(instructions.contains(QStringLiteral("pacsmith install <project_name>")));
     QVERIFY(instructions.contains(QStringLiteral(
         "must always use `pacsmith install --polkit <project_name>` first")));

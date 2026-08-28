@@ -28,6 +28,7 @@ func (s *Service) rebuildKeyringLocked(ctx context.Context, row sqlcdb.RepoSetti
 	}
 	exportIDs := []string{row.SigningFingerprint}
 	trusted := NormalizeFingerprint(row.SigningFingerprint)
+	ownerTrust := DirectKeyOwnerTrust
 	if row.TrustMode == TrustRootCertified {
 		if !row.RootPubkeyArtifactID.Valid || !row.CertifiedPubkeyArtifactID.Valid {
 			return fmt.Errorf("%w: root-certified trust is missing key material", ErrInvalid)
@@ -50,12 +51,14 @@ func (s *Service) rebuildKeyringLocked(ctx context.Context, row sqlcdb.RepoSetti
 		}
 		exportIDs = []string{row.RootFingerprint, row.SigningFingerprint}
 		trusted = NormalizeFingerprint(row.RootFingerprint)
+		// Full ownertrust lets this single root certification fully validate the operational key.
+		ownerTrust = RootKeyOwnerTrust
 	}
 	gpgBytes, err := s.runGPG(ctx, nil, append([]string{"--export"}, exportIDs...)...)
 	if err != nil {
 		return fmt.Errorf("export keyring: %w", err)
 	}
-	trustedBody := []byte(trusted + ":" + DefaultKeyIDTrust + ":\n")
+	trustedBody := []byte(trusted + ":" + ownerTrust + ":\n")
 	revokedBody := []byte("")
 	gpgRec, err := s.putBytes(ctx, "pacsmith.gpg", "repo_keyring", gpgBytes)
 	if err != nil {

@@ -460,7 +460,7 @@ void CoreTests::rewritesDesktopIconFields() {
     icon.format = QStringLiteral("png");
     icon.sha256 = QString(64, QLatin1Char('a'));
     QCOMPARE(icon.installedPath(),
-             QStringLiteral("/usr/share/icons/hicolor/256x256/apps/brave-browser-bin.png"));
+             QStringLiteral("/usr/share/pixmaps/brave-browser-bin.png"));
     icon.format = QStringLiteral("svg");
     QCOMPARE(icon.installedPath(),
              QStringLiteral("/usr/share/icons/hicolor/scalable/apps/brave-browser-bin.svg"));

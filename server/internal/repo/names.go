@@ -30,10 +30,11 @@ const (
 
 	SecretSigningKey = "repo.signing.key"
 
-	DefaultListenHost  = "127.0.0.1"
-	DefaultListenPort  = 8080
-	DefaultSoakSeconds = 30 * 24 * 60 * 60
-	DefaultKeyIDTrust  = "4"
+	DefaultListenHost   = "127.0.0.1"
+	DefaultListenPort   = 8080
+	DefaultSoakSeconds  = 30 * 24 * 60 * 60
+	DirectKeyOwnerTrust = "4"
+	RootKeyOwnerTrust   = "5"
 )
 
 func ReservedNames() []string {

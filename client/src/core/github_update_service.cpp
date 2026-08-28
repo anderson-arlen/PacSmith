@@ -45,6 +45,31 @@ bool isSidecarAsset(const QString &name) {
            lower == QStringLiteral("manifest.json");
 }
 
+QString sourceArchiveFilename(const PackageRelease &current, const QString &tag,
+                              const QString &extension) {
+    auto repository = current.update.githubRepository.trimmed();
+    repository.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9._+-]+")),
+                       QStringLiteral("-"));
+    while (repository.startsWith(QLatin1Char('-'))) repository.remove(0, 1);
+    while (repository.endsWith(QLatin1Char('-'))) repository.chop(1);
+    if (repository.isEmpty()) repository = QStringLiteral("source");
+    return QStringLiteral("%1-%2.%3")
+        .arg(repository, versionFromTag(tag), extension);
+}
+
+void appendSourceArchive(QList<QJsonObject> &artifacts, const QJsonObject &release,
+                         const PackageRelease &current, const QString &urlField,
+                         const QString &label, const QString &extension) {
+    const auto url = release.value(urlField).toString();
+    if (url.isEmpty()) return;
+    artifacts.append(QJsonObject{
+        {QStringLiteral("name"), label},
+        {QStringLiteral("browser_download_url"), url},
+        {QStringLiteral("pacsmith_filename"),
+         sourceArchiveFilename(current, release.value(QStringLiteral("tag_name")).toString(),
+                               extension)}});
+}
+
 QString numericVersionCore(const QString &value) {
     static const QRegularExpression numericCore(
         QStringLiteral("([0-9]+(?:\\.[0-9]+)+)"));
@@ -79,7 +104,7 @@ void GitHubUpdateService::start(const PackageRelease &release, const QString &to
         release.update.githubAssetRegex.isEmpty()) {
         UpdateCheckResult result;
         result.supported = true;
-        result.message = QStringLiteral("GitHub owner, repository, and asset regular expression are required");
+        result.message = QStringLiteral("GitHub owner, repository, and artifact regular expression are required");
         emit finished(result);
         return;
     }
@@ -87,7 +112,7 @@ void GitHubUpdateService::start(const PackageRelease &release, const QString &to
     if (!expression.isValid() || release.update.githubAssetRegex.size() > 512) {
         UpdateCheckResult result;
         result.supported = true;
-        result.message = QStringLiteral("GitHub asset regular expression is invalid or too long: %1")
+        result.message = QStringLiteral("GitHub artifact regular expression is invalid or too long: %1")
                              .arg(expression.errorString());
         emit finished(result);
         return;
@@ -165,8 +190,16 @@ UpdateCheckResult GitHubUpdateService::selectRelease(const QJsonArray &releases,
         QStringList sidecarMatches;
         result.availableAssets.clear();
         result.matchingAssets.clear();
+        QList<QJsonObject> artifacts;
         for (const auto &assetValue : release.value(QStringLiteral("assets")).toArray()) {
-            const auto asset = assetValue.toObject();
+            artifacts.append(assetValue.toObject());
+        }
+        appendSourceArchive(artifacts, release, current, QStringLiteral("tarball_url"),
+                            QStringLiteral("Source code (tar.gz)"),
+                            QStringLiteral("tar.gz"));
+        appendSourceArchive(artifacts, release, current, QStringLiteral("zipball_url"),
+                            QStringLiteral("Source code (zip)"), QStringLiteral("zip"));
+        for (const auto &asset : artifacts) {
             const auto name = asset.value(QStringLiteral("name")).toString();
             result.availableAssets.append(name);
             const auto match = assetPattern.match(name);
@@ -191,7 +224,7 @@ UpdateCheckResult GitHubUpdateService::selectRelease(const QJsonArray &releases,
             continue;
         }
         if (matches.size() != 1) {
-            result.message = QStringLiteral("Release %1 has %2 assets matching /%3/; exactly one is required")
+            result.message = QStringLiteral("Release %1 has %2 artifacts matching /%3/; exactly one is required")
                                  .arg(release.value(QStringLiteral("tag_name")).toString())
                                  .arg(matches.size())
                                  .arg(current.update.githubAssetRegex);
@@ -204,7 +237,10 @@ UpdateCheckResult GitHubUpdateService::selectRelease(const QJsonArray &releases,
         result.assetId = static_cast<qint64>(asset.value(QStringLiteral("id")).toDouble());
         result.tag = release.value(QStringLiteral("tag_name")).toString();
         result.detectedVersion = versionFromTag(result.tag);
-        result.filename = asset.value(QStringLiteral("name")).toString();
+        result.filename = asset.value(QStringLiteral("pacsmith_filename")).toString();
+        if (result.filename.isEmpty()) {
+            result.filename = asset.value(QStringLiteral("name")).toString();
+        }
         result.downloadUrl = asset.value(QStringLiteral("browser_download_url")).toString();
         result.publisherDigest = asset.value(QStringLiteral("digest")).toString();
         if (result.publisherDigest.startsWith(QStringLiteral("sha256:"))) {
@@ -238,7 +274,7 @@ UpdateCheckResult GitHubUpdateService::selectRelease(const QJsonArray &releases,
         return result;
     }
     result.success = true;
-    result.message = QStringLiteral("No published GitHub release has an asset matching /%1/")
+    result.message = QStringLiteral("No published GitHub release has an artifact matching /%1/")
                          .arg(current.update.githubAssetRegex);
     return result;
 }

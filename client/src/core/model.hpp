@@ -457,6 +457,7 @@ struct PackageRelease {
     QList<AiChangeRecord> aiChanges;
     UpdateConfiguration update;
     BuildStatus buildStatus{BuildStatus::NeverBuilt};
+    bool automaticBuild{false};
     ReleaseState state{ReleaseState::NeedsReview};
     QString lastBuildLog;
     QStringList producedPackages;
@@ -503,7 +504,13 @@ struct RepoSoakStatus {
 };
 
 struct ProjectRepository {
+    qint64 revision{0};
     bool publish{false};
+    bool stableChannelEnabled{false};
+    bool automaticSoak{false};
+    qint64 soakSecondsOverride{-1};
+    qint64 librarySoakSeconds{0};
+    qint64 effectiveSoakSeconds{0};
     QString originalPackageName;
     QString archPackageName;
     QString prefixDefault;

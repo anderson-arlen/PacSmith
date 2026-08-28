@@ -108,6 +108,7 @@ pacsmith_target_defaults(pacsmith)
 add_executable(pacsmith-gui
     src/gui/main.cpp
     src/gui/age_unlock.cpp
+    src/gui/appearance.cpp
     src/gui/application_session.cpp
     src/gui/command_progress_dialog.cpp
     src/gui/connection_dialog.cpp
@@ -123,6 +124,7 @@ add_executable(pacsmith-gui
     src/gui/main_window/pages.cpp
     src/gui/main_window/import.cpp
     src/gui/main_window/dashboard.cpp
+    src/gui/main_window/repository.cpp
     src/gui/main_window/library_sync.cpp
     src/gui/main_window/source.cpp
     src/gui/main_window/payload.cpp
@@ -181,9 +183,10 @@ if(BUILD_TESTING)
     add_test(NAME pacsmith-core-tests COMMAND pacsmith-tests)
     add_executable(pacsmith-gui-tests
         tests/gui_tests/wheel_scroll_guard_test.cpp
+        src/gui/appearance.cpp
         src/gui/wheel_scroll_guard.cpp)
     target_include_directories(pacsmith-gui-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(pacsmith-gui-tests PRIVATE Qt6::Widgets Qt6::Test)
+    target_link_libraries(pacsmith-gui-tests PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Test)
     pacsmith_target_defaults(pacsmith-gui-tests)
     add_test(NAME pacsmith-gui-tests COMMAND pacsmith-gui-tests)
     set_tests_properties(pacsmith-gui-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

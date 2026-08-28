@@ -463,7 +463,7 @@ func appendSelectedIcon(b *strings.Builder, rel Release) {
 	if icon.Missing || icon.SHA256 == "" || icon.IconName == "" || extension == "" {
 		return
 	}
-	directory := "/usr/share/icons/hicolor/256x256/apps"
+	directory := "/usr/share/pixmaps"
 	if extension == "svg" {
 		directory = "/usr/share/icons/hicolor/scalable/apps"
 	}

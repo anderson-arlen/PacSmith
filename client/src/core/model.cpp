@@ -310,7 +310,7 @@ QString IconConfiguration::installedPath() const {
     if (extension.isEmpty()) return {};
     const auto directory = extension == QStringLiteral("svg")
         ? QStringLiteral("/usr/share/icons/hicolor/scalable/apps")
-        : QStringLiteral("/usr/share/icons/hicolor/256x256/apps");
+        : QStringLiteral("/usr/share/pixmaps");
     return directory + QLatin1Char('/') + iconName + QLatin1Char('.') + extension;
 }
 
@@ -697,14 +697,18 @@ RpmRepositoryCandidate RpmRepositoryCandidate::fromJson(const QJsonObject &objec
 }
 
 QJsonObject RepositorySigningKey::toJson() const {
-    return {{QStringLiteral("relativePath"), relativePath},
-            {QStringLiteral("sha256"), sha256},
-            {QStringLiteral("fingerprints"), stringsToJson(fingerprints)},
-            {QStringLiteral("sourcePath"), sourcePath},
-            {QStringLiteral("sourceFingerprint"), sourceFingerprint},
-            {QStringLiteral("trusted"), trusted},
-            {QStringLiteral("artifactId"), artifactId},
-            {QStringLiteral("provenance"), provenance.toJson()}};
+    auto json = QJsonObject{{QStringLiteral("relativePath"), relativePath},
+                            {QStringLiteral("sha256"), sha256},
+                            {QStringLiteral("fingerprints"), stringsToJson(fingerprints)},
+                            {QStringLiteral("sourcePath"), sourcePath},
+                            {QStringLiteral("sourceFingerprint"), sourceFingerprint},
+                            {QStringLiteral("trusted"), trusted},
+                            {QStringLiteral("artifactId"), artifactId},
+                            {QStringLiteral("provenance"), provenance.toJson()}};
+    if (!contents.isEmpty()) {
+        json.insert(QStringLiteral("contents"), QString::fromLatin1(contents.toBase64()));
+    }
+    return json;
 }
 
 RepositorySigningKey RepositorySigningKey::fromJson(const QJsonObject &object) {
@@ -983,6 +987,7 @@ QJsonObject PackageRelease::toJson() const {
             {QStringLiteral("aiChanges"), valueListToJson(aiChanges)},
             {QStringLiteral("update"), update.toJson()},
             {QStringLiteral("buildStatus"), buildStatusName(buildStatus)},
+            {QStringLiteral("automaticBuild"), automaticBuild},
             {QStringLiteral("state"), releaseStateName(state)},
             {QStringLiteral("lastBuildLog"), lastBuildLog},
             {QStringLiteral("producedPackages"), stringsToJson(producedPackages)},
@@ -1051,6 +1056,7 @@ PackageRelease PackageRelease::fromJson(const QJsonObject &object) {
     } else if (build == QStringLiteral("canceled")) {
         result.buildStatus = BuildStatus::Canceled;
     }
+    result.automaticBuild = object.value(QStringLiteral("automaticBuild")).toBool();
     result.lastBuildLog = object.value(QStringLiteral("lastBuildLog")).toString();
     result.producedPackages = stringsFromJson(object.value(QStringLiteral("producedPackages")));
     result.state = releaseStateFromName(object.value(QStringLiteral("state")).toString());
@@ -1226,7 +1232,13 @@ RepoSoakStatus RepoSoakStatus::fromJson(const QJsonObject &object) {
 
 ProjectRepository ProjectRepository::fromJson(const QJsonObject &object) {
     ProjectRepository result;
+    result.revision = object.value(QStringLiteral("revision")).toInteger();
     result.publish = object.value(QStringLiteral("publish")).toBool();
+    result.stableChannelEnabled = object.value(QStringLiteral("stable_channel_enabled")).toBool();
+    result.automaticSoak = object.value(QStringLiteral("automatic_soak")).toBool();
+    result.soakSecondsOverride = object.value(QStringLiteral("soak_seconds_override")).toInteger(-1);
+    result.librarySoakSeconds = object.value(QStringLiteral("library_soak_seconds")).toInteger();
+    result.effectiveSoakSeconds = object.value(QStringLiteral("effective_soak_seconds")).toInteger();
     result.originalPackageName = object.value(QStringLiteral("original_package_name")).toString();
     result.archPackageName = object.value(QStringLiteral("arch_package_name")).toString();
     result.prefixDefault = object.value(QStringLiteral("prefix_default")).toString();

@@ -48,3 +48,51 @@ func TestManagerNotifiesJobTransitions(t *testing.T) {
 		}
 	}
 }
+
+func TestRepositoryDistributionJobsAreDeduplicatedByProject(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	started := make(chan struct{})
+	release := make(chan struct{})
+	manager, err := New(db, filepath.Join(t.TempDir(), "jobs"),
+		func(context.Context, Job, json.RawMessage, func(string)) (json.RawMessage, error) {
+			close(started)
+			<-release
+			return nil, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Stop)
+	first, err := manager.Enqueue(ctx, KindRepositoryDistribution, nil, "project-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for repository job to start")
+	}
+	active, err := manager.Active(ctx, KindRepositoryDistribution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != first.ID || active[0].Status != "running" {
+		t.Fatalf("active jobs %+v", active)
+	}
+	second, err := manager.Enqueue(ctx, KindRepositoryDistribution, nil, "project-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate repository job ID = %q, want %q", second.ID, first.ID)
+	}
+	close(release)
+}

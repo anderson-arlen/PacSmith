@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <QHash>
 #include <QMap>
 #include <QString>
 
@@ -20,6 +21,7 @@ struct ManagedPackageInfo {
 
 class ManagedPackageRegistry final {
 public:
+    [[nodiscard]] static QHash<QString, ManagedPackageInfo> snapshot(QString *error = nullptr);
     [[nodiscard]] static QList<ManagedPackageInfo> installed(QString *error = nullptr);
     [[nodiscard]] static std::optional<ManagedPackageInfo> find(const QString &packageName,
                                                                 QString *error = nullptr);

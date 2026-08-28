@@ -17,6 +17,39 @@ void appendIssue(QList<ReleaseReviewIssue> &issues, const QString &code,
     issues.append({code, category, summary, subject, remediation, blocksBuild});
 }
 
+QStringList dependencySurface(const PackageRelease &release) {
+    QStringList result;
+    result.reserve(release.dependencies.size());
+    for (const auto &dependency : release.dependencies) {
+        result.append(dependency.rawExpression.trimmed());
+    }
+    result.sort(Qt::CaseInsensitive);
+    return result;
+}
+
+QStringList maintainerScriptSurface(const PackageRelease &release) {
+    QStringList result;
+    result.reserve(release.maintainerScripts.size());
+    for (const auto &script : release.maintainerScripts) {
+        result.append(script.name + QLatin1Char(':') + script.contentFingerprint());
+    }
+    result.sort(Qt::CaseSensitive);
+    return result;
+}
+
+QString lifecycleSurface(const PackageRelease &release) {
+    if (release.lifecycleScript.contents.isEmpty()) return {};
+    auto sources = release.lifecycleScript.sourceFingerprints;
+    sources.sort(Qt::CaseSensitive);
+    return release.lifecycleScript.fileName + QLatin1Char('\n') +
+           release.lifecycleScript.contentFingerprint() + QLatin1Char('\n') +
+           sources.join(QLatin1Char('\n'));
+}
+
+void appendBlocker(QStringList &blockers, const QString &blocker) {
+    if (!blockers.contains(blocker)) blockers.append(blocker);
+}
+
 } // namespace
 
 bool archiveDesktopCommandUnmapped(const PackageRelease &release) {
@@ -138,6 +171,58 @@ QList<ReleaseReviewIssue> releaseReviewIssues(const PackageRelease &release) {
         }
     }
     return issues;
+}
+
+QStringList automaticUpdateBuildBlockers(const PackageRelease &previous,
+                                         const PackageRelease &next) {
+    QStringList blockers;
+    if (previous.buildStatus != BuildStatus::Succeeded && previous.builtArtifactIds.isEmpty()) {
+        blockers.append(QStringLiteral("The previous package configuration has no successful build."));
+    }
+    if (!releaseReviewIssues(previous).isEmpty()) {
+        blockers.append(QStringLiteral("The previous package configuration still has review issues."));
+    }
+    if (previous.sourceType != next.sourceType) {
+        blockers.append(QStringLiteral("The vendor package format changed."));
+    }
+    if (dependencySurface(previous) != dependencySurface(next)) {
+        blockers.append(QStringLiteral("The vendor dependency declarations changed."));
+    }
+    if (maintainerScriptSurface(previous) != maintainerScriptSurface(next)) {
+        blockers.append(QStringLiteral("The vendor lifecycle scripts changed."));
+    }
+    if (lifecycleSurface(previous) != lifecycleSurface(next)) {
+        blockers.append(QStringLiteral("The generated Arch lifecycle behavior changed."));
+    }
+    for (const auto &issue : releaseReviewIssues(next)) {
+        appendBlocker(blockers, issue.summary);
+    }
+    return blockers;
+}
+
+std::optional<AutomaticUpdateBuildSelection>
+automaticUpdateBuildSelection(const Project &project) {
+    const PackageRelease *previous = nullptr;
+    const PackageRelease *prepared = nullptr;
+    for (const auto &release : project.releases) {
+        const bool successfullyBuilt = release.buildStatus == BuildStatus::Succeeded ||
+                                       !release.builtArtifactIds.isEmpty();
+        if (successfullyBuilt &&
+            (previous == nullptr || compareReleaseVersions(release, *previous) > 0)) {
+            previous = &release;
+        }
+        const bool preparedState = release.state == ReleaseState::NeedsReview ||
+                                   release.state == ReleaseState::Ready;
+        if (preparedState && !successfullyBuilt &&
+            (prepared == nullptr || compareReleaseVersions(release, *prepared) > 0)) {
+            prepared = &release;
+        }
+    }
+    if (previous == nullptr || prepared == nullptr ||
+        compareReleaseVersions(*prepared, *previous) <= 0) {
+        return std::nullopt;
+    }
+    return AutomaticUpdateBuildSelection{previous->id, prepared->id};
 }
 
 } // namespace pacsmith

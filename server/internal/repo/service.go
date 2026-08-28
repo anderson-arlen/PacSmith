@@ -47,6 +47,7 @@ type Settings struct {
 	ListenHosts           []string `json:"listen_hosts"`
 	ListenPort            int      `json:"listen_port"`
 	AdvertisedURL         string   `json:"advertised_url"`
+	StableEnabled         bool     `json:"stable_enabled"`
 	SoakSeconds           int64    `json:"soak_seconds"`
 	PackageNamePrefix     string   `json:"package_name_prefix"`
 	TrustMode             string   `json:"trust_mode"`
@@ -68,15 +69,18 @@ type SettingsPatch struct {
 	ListenHosts       *[]string `json:"listen_hosts"`
 	ListenPort        *int      `json:"listen_port"`
 	AdvertisedURL     *string   `json:"advertised_url"`
+	StableEnabled     *bool     `json:"stable_enabled"`
 	SoakSeconds       *int64    `json:"soak_seconds"`
 	PackageNamePrefix *string   `json:"package_name_prefix"`
 	TrustMode         *string   `json:"trust_mode"`
 }
 
 type ProjectPatch struct {
-	Revision int64   `json:"revision"`
-	Publish  *bool   `json:"publish"`
-	Override *string `json:"package_name_override"`
+	Revision            int64   `json:"revision"`
+	Publish             *bool   `json:"publish"`
+	AutomaticSoak       *bool   `json:"automatic_soak"`
+	SoakSecondsOverride *int64  `json:"soak_seconds_override"`
+	Override            *string `json:"package_name_override"`
 }
 
 type PackageRef struct {
@@ -106,6 +110,7 @@ type SoakStatus struct {
 }
 
 type ProjectStatus struct {
+	Revision             int64        `json:"revision"`
 	Publish              bool         `json:"publish"`
 	OriginalPackageName  string       `json:"original_package_name"`
 	ArchPackageName      string       `json:"arch_package_name"`
@@ -115,6 +120,11 @@ type ProjectStatus struct {
 	PublishedPackageName string       `json:"published_package_name"`
 	PkgnameChangeWarning bool         `json:"pkgname_change_warning"`
 	Reserved             bool         `json:"reserved"`
+	StableChannelEnabled bool         `json:"stable_channel_enabled"`
+	AutomaticSoak        bool         `json:"automatic_soak"`
+	SoakSecondsOverride  int64        `json:"soak_seconds_override"`
+	LibrarySoakSeconds   int64        `json:"library_soak_seconds"`
+	EffectiveSoakSeconds int64        `json:"effective_soak_seconds"`
 	Unstable             *PackageRef  `json:"unstable"`
 	Stable               *PackageRef  `json:"stable"`
 	Soaks                []SoakStatus `json:"soaks"`
@@ -168,6 +178,7 @@ func settingsFromRow(row sqlcdb.RepoSetting) Settings {
 		ListenHosts:           decodeListenHosts(row.ListenHosts),
 		ListenPort:            int(row.ListenPort),
 		AdvertisedURL:         row.AdvertisedUrl,
+		StableEnabled:         row.StableEnabled != 0,
 		SoakSeconds:           row.SoakSeconds,
 		PackageNamePrefix:     row.PackageNamePrefix,
 		TrustMode:             row.TrustMode,
@@ -266,6 +277,9 @@ func (s *Service) PatchSettings(ctx context.Context, patch SettingsPatch) (Setti
 		}
 		next.AdvertisedUrl = value
 	}
+	if patch.StableEnabled != nil {
+		next.StableEnabled = boolInt(*patch.StableEnabled)
+	}
 	if patch.SoakSeconds != nil {
 		if *patch.SoakSeconds < 0 {
 			return Settings{}, fmt.Errorf("%w: soak duration cannot be negative", ErrInvalid)
@@ -309,6 +323,31 @@ func (s *Service) PatchSettings(ctx context.Context, patch SettingsPatch) (Setti
 			return Settings{}, err
 		}
 	}
+	if next.StableEnabled == 0 && current.StableEnabled != 0 {
+		if _, err := s.DB.SQL.ExecContext(ctx, `DELETE FROM repo_soaks`); err != nil {
+			return Settings{}, err
+		}
+		if _, err := s.DB.SQL.ExecContext(ctx,
+			`DELETE FROM repo_channel_entries WHERE channel = 'stable' AND project_id IS NOT NULL`); err != nil {
+			return Settings{}, err
+		}
+		if _, err := s.DB.SQL.ExecContext(ctx, `DELETE FROM repo_databases WHERE channel = 'stable'`); err != nil {
+			return Settings{}, err
+		}
+	}
+	if next.StableEnabled != current.StableEnabled && next.StableEnabled != 0 {
+		if err := s.republishAllLocked(ctx); err != nil {
+			return Settings{}, err
+		}
+	}
+	if next.StableEnabled != 0 && next.SoakSeconds != current.SoakSeconds {
+		if err := s.rescheduleInheritedSoaks(ctx, next.SoakSeconds); err != nil {
+			return Settings{}, err
+		}
+		if _, err := s.evaluateSoaksLocked(ctx); err != nil {
+			return Settings{}, err
+		}
+	}
 	return settingsFromRow(updated), nil
 }
 
@@ -348,6 +387,7 @@ func updateParamsFrom(row sqlcdb.RepoSetting, revision int64) sqlcdb.UpdateRepoS
 		ListenHosts:                 row.ListenHosts,
 		ListenPort:                  row.ListenPort,
 		AdvertisedUrl:               row.AdvertisedUrl,
+		StableEnabled:               row.StableEnabled,
 		SoakSeconds:                 row.SoakSeconds,
 		PackageNamePrefix:           row.PackageNamePrefix,
 		TrustMode:                   row.TrustMode,
@@ -436,6 +476,10 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 	if err != nil {
 		return ProjectStatus{}, err
 	}
+	policy, err := s.projectPolicy(ctx, projectID)
+	if err != nil {
+		return ProjectStatus{}, err
+	}
 	original := originalName(project)
 	releases, err := s.DB.Queries.ListReleasesForProject(ctx, project.ID)
 	if err != nil {
@@ -447,6 +491,7 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 	effective, original := EffectiveName(project.ArchPackageName, original, settings.PackageNamePrefix, project.RepoPkgnameOverride)
 	prefixDefault, _ := EffectiveName(project.ArchPackageName, original, settings.PackageNamePrefix, "")
 	status := ProjectStatus{
+		Revision:             project.Revision,
 		Publish:              project.RepoPublish != 0,
 		OriginalPackageName:  original,
 		ArchPackageName:      project.ArchPackageName,
@@ -456,6 +501,11 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 		PublishedPackageName: project.RepoPublishedPkgname,
 		PkgnameChangeWarning: project.RepoPublishedPkgname != "" && project.RepoPublishedPkgname != effective,
 		Reserved:             IsReserved(effective),
+		StableChannelEnabled: settings.StableEnabled,
+		AutomaticSoak:        settings.StableEnabled && policy.AutomaticSoak,
+		SoakSecondsOverride:  policy.SoakSecondsOverride,
+		LibrarySoakSeconds:   settings.SoakSeconds,
+		EffectiveSoakSeconds: effectiveSoakSeconds(settings.SoakSeconds, policy),
 		Soaks:                []SoakStatus{},
 	}
 	entries, err := s.DB.Queries.ListChannelEntries(ctx)
@@ -471,7 +521,9 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 		case ChannelUnstable:
 			status.Unstable = &ref
 		case ChannelStable:
-			status.Stable = &ref
+			if settings.StableEnabled {
+				status.Stable = &ref
+			}
 		}
 	}
 	soaks, err := s.DB.Queries.ListSoaks(ctx)
@@ -479,6 +531,9 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 		return ProjectStatus{}, err
 	}
 	for _, soak := range soaks {
+		if !settings.StableEnabled {
+			break
+		}
 		if !soak.ProjectID.Valid || soak.ProjectID.String != project.ID {
 			continue
 		}
@@ -488,6 +543,15 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 }
 
 func (s *Service) PatchProject(ctx context.Context, projectID string, patch ProjectPatch) (ProjectStatus, error) {
+	return s.patchProject(ctx, projectID, patch, false)
+}
+
+func (s *Service) PatchProjectDeferred(ctx context.Context, projectID string, patch ProjectPatch) (ProjectStatus, error) {
+	return s.patchProject(ctx, projectID, patch, true)
+}
+
+func (s *Service) patchProject(ctx context.Context, projectID string, patch ProjectPatch,
+	deferReconcile bool) (ProjectStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	project, err := s.DB.Queries.GetProject(ctx, projectID)
@@ -503,6 +567,16 @@ func (s *Service) PatchProject(ctx context.Context, projectID string, patch Proj
 	}
 	publish := project.RepoPublish
 	override := project.RepoPkgnameOverride
+	policy, err := s.projectPolicy(ctx, projectID)
+	if err != nil {
+		return ProjectStatus{}, err
+	}
+	previousPolicy := policy
+	settings, err := s.Settings(ctx)
+	if err != nil {
+		return ProjectStatus{}, err
+	}
+	previousSoakSeconds := effectiveSoakSeconds(settings.SoakSeconds, previousPolicy)
 	if patch.Publish != nil {
 		publish = boolInt(*patch.Publish)
 	}
@@ -512,10 +586,22 @@ func (s *Service) PatchProject(ctx context.Context, projectID string, patch Proj
 			override = strings.TrimSpace(override)
 		}
 	}
-	settings, err := s.Settings(ctx)
-	if err != nil {
-		return ProjectStatus{}, err
+	if patch.AutomaticSoak != nil {
+		policy.AutomaticSoak = *patch.AutomaticSoak
 	}
+	if patch.SoakSecondsOverride != nil {
+		if *patch.SoakSecondsOverride < -1 {
+			return ProjectStatus{}, fmt.Errorf("%w: project soak duration must be -1 or greater", ErrInvalid)
+		}
+		policy.SoakSecondsOverride = *patch.SoakSecondsOverride
+	}
+	if !settings.StableEnabled {
+		policy.AutomaticSoak = false
+	}
+	if publish == 0 {
+		policy.AutomaticSoak = false
+	}
+	nextSoakSeconds := effectiveSoakSeconds(settings.SoakSeconds, policy)
 	original := originalName(project)
 	effective, _ := EffectiveName(project.ArchPackageName, original, settings.PackageNamePrefix, override)
 	if publish != 0 {
@@ -526,10 +612,14 @@ func (s *Service) PatchProject(ctx context.Context, projectID string, patch Proj
 			return ProjectStatus{}, err
 		}
 	}
+	publishedName := project.RepoPublishedPkgname
+	if publish == 0 {
+		publishedName = ""
+	}
 	_, err = s.DB.Queries.UpdateProjectRepo(ctx, sqlcdb.UpdateProjectRepoParams{
 		RepoPublish:          publish,
 		RepoPkgnameOverride:  override,
-		RepoPublishedPkgname: project.RepoPublishedPkgname,
+		RepoPublishedPkgname: publishedName,
 		ModifiedAt:           s.nowString(),
 		ID:                   project.ID,
 		Revision:             revision,
@@ -540,7 +630,121 @@ func (s *Service) PatchProject(ctx context.Context, projectID string, patch Proj
 	if err != nil {
 		return ProjectStatus{}, err
 	}
+	if err := s.saveProjectPolicy(ctx, projectID, policy); err != nil {
+		return ProjectStatus{}, err
+	}
+	if deferReconcile {
+		return s.projectViewLocked(ctx, projectID)
+	}
+	rebuild := false
+	if publish == 0 {
+		if err := s.DB.Queries.DeleteChannelEntriesForProject(ctx, ns(projectID)); err != nil {
+			return ProjectStatus{}, err
+		}
+		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
+			return ProjectStatus{}, err
+		}
+		if err := s.DB.Queries.DeleteRepoPackageByProject(ctx, ns(projectID)); err != nil {
+			return ProjectStatus{}, err
+		}
+		rebuild = true
+	} else if !settings.StableEnabled {
+		if _, err := s.DB.SQL.ExecContext(ctx,
+			`DELETE FROM repo_channel_entries WHERE project_id = ? AND channel = 'stable'`,
+			projectID); err != nil {
+			return ProjectStatus{}, err
+		}
+		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
+			return ProjectStatus{}, err
+		}
+		rebuild = true
+	} else if !policy.AutomaticSoak {
+		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
+			return ProjectStatus{}, err
+		}
+	}
+	if publish != 0 && settings.StableEnabled && policy.AutomaticSoak &&
+		previousSoakSeconds != nextSoakSeconds {
+		if err := s.rescheduleProjectSoaks(ctx, projectID, nextSoakSeconds); err != nil {
+			return ProjectStatus{}, err
+		}
+		if _, err := s.evaluateSoaksLocked(ctx); err != nil {
+			return ProjectStatus{}, err
+		}
+	}
+	if rebuild {
+		if err := s.republishAllLocked(ctx); err != nil {
+			return ProjectStatus{}, err
+		}
+	}
+	if (project.RepoPublish == 0 && publish != 0) ||
+		(publish != 0 && policy.AutomaticSoak && !previousPolicy.AutomaticSoak) {
+		latest, err := s.latestSuccessfulBuild(ctx, projectID)
+		if err != nil {
+			return ProjectStatus{}, err
+		}
+		if latest != nil {
+			if err := s.publishBuildLocked(ctx, projectID, latest.ReleaseID,
+				latest.ArtifactIDs); err != nil {
+				return ProjectStatus{}, err
+			}
+		}
+	}
 	return s.projectViewLocked(ctx, projectID)
+}
+
+func (s *Service) ReconcileProjectDistribution(ctx context.Context, projectID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	project, err := s.DB.Queries.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	settings, err := s.Settings(ctx)
+	if err != nil {
+		return err
+	}
+	policy, err := s.projectPolicy(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if project.RepoPublish == 0 {
+		if err := s.DB.Queries.DeleteChannelEntriesForProject(ctx, ns(projectID)); err != nil {
+			return err
+		}
+		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
+			return err
+		}
+		if err := s.DB.Queries.DeleteRepoPackageByProject(ctx, ns(projectID)); err != nil {
+			return err
+		}
+		return s.republishAllLocked(ctx)
+	}
+	if !settings.StableEnabled {
+		if _, err := s.DB.SQL.ExecContext(ctx,
+			`DELETE FROM repo_channel_entries WHERE project_id = ? AND channel = 'stable'`,
+			projectID); err != nil {
+			return err
+		}
+		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
+			return err
+		}
+	} else if !policy.AutomaticSoak {
+		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
+			return err
+		}
+	} else if err := s.rescheduleProjectSoaks(ctx, projectID,
+		effectiveSoakSeconds(settings.SoakSeconds, policy)); err != nil {
+		return err
+	}
+	latest, err := s.latestSuccessfulBuild(ctx, projectID)
+	if err != nil || latest == nil {
+		return err
+	}
+	return s.publishBuildLocked(ctx, projectID, latest.ReleaseID, latest.ArtifactIDs)
 }
 
 func (s *Service) OnProjectDeleted(ctx context.Context, projectID string) error {

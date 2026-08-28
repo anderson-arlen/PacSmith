@@ -23,12 +23,21 @@ type pendingPackage struct {
 func (s *Service) PublishBuild(ctx context.Context, projectID, releaseID string, artifactIDs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.publishBuildLocked(ctx, projectID, releaseID, artifactIDs)
+}
+
+func (s *Service) publishBuildLocked(ctx context.Context, projectID, releaseID string,
+	artifactIDs []string) error {
 	project, err := s.DB.Queries.GetProject(ctx, projectID)
 	if err != nil {
 		return err
 	}
 	if project.RepoPublish == 0 {
 		return nil
+	}
+	policy, err := s.projectPolicy(ctx, projectID)
+	if err != nil {
+		return err
 	}
 	settings, err := s.DB.Queries.GetRepoSettings(ctx)
 	if err != nil {
@@ -40,11 +49,12 @@ func (s *Service) PublishBuild(ctx context.Context, projectID, releaseID string,
 	if len(artifactIDs) == 0 {
 		return nil
 	}
+	soakSeconds := effectiveSoakSeconds(settings.SoakSeconds, policy)
 
 	var pending []pendingPackage
 	arches := map[string]struct{}{}
 	for _, id := range artifactIDs {
-		item, err := s.preparePublishedPackage(ctx, settings, project, releaseID, id)
+		item, err := s.preparePublishedPackage(ctx, soakSeconds, project, releaseID, id)
 		if err != nil {
 			return err
 		}
@@ -82,8 +92,10 @@ func (s *Service) PublishBuild(ctx context.Context, projectID, releaseID string,
 
 	now := s.nowString()
 	for _, item := range pending {
-		if err := s.DB.Queries.UpsertSoak(ctx, item.soak); err != nil {
-			return err
+		if settings.StableEnabled != 0 {
+			if err := s.DB.Queries.UpsertSoak(ctx, item.soak); err != nil {
+				return err
+			}
 		}
 		item.entry.PublishedAt = now
 		if err := s.upsertChannel(ctx, item.entry); err != nil {
@@ -135,11 +147,15 @@ func (s *Service) PublishBuild(ctx context.Context, projectID, releaseID string,
 			Revision:             project.Revision,
 		})
 	}
-	_, err = s.evaluateSoaksLocked(ctx)
-	return err
+	if settings.StableEnabled != 0 && policy.AutomaticSoak {
+		_, err = s.evaluateSoaksLocked(ctx)
+		return err
+	}
+	return nil
 }
 
-func (s *Service) preparePublishedPackage(ctx context.Context, settings sqlcdb.RepoSetting, project sqlcdb.Project, releaseID, artifactID string) (pendingPackage, error) {
+func (s *Service) preparePublishedPackage(ctx context.Context, soakSeconds int64,
+	project sqlcdb.Project, releaseID, artifactID string) (pendingPackage, error) {
 	record, file, err := s.Artifacts.Open(ctx, artifactID)
 	if err != nil {
 		return pendingPackage{}, err
@@ -168,7 +184,7 @@ func (s *Service) preparePublishedPackage(ctx context.Context, settings sqlcdb.R
 	}
 
 	now := s.nowString()
-	eligible := s.now().Add(time.Duration(settings.SoakSeconds) * time.Second).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
+	eligible := s.now().Add(time.Duration(soakSeconds) * time.Second).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
 	existing, err := s.DB.Queries.GetSoak(ctx, sqlcdb.GetSoakParams{
 		Pkgname: info.Name,
 		Arch:    info.Arch,
@@ -187,7 +203,7 @@ func (s *Service) preparePublishedPackage(ctx context.Context, settings sqlcdb.R
 		if status == SoakPromoted || status == SoakSkipped {
 			status = SoakSoaking
 			started = now
-			eligible = s.now().Add(time.Duration(settings.SoakSeconds) * time.Second).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
+			eligible = s.now().Add(time.Duration(soakSeconds) * time.Second).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
 		}
 	} else if err == nil && (existing.ArtifactID != record.ID || existing.Pkgrel != info.Pkgrel) {
 		status = SoakSoaking
@@ -544,7 +560,11 @@ func (s *Service) republishAllLocked(ctx context.Context) error {
 		return nil
 	}
 	arches := s.knownArches(ctx)
-	for _, channel := range []string{ChannelStable, ChannelUnstable} {
+	channels := []string{ChannelUnstable}
+	if settings.StableEnabled != 0 {
+		channels = append(channels, ChannelStable)
+	}
+	for _, channel := range channels {
 		for _, arch := range arches {
 			if err := s.rebuildDatabaseLocked(ctx, channel, arch); err != nil {
 				return err

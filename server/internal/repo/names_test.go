@@ -102,8 +102,14 @@ func TestBootstrapFingerprintCheck(t *testing.T) {
 	}, ChannelStable)
 	for _, snippet := range []string{
 		"EXPECTED_PACSMITH_FPR=",
+		"EXPECTED_TRUSTED_FPR=",
+		"EXPECTED_OWNER_TRUST=",
 		"grep -qx \"$EXPECTED_PACSMITH_FPR\"",
+		`printf '%s:%s:\n' "$EXPECTED_TRUSTED_FPR" "$EXPECTED_OWNER_TRUST"`,
 		"SigLevel = Required TrustedOnly",
+		`gpgdir=$(pacman-conf --config=/etc/pacman.conf gpgdir)`,
+		`--import-ownertrust "$tmp/pacsmith-trusted"`,
+		"pacman-key --updatedb",
 		"${BASE_URL}/repo/${CHANNEL}/",
 		"Keep repository access on a trusted private",
 		"Tailscale, or WireGuard network",

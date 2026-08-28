@@ -82,6 +82,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("POST /api/v1/imports", server.createImport)
 	mux.HandleFunc("POST /api/v1/releases/{id}/reanalyze", server.reanalyze)
 	mux.HandleFunc("POST /api/v1/releases/{id}/builds", server.createBuild)
+	mux.HandleFunc("GET /api/v1/jobs", server.listActiveJobs)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", server.getJob)
 	mux.HandleFunc("GET /api/v1/jobs/{id}/log", server.getJobLog)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", server.cancelJob)

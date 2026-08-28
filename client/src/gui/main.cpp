@@ -1,4 +1,5 @@
 #include "gui/application_session.hpp"
+#include "gui/appearance.hpp"
 #include "gui/gui_instance.hpp"
 #include "gui/wheel_scroll_guard.hpp"
 #include "core/app_settings.hpp"
@@ -64,6 +65,8 @@ int main(int argc, char *argv[]) {
     QCoreApplication::setOrganizationName(QStringLiteral("PacSmith"));
     QGuiApplication::setDesktopFileName(QStringLiteral("pacsmith"));
     application.setWindowIcon(applicationIcon());
+    pacsmith::AppSettingsStore settingsStore;
+    pacsmith::gui::applyInterfaceTheme(settingsStore.load().appearance.interfaceTheme);
     pacsmith::gui::WheelScrollGuard wheelScrollGuard(&application);
     application.installEventFilter(&wheelScrollGuard);
 
@@ -109,7 +112,6 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    pacsmith::AppSettingsStore settingsStore;
     const bool hideWindow = startHidden && QSystemTrayIcon::isSystemTrayAvailable();
     if (startHidden && !hideWindow) {
         QMessageBox::warning(nullptr, QStringLiteral("PacSmith"),

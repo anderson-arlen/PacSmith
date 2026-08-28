@@ -3,8 +3,10 @@
 #include "gui/main_window/support.hpp"
 
 #include <QCompleter>
+#include <QFontDatabase>
 #include <QLineEdit>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPen>
 #include <QStyledItemDelegate>
 #include <QTableWidget>
@@ -54,6 +56,13 @@ public:
             static_cast<ProjectVisualState>(index.data(projectVisualStateRole).toInt());
         const bool checking = index.data(projectCheckingRole).toBool() || !activity.isEmpty();
         const auto state = checking ? ProjectVisualState::Preparing : visualState;
+        int spinnerFrame = 0;
+        if (option.widget != nullptr) {
+            spinnerFrame = option.widget->property("pacsmithSpinnerFrame").toInt();
+            if (spinnerFrame == 0 && option.widget->parentWidget() != nullptr) {
+                spinnerFrame = option.widget->parentWidget()->property("pacsmithSpinnerFrame").toInt();
+            }
+        }
         const auto row = option.rect.adjusted(2, 2, -2, -2);
 
         if (selected) {
@@ -91,9 +100,10 @@ public:
         icon.paint(painter, iconRect, Qt::AlignCenter,
                    option.state.testFlag(QStyle::State_Enabled) ? QIcon::Normal
                                                                 : QIcon::Disabled);
+        paintStatusBadge(painter, iconRect, state, spinnerFrame);
 
         const auto textLeft = iconRect.right() + 10;
-        const auto textWidth = std::max(0, row.right() - textLeft - 7 - (checking ? 24 : 0));
+        const auto textWidth = std::max(0, row.right() - textLeft - 7);
         const QRect nameRect(textLeft, row.top() + 8, textWidth, 21);
         const QRect subtitleRect(textLeft, row.top() + 31, textWidth, 19);
         auto nameFont = option.font;
@@ -104,53 +114,122 @@ public:
                           option.fontMetrics.elidedText(index.data(Qt::DisplayRole).toString(),
                                                         Qt::ElideRight, textWidth));
 
-        auto subtitleFont = option.font;
-        subtitleFont.setPointSizeF(std::max(7.0, subtitleFont.pointSizeF() - 0.5));
-        subtitleFont.setBold(state == ProjectVisualState::UpdateAvailable ||
-                             state == ProjectVisualState::Preparing);
+        auto subtitleFont = activity.isEmpty()
+            ? QFontDatabase::systemFont(QFontDatabase::FixedFont) : option.font;
+        subtitleFont.setPointSizeF(std::max(7.0, option.font.pointSizeF() - 0.5));
+        subtitleFont.setBold(!activity.isEmpty());
         painter->setFont(subtitleFont);
-        QColor secondary;
-        switch (state) {
-        case ProjectVisualState::Current:
-            secondary = darkTheme ? QColor(92, 214, 126) : QColor(24, 125, 55);
-            break;
-        case ProjectVisualState::UpdateAvailable:
-        case ProjectVisualState::Attention:
-            secondary = darkTheme ? QColor(255, 218, 128) : QColor(105, 61, 0);
-            break;
-        case ProjectVisualState::Preparing:
-            secondary = option.palette.link().color();
-            break;
-        case ProjectVisualState::NotInstalled:
-            secondary = selected
-                ? (darkTheme ? QColor(205, 209, 213) : QColor(72, 78, 84))
-                : option.palette.placeholderText().color();
-            break;
-        }
+        const auto secondary = !activity.isEmpty()
+            ? option.palette.link().color()
+            : selected ? option.palette.text().color()
+                       : option.palette.placeholderText().color();
         painter->setPen(secondary);
         const QFontMetrics subtitleMetrics(subtitleFont);
         const auto subtitle = activity.isEmpty() ? index.data(projectSubtitleRole).toString()
                                                  : activity;
+        const bool repositoryEnabled = index.data(projectRepositoryEnabledRole).toBool();
+        const bool repositoryBusy = index.data(projectRepositoryBusyRole).toBool();
+        const int indicatorWidth = repositoryEnabled || repositoryBusy ? 16 : 0;
+        const auto subtitleWidth = std::max(0, textWidth - indicatorWidth);
+        const auto displayedSubtitle = subtitleMetrics.elidedText(
+            subtitle, Qt::ElideRight, subtitleWidth);
         painter->drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter,
-                          subtitleMetrics.elidedText(subtitle, Qt::ElideRight, textWidth));
-        if (checking) {
-            int spinnerFrame = 0;
-            if (option.widget != nullptr) {
-                spinnerFrame = option.widget->property("pacsmithSpinnerFrame").toInt();
-                if (spinnerFrame == 0 && option.widget->parentWidget() != nullptr) {
-                    spinnerFrame = option.widget->parentWidget()->property("pacsmithSpinnerFrame").toInt();
-                }
-            }
-            const auto spinnerSize = 16;
-            const QRect spinnerRect(row.right() - spinnerSize - 6,
-                                    row.center().y() - spinnerSize / 2, spinnerSize, spinnerSize);
-            painter->setRenderHint(QPainter::Antialiasing, true);
-            painter->setBrush(Qt::NoBrush);
-            auto spinnerPen = QPen(secondary, 2.25);
-            spinnerPen.setCapStyle(Qt::RoundCap);
-            painter->setPen(spinnerPen);
-            painter->drawArc(spinnerRect, (spinnerFrame % 4) * 90 * 16, 270 * 16);
+                          displayedSubtitle);
+        if (repositoryEnabled || repositoryBusy) {
+            const auto indicatorLeft = std::min(
+                subtitleRect.right() - indicatorWidth + 1,
+                subtitleRect.left() + subtitleMetrics.horizontalAdvance(displayedSubtitle) + 4);
+            paintRepositoryIndicator(
+                painter, QRect(indicatorLeft, subtitleRect.top() + 2, 14, 14),
+                repositoryBusy, spinnerFrame, secondary);
         }
+        painter->restore();
+    }
+
+private:
+    static void paintStatusBadge(QPainter *painter, const QRect &iconRect,
+                                 const ProjectVisualState state, const int spinnerFrame) {
+        const QRect badge(iconRect.right() - 15, iconRect.bottom() - 15, 17, 17);
+        QColor color;
+        switch (state) {
+        case ProjectVisualState::Current: color = QColor(32, 145, 70); break;
+        case ProjectVisualState::UpdateAvailable: color = QColor(196, 126, 0); break;
+        case ProjectVisualState::Attention: color = QColor(190, 48, 48); break;
+        case ProjectVisualState::Preparing: color = QColor(35, 125, 185); break;
+        case ProjectVisualState::NotInstalled: color = QColor(105, 112, 120); break;
+        }
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(Qt::white);
+        painter->drawEllipse(badge);
+        const auto inner = badge.adjusted(2, 2, -2, -2);
+        painter->setBrush(color);
+        painter->drawEllipse(inner);
+        auto glyphPen = QPen(Qt::white, 1.7);
+        glyphPen.setCapStyle(Qt::RoundCap);
+        glyphPen.setJoinStyle(Qt::RoundJoin);
+        painter->setPen(glyphPen);
+        painter->setBrush(Qt::NoBrush);
+        const auto center = inner.center();
+        switch (state) {
+        case ProjectVisualState::Current:
+            painter->drawPolyline(QPolygon({QPoint(center.x() - 3, center.y()),
+                                             QPoint(center.x() - 1, center.y() + 2),
+                                             QPoint(center.x() + 4, center.y() - 3)}));
+            break;
+        case ProjectVisualState::UpdateAvailable:
+            painter->drawLine(center.x(), center.y() + 4, center.x(), center.y() - 4);
+            painter->drawLine(center.x(), center.y() - 4, center.x() - 3, center.y() - 1);
+            painter->drawLine(center.x(), center.y() - 4, center.x() + 3, center.y() - 1);
+            break;
+        case ProjectVisualState::Attention:
+            painter->drawLine(center.x(), center.y() - 4, center.x(), center.y() + 1);
+            painter->drawPoint(center.x(), center.y() + 4);
+            break;
+        case ProjectVisualState::Preparing:
+            painter->drawArc(inner.adjusted(2, 2, -2, -2),
+                             (spinnerFrame % 4) * 90 * 16, 250 * 16);
+            break;
+        case ProjectVisualState::NotInstalled:
+            painter->drawLine(center.x() - 3, center.y(), center.x() + 3, center.y());
+            break;
+        }
+        painter->restore();
+    }
+
+    static void paintRepositoryIndicator(QPainter *painter, const QRect &rect,
+                                         const bool busy,
+                                         const int spinnerFrame, const QColor &secondary) {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        auto color = busy ? QColor(35, 125, 185) : secondary;
+        auto pen = QPen(color, 1.1);
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
+        painter->setPen(pen);
+        painter->setBrush(color);
+        const QPointF transmitter(rect.center().x(), rect.top() + 8);
+        painter->drawEllipse(transmitter, 1.1, 1.1);
+        painter->drawLine(transmitter + QPointF(0, 1), QPointF(transmitter.x(), rect.bottom() - 2));
+        painter->drawLine(QPointF(transmitter.x() - 3, rect.bottom() - 2),
+                          QPointF(transmitter.x() + 3, rect.bottom() - 2));
+        const auto drawWave = [&](const qreal distance, const qreal rise) {
+            QPainterPath left;
+            left.moveTo(transmitter + QPointF(-distance, 0));
+            left.cubicTo(transmitter + QPointF(-distance, -rise / 2),
+                         transmitter + QPointF(-distance / 2, -rise),
+                         transmitter + QPointF(0, -rise));
+            painter->drawPath(left);
+            QPainterPath right;
+            right.moveTo(transmitter + QPointF(distance, 0));
+            right.cubicTo(transmitter + QPointF(distance, -rise / 2),
+                          transmitter + QPointF(distance / 2, -rise),
+                          transmitter + QPointF(0, -rise));
+            painter->drawPath(right);
+        };
+        if (!busy || spinnerFrame % 2 == 0) drawWave(3.5, 3.5);
+        if (!busy || spinnerFrame % 4 >= 2) drawWave(6.0, 6.0);
         painter->restore();
     }
 };

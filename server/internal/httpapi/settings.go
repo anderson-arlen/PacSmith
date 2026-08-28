@@ -4,14 +4,20 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"runtime"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 )
 
 type librarySettingsJSON struct {
-	Revision int64               `json:"revision"`
-	Updates  updateSettingsJSON  `json:"updates"`
-	Cleanup  cleanupSettingsJSON `json:"cleanup"`
+	Revision int64              `json:"revision"`
+	Updates  updateSettingsJSON `json:"updates"`
+	Build    buildSettingsJSON  `json:"build"`
+}
+
+type buildSettingsJSON struct {
+	Parallelism    *int `json:"parallelism,omitempty"`
+	AvailableCores int  `json:"available_cores,omitempty"`
 }
 
 type updateSettingsJSON struct {
@@ -21,11 +27,7 @@ type updateSettingsJSON struct {
 	Hour                 int  `json:"hour"`
 	Minute               int  `json:"minute"`
 	AutomaticallyPrepare bool `json:"automatically_prepare"`
-}
-
-type cleanupSettingsJSON struct {
-	RetainedPackageVersions  int `json:"retained_package_versions"`
-	RetainedCompleteReleases int `json:"retained_complete_releases"`
+	RetentionVersions    *int `json:"retention_versions,omitempty"`
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -65,8 +67,15 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) settingsFromRow(r *http.Request, row sqlcdb.LibrarySetting) librarySettingsJSON {
+	retentionVersions := int(row.RetentionVersions)
+	buildParallelism := int(row.BuildParallelism)
+	availableCores := min(runtime.NumCPU(), 1024)
 	return librarySettingsJSON{
 		Revision: row.Revision,
+		Build: buildSettingsJSON{
+			Parallelism:    &buildParallelism,
+			AvailableCores: availableCores,
+		},
 		Updates: updateSettingsJSON{
 			Enabled:              row.UpdatesEnabled != 0,
 			Daily:                row.UpdatesDaily != 0,
@@ -74,10 +83,7 @@ func (s *Server) settingsFromRow(r *http.Request, row sqlcdb.LibrarySetting) lib
 			Hour:                 int(row.UpdatesHour),
 			Minute:               int(row.UpdatesMinute),
 			AutomaticallyPrepare: row.UpdatesAutoPrepare != 0,
-		},
-		Cleanup: cleanupSettingsJSON{
-			RetainedPackageVersions:  int(row.RetainedPackageVersions),
-			RetainedCompleteReleases: int(row.RetainedCompleteReleases),
+			RetentionVersions:    &retentionVersions,
 		},
 	}
 }
@@ -91,21 +97,29 @@ func settingsPatch(current sqlcdb.LibrarySetting, body librarySettingsJSON) sqlc
 	if weekday == 0 {
 		weekday = current.UpdatesWeekday
 	}
+	retentionVersions := current.RetentionVersions
+	if body.Updates.RetentionVersions != nil {
+		retentionVersions = int64(*body.Updates.RetentionVersions)
+	}
+	buildParallelism := current.BuildParallelism
+	if body.Build.Parallelism != nil {
+		buildParallelism = int64(*body.Build.Parallelism)
+	}
 	return sqlcdb.UpdateLibrarySettingsParams{
-		AiProvider:               "none",
-		AiModel:                  "",
-		AiReasoningEffort:        "provider-default",
-		AiExecutionMode:          "standard",
-		AiAutoResolve:            0,
-		UpdatesEnabled:           boolInt(body.Updates.Enabled),
-		UpdatesDaily:             boolInt(body.Updates.Daily),
-		UpdatesWeekday:           weekday,
-		UpdatesHour:              int64(body.Updates.Hour),
-		UpdatesMinute:            int64(body.Updates.Minute),
-		UpdatesAutoPrepare:       boolInt(body.Updates.AutomaticallyPrepare),
-		RetainedPackageVersions:  int64(body.Cleanup.RetainedPackageVersions),
-		RetainedCompleteReleases: int64(body.Cleanup.RetainedCompleteReleases),
-		Revision:                 revision,
+		AiProvider:         "none",
+		AiModel:            "",
+		AiReasoningEffort:  "provider-default",
+		AiExecutionMode:    "standard",
+		AiAutoResolve:      0,
+		UpdatesEnabled:     boolInt(body.Updates.Enabled),
+		UpdatesDaily:       boolInt(body.Updates.Daily),
+		UpdatesWeekday:     weekday,
+		UpdatesHour:        int64(body.Updates.Hour),
+		UpdatesMinute:      int64(body.Updates.Minute),
+		UpdatesAutoPrepare: boolInt(body.Updates.AutomaticallyPrepare),
+		RetentionVersions:  retentionVersions,
+		BuildParallelism:   buildParallelism,
+		Revision:           revision,
 	}
 }
 
@@ -116,12 +130,11 @@ func validateSettings(next sqlcdb.UpdateLibrarySettingsParams) error {
 	if next.UpdatesHour < 0 || next.UpdatesHour > 23 || next.UpdatesMinute < 0 || next.UpdatesMinute > 59 {
 		return errors.New("update time is invalid")
 	}
-	if next.RetainedPackageVersions < -1 || next.RetainedCompleteReleases < -1 {
-		return errors.New("retention counts must be -1 or greater")
+	if next.RetentionVersions < -1 {
+		return errors.New("retention versions must be -1 or greater")
 	}
-	if next.RetainedPackageVersions >= 0 && next.RetainedCompleteReleases >= 0 &&
-		next.RetainedCompleteReleases < next.RetainedPackageVersions {
-		return errors.New("complete-release retention cannot be lower than artifact retention")
+	if next.BuildParallelism < 1 || next.BuildParallelism > int64(min(runtime.NumCPU(), 1024)) {
+		return errors.New("build parallelism must be between 1 and the server's available cores")
 	}
 	return nil
 }

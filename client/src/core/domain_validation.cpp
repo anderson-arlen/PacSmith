@@ -85,10 +85,10 @@ QString updateConfiguration(const UpdateConfiguration &configuration) {
         if (configuration.githubOwner.trimmed().isEmpty() ||
             configuration.githubRepository.trimmed().isEmpty() ||
             configuration.githubAssetRegex.trimmed().isEmpty()) {
-            return QStringLiteral("GitHub owner, repository, and an asset-name regular expression are required.");
+            return QStringLiteral("GitHub owner, repository, and an artifact regular expression are required.");
         }
         if (!expression.isValid()) {
-            return QStringLiteral("The asset-name regular expression is invalid: %1")
+            return QStringLiteral("The artifact regular expression is invalid: %1")
                 .arg(expression.errorString());
         }
         return {};

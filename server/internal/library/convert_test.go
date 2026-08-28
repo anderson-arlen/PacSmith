@@ -98,6 +98,54 @@ func TestIdentityVariablesIncludeImportedIcon(t *testing.T) {
 	}
 }
 
+func TestImportedIconUsesFinalArchPackageName(t *testing.T) {
+	analysis := inspect.Analysis{
+		Metadata: inspect.Metadata{Package: "code", Version: "1.135.0", Architecture: "amd64"},
+		Install: inspect.InstallMapping{
+			Icon: inspect.IconConfiguration{
+				SourcePath: "usr/share/pixmaps/vscode.png",
+				SHA256:     strings.Repeat("c", 64),
+				Format:     "png",
+				IconName:   "code",
+			},
+			DesktopEntries: []inspect.DesktopEntry{
+				{Enabled: true, Contents: "[Desktop Entry]\nName=Code\nIcon=vscode\n"},
+				{Enabled: false, Contents: "[Desktop Entry]\nName=Code URL\nIcon=vscode-url\n"},
+			},
+		},
+	}
+
+	alignIntegrationIconName(&analysis, "code-bin")
+
+	if analysis.Install.Icon.IconName != "code-bin" {
+		t.Fatalf("icon name %q", analysis.Install.Icon.IconName)
+	}
+	if !strings.Contains(analysis.Install.DesktopEntries[0].Contents, "Icon=code-bin\n") {
+		t.Fatalf("enabled desktop icon was not aligned: %q", analysis.Install.DesktopEntries[0].Contents)
+	}
+	if !strings.Contains(analysis.Install.DesktopEntries[1].Contents, "Icon=vscode-url\n") {
+		t.Fatalf("disabled desktop entry was modified: %q", analysis.Install.DesktopEntries[1].Contents)
+	}
+	rel := recipeFromAnalysis("project", "release", "code.deb", strings.Repeat("a", 64), analysis)
+	if rel.InstallMapping.Icon.IconName != "code-bin" ||
+		!strings.Contains(rel.InstallMapping.DesktopEntries[0].Contents, "Icon=code-bin\n") {
+		t.Fatalf("recipe integration was not aligned: %+v", rel.InstallMapping)
+	}
+	raw, err := analysisDocument("code.deb", strings.Repeat("a", 64), "pkgbuild", analysis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		t.Fatal(err)
+	}
+	install, _ := mapValue(document, "installMapping")
+	icon, _ := mapValue(install, "icon")
+	if stringValue(icon, "iconName") != "code-bin" {
+		t.Fatalf("stored icon name %q", stringValue(icon, "iconName"))
+	}
+}
+
 func TestUpdateConfigurationFromVendorScripts(t *testing.T) {
 	analysis := inspect.Analysis{
 		Metadata: inspect.Metadata{

@@ -196,6 +196,41 @@ func desktopField(contents, key string) string {
 	return ""
 }
 
+func alignIntegrationIconName(analysis *inspect.Analysis, archPackageName string) {
+	if analysis == nil || analysis.Install.Icon.SHA256 == "" || archPackageName == "" {
+		return
+	}
+	analysis.Install.Icon.IconName = archPackageName
+	for i := range analysis.Install.DesktopEntries {
+		desktop := &analysis.Install.DesktopEntries[i]
+		if !desktop.Enabled {
+			continue
+		}
+		desktop.Contents = withDesktopField(desktop.Contents, "Icon", archPackageName)
+	}
+}
+
+func withDesktopField(contents, key, value string) string {
+	contents = strings.ReplaceAll(contents, "\r\n", "\n")
+	lines := strings.Split(contents, "\n")
+	prefix := key + "="
+	replaced := false
+	for i := range lines {
+		if !strings.HasPrefix(lines[i], prefix) {
+			continue
+		}
+		lines[i] = prefix + value
+		replaced = true
+	}
+	if !replaced {
+		for len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		lines = append(lines, prefix+value, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func analysisDocument(filename, sha256, pkgbuild string, analysis inspect.Analysis) (string, error) {
 	payload := make([]map[string]any, 0, len(analysis.Payload))
 	for _, entry := range analysis.Payload {

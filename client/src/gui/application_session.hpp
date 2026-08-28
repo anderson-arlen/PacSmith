@@ -3,6 +3,7 @@
 #include "gui/gui_instance.hpp"
 
 #include <QMenu>
+#include <QHash>
 #include <QObject>
 #include <QProcess>
 #include <QString>
@@ -15,6 +16,8 @@ namespace pacsmith {
 
 class AppSettingsStore;
 class CredentialStore;
+class LibraryEventStream;
+struct ServerEvent;
 
 }
 
@@ -43,6 +46,7 @@ private:
     void refreshTray();
     void scheduleNextCheck();
     void runBackgroundCheck(CheckKind kind);
+    void handleServerEvent(const pacsmith::ServerEvent &event);
     void quitSession();
     void maybeOnboard();
 
@@ -53,11 +57,17 @@ private:
     std::unique_ptr<QMenu> trayMenu_;
     std::unique_ptr<MainWindow> window_;
     QTimer trayRefresh_;
+    QTimer trayAnimation_;
     QTimer checkTimer_;
     QProcess *checkProcess_{nullptr};
     int lastTrayBadge_{-1};
+    QRgb lastTrayColor_{0};
     bool lastTrayChecking_{false};
     bool lastTrayPreparing_{false};
+    int lastTrayActivityFrame_{-1};
+    int trayActivityFrame_{0};
+    QHash<QString, QString> activeBuildJobs_;
+    LibraryEventStream *libraryEventStream_{nullptr};
     bool startHidden_{false};
     bool onboardingStarted_{false};
 };

@@ -36,8 +36,15 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := again.SQL.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 8 {
+	if version != 14 {
 		t.Fatalf("migration version %d", version)
+	}
+	settings, err := again.Queries.GetLibrarySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.BuildParallelism != 1 {
+		t.Fatalf("build parallelism %d", settings.BuildParallelism)
 	}
 	var foreignKeys, journal string
 	if err := again.SQL.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {

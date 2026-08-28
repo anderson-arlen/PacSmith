@@ -152,34 +152,13 @@ int runRepositoryAdd(const QStringList &arguments, pacsmith::LibraryClient &libr
         return 1;
     }
 
-    pacsmith::RepositoryKeyDownloadService keyDownloader;
-    QByteArray keyContents;
     QString keyError;
-    QEventLoop keyLoop;
-    QObject::connect(&keyDownloader, &pacsmith::RepositoryKeyDownloadService::progress,
-                     [&errorStream](const qint64 received, const qint64 total) {
-        errorStream << "signing key " << received
-                    << (total > 0 ? QStringLiteral("/%1").arg(total) : QString{})
-                    << " bytes\r" << Qt::flush;
-    });
-    QObject::connect(&keyDownloader, &pacsmith::RepositoryKeyDownloadService::finished,
-                     [&keyContents, &keyLoop](const QByteArray &contents, const QUrl &,
-                                               const QUrl &) {
-        keyContents = contents;
-        keyLoop.quit();
-    });
-    QObject::connect(&keyDownloader, &pacsmith::RepositoryKeyDownloadService::failed,
-                     [&keyError, &keyLoop](const QString &message) {
-        keyError = message;
-        keyLoop.quit();
-    });
-    keyDownloader.start(keyUrl);
-    if (keyDownloader.isRunning()) keyLoop.exec();
-    errorStream << '\n';
-    if (keyContents.isEmpty()) {
+    const auto downloadedKey = pacsmith::downloadRepositorySigningKey(keyUrl, &keyError);
+    if (!downloadedKey) {
         errorStream << "error: " << keyError << '\n';
         return 1;
     }
+    const auto &keyContents = downloadedKey->contents;
     QString inspectionError;
     const auto inspection = pacsmith::RepositoryTrust::inspectKey(keyContents,
                                                                   &inspectionError);
@@ -359,6 +338,9 @@ int runCheck(pacsmith::LibraryClient &library, pacsmith::Project project, QTextS
             library, std::move(project), errorStream, false, backgroundState);
     if (result.prepared) {
         out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
+    }
+    if (result.built) {
+        out << result.projectId << "\tbuilt\t" << result.detectedVersion << '\n';
     }
     out << result.projectId << '\t' << result.status << '\t' << result.message << '\n';
     return result.exitCode;
@@ -585,7 +567,7 @@ int main(int argc, char *argv[]) {
             }
             const QRegularExpression expression(assetRegex);
             if (assetRegex.isEmpty() || !expression.isValid()) {
-                errorStream << "error: GitHub imports require --asset-regex <regex> matching exactly one release asset"
+                errorStream << "error: GitHub imports require --asset-regex <regex> matching exactly one release artifact"
                             << (expression.isValid() ? QString{} : QStringLiteral(": %1").arg(expression.errorString()))
                             << '\n';
                 return 1;
@@ -626,7 +608,7 @@ int main(int argc, char *argv[]) {
             if (!githubResult.success || githubResult.downloadUrl.isEmpty()) {
                 errorStream << "error: " << githubResult.message << '\n';
                 if (!githubResult.availableAssets.isEmpty()) {
-                    errorStream << "release assets:\n";
+                    errorStream << "release artifacts:\n";
                     for (const auto &asset : githubResult.availableAssets) errorStream << "  " << asset << '\n';
                 }
                 return 1;
@@ -772,6 +754,9 @@ int main(int argc, char *argv[]) {
         for (const auto &result : batch.checks) {
             if (result.prepared) {
                 out << result.projectId << "\tprepared\t" << result.detectedVersion << '\n';
+            }
+            if (result.built) {
+                out << result.projectId << "\tbuilt\t" << result.detectedVersion << '\n';
             }
             out << result.projectId << '\t' << result.status << '\t' << result.message << '\n';
         }

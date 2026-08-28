@@ -14,6 +14,12 @@ QStringList metadataList(const QString &text) {
     return result;
 }
 
+QString buildSpinnerLabel(const int frame) {
+    static const QStringList frames{QStringLiteral("⠋"), QStringLiteral("⠙"),
+                                    QStringLiteral("⠹"), QStringLiteral("⠸")};
+    return QStringLiteral("%1 Cancel Build").arg(frames.at(frame % frames.size()));
+}
+
 } // namespace
 
 void MainWindow::populatePackageMetadata() {
@@ -431,16 +437,21 @@ void MainWindow::populateBuild() {
                                           : QStringLiteral("⚠ %1 payload file(s) need a keep/exclude decision")
                                                 .arg(payloadReviews),
                                       lifecycleState, iconState));
-    const bool building = buildInProgress();
+    const bool building = releaseBuildInProgress(currentRelease()->id);
+    const bool anotherBuild = buildInProgress() && !building;
     const bool installing = packageOperationInProgress();
     const bool hasExistingBuild = releaseHasExistingBuild(*currentRelease());
-    buildButton_->setText(building ? QStringLiteral("Cancel Build")
+    buildButton_->setText(building ? buildSpinnerLabel(preparationSpinnerFrame_)
                                    : hasExistingBuild ? QStringLiteral("Rebuild")
                                                       : QStringLiteral("Build"));
-    buildButton_->setEnabled(!installing && (building || unavailable == 0));
+    buildButton_->setEnabled(!installing && !anotherBuild && (building || unavailable == 0));
     buildButton_->setToolTip(!building && unavailable > 0
                                  ? QStringLiteral("Correct unavailable package names on Dependencies before building")
                                  : QString{});
+    if (viewBuildOutputButton_ != nullptr) {
+        viewBuildOutputButton_->setVisible(building);
+        viewBuildOutputButton_->setEnabled(building);
+    }
     const bool updateInstall = !project_->installedVersion.isEmpty() &&
                                currentRelease()->id != project_->installedReleaseId;
     installButton_->setText(installing ? QStringLiteral("Installing…")

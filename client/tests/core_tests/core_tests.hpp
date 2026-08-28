@@ -32,6 +32,7 @@ private slots:
     void comparesRpmVersions();
     void verifiesPinnedAptRepositorySignatures();
     void validatesRepositorySigningKeyUrls();
+    void serializesImportedSigningKeyContents();
     void tracksContentSpecificPayloadDecisions();
     void serializesProjectsAndOverrides();
     void persistsHarnessProfilesAndIgnoresLegacyAiSettings();
@@ -39,6 +40,7 @@ private slots:
     void describesDomainMcpToolsAndPermissions();
     void validatesGuiAndMcpDomainEditsConsistently();
     void reportsStructuredReleaseReviewIssues();
+    void gatesAutomaticUpdateBuildsOnReviewedConfigurationChanges();
     void preservesConfiguredRemoteConnectionForMcp();
     void buildsHarnessPromptsAndArgumentsSafely();
     void validatesPortableAgentPluginBundle();

@@ -5,14 +5,15 @@ namespace {
 
 struct EventRefreshResult {
     QList<Project> projects;
+    QSet<QString> missingProjectIds;
     QString error;
     QSet<QString> topics;
+    bool fullRefresh{false};
 };
 
 bool refreshesProjects(const QSet<QString> &topics) {
     return topics.contains(QStringLiteral("all")) ||
            topics.contains(QStringLiteral("projects")) ||
-           topics.contains(QStringLiteral("jobs")) ||
            topics.contains(QStringLiteral("repository"));
 }
 
@@ -25,21 +26,46 @@ bool revisionsDiffer(const Project &left, const Project &right) {
     return false;
 }
 
+bool projectListStateDiffers(const Project &left, const Project &right) {
+    return revisionsDiffer(left, right) ||
+           left.displayName != right.displayName ||
+           left.archPackageName != right.archPackageName ||
+           left.installedVersion != right.installedVersion ||
+           left.installedReleaseId != right.installedReleaseId ||
+           left.externallyInstalled != right.externallyInstalled;
+}
+
 } // namespace
 
 void MainWindow::handleServerEvent(const ServerEvent &event) {
     const QSet<QString> topics(event.topics.cbegin(), event.topics.cend());
     emit serverTopicsChanged(event.topics);
+    updateBuildJobStatus(event);
     if (!event.jobId.isEmpty() && !event.jobStatus.isEmpty()) {
-        const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
-                              event.jobStatus == QStringLiteral("failed") ||
-                              event.jobStatus == QStringLiteral("interrupted");
-        const auto message = jobStatusMessage(event);
-        if (!message.isEmpty()) statusBar()->showMessage(message, finished ? 6000 : 3000);
+        if (!updateRepositoryDistributionStatus(event)) {
+            const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
+                                  event.jobStatus == QStringLiteral("failed") ||
+                                  event.jobStatus == QStringLiteral("interrupted");
+            const auto message = jobStatusMessage(event);
+            if (!message.isEmpty()) statusBar()->showMessage(message, finished ? 6000 : 3000);
+        }
     }
     if (!refreshesProjects(topics)) return;
     if (projectDeleteInFlight_) return;
     pendingEventTopics_.unite(topics);
+    QString projectId = event.projectId;
+    if (projectId.isEmpty() && !event.releaseId.isEmpty()) {
+        for (auto iterator = projectCache_.cbegin(); iterator != projectCache_.cend(); ++iterator) {
+            if (iterator.value().release(event.releaseId) == nullptr) continue;
+            projectId = iterator.key();
+            break;
+        }
+    }
+    if (topics.contains(QStringLiteral("all")) || projectId.isEmpty()) {
+        pendingFullEventRefresh_ = true;
+    } else {
+        pendingEventProjectIds_.insert(projectId);
+    }
     if (eventRefreshInFlight_) {
         eventRefreshAgain_ = true;
         return;
@@ -47,49 +73,185 @@ void MainWindow::handleServerEvent(const ServerEvent &event) {
     eventRefreshTimer_->start();
 }
 
+void MainWindow::updateBuildJobStatus(const ServerEvent &event) {
+    if (event.jobKind != QStringLiteral("build") || event.jobId.isEmpty()) return;
+    const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
+                          event.jobStatus == QStringLiteral("failed") ||
+                          event.jobStatus == QStringLiteral("interrupted");
+    if (finished) {
+        activeBuildJobs_.remove(event.jobId);
+    } else if (event.jobStatus == QStringLiteral("queued") ||
+               event.jobStatus == QStringLiteral("running")) {
+        activeBuildJobs_.insert(event.jobId, event);
+        if (buildJobId_.isEmpty()) {
+            buildJobId_ = event.jobId;
+            buildProjectId_ = event.projectId;
+            buildReleaseId_ = event.releaseId;
+            buildProjectName_ = !event.projectName.isEmpty() ? event.projectName
+                                                             : event.packageName;
+            buildLogAfter_ = 0;
+            buildLogContents_.clear();
+            if (buildPollTimer_ == nullptr) {
+                buildPollTimer_ = new QTimer(this);
+                connect(buildPollTimer_, &QTimer::timeout, this, &MainWindow::pollBuildJob);
+            }
+            buildPollTimer_->start(250);
+        }
+    }
+    updatePreparationIndicators();
+    updateDashboardActions();
+    if (currentRelease() != nullptr) populateBuild();
+    syncActivityTimer();
+}
+
+void MainWindow::restoreActiveBuildJobs() {
+    const auto config = library_.config();
+    auto *watcher = new QFutureWatcher<QList<JobStatus>>(this);
+    connect(watcher, &QFutureWatcher<QList<JobStatus>>::finished, this, [this, watcher] {
+        const auto jobs = watcher->result();
+        watcher->deleteLater();
+        for (const auto &job : jobs) {
+            ServerEvent event;
+            event.jobId = job.id;
+            event.jobKind = job.kind;
+            event.jobStatus = job.status;
+            event.projectId = job.projectId;
+            event.projectName = job.projectName;
+            event.packageName = job.packageName;
+            event.releaseId = job.releaseId;
+            updateBuildJobStatus(event);
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([config] {
+        return LibraryClient(config).activeJobs(QStringLiteral("build"));
+    }));
+}
+
+bool MainWindow::updateRepositoryDistributionStatus(const ServerEvent &event) {
+    if (event.jobKind != QStringLiteral("repository_distribution")) return false;
+    const bool finished = event.jobStatus == QStringLiteral("succeeded") ||
+                          event.jobStatus == QStringLiteral("failed") ||
+                          event.jobStatus == QStringLiteral("interrupted");
+    if (finished) {
+        repositoryDistributionJobs_.remove(event.jobId);
+        repositoryDistributionJobProjects_.remove(event.jobId);
+    } else {
+        auto name = !event.projectName.isEmpty() ? event.projectName : event.packageName;
+        if (name.isEmpty()) name = event.projectId;
+        if (!name.isEmpty()) repositoryDistributionJobs_.insert(event.jobId, name);
+        if (!event.projectId.isEmpty()) {
+            repositoryDistributionJobProjects_.insert(event.jobId, event.projectId);
+        }
+    }
+    for (int row = 0; projectList_ != nullptr && row < projectList_->count(); ++row) {
+        auto *item = projectList_->item(row);
+        const auto projectId = item->data(Qt::UserRole).toString();
+        item->setData(projectRepositoryBusyRole,
+                      repositoryDistributionJobProjects_.values().contains(projectId));
+    }
+    if (projectList_ != nullptr) projectList_->viewport()->update();
+    if (project_ && project_->id == event.projectId && projectRepositoryStateLabel_ != nullptr) {
+        populateOverview();
+    }
+    syncActivityTimer();
+    auto names = repositoryDistributionJobs_.values();
+    names.removeDuplicates();
+    names.sort(Qt::CaseInsensitive);
+    if (!names.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("Enabling repository distribution for %1").arg(names.join(QStringLiteral(", "))));
+    } else if (event.jobStatus == QStringLiteral("succeeded")) {
+        statusBar()->showMessage(QStringLiteral("Repository distribution is up to date"), 6000);
+    } else if (event.jobStatus == QStringLiteral("failed")) {
+        statusBar()->showMessage(QStringLiteral("Repository distribution failed"), 8000);
+    } else if (event.jobStatus == QStringLiteral("interrupted")) {
+        statusBar()->showMessage(QStringLiteral("Repository distribution was canceled"), 6000);
+    }
+    return true;
+}
+
 void MainWindow::runEventRefresh() {
     if (eventRefreshInFlight_) {
         eventRefreshAgain_ = true;
         return;
     }
+    if (projectListRefreshInFlight_) {
+        eventRefreshAgain_ = true;
+        return;
+    }
     const auto topics = pendingEventTopics_;
+    const auto projectIds = pendingEventProjectIds_;
+    const bool fullRefresh = pendingFullEventRefresh_;
     pendingEventTopics_.clear();
+    pendingEventProjectIds_.clear();
+    pendingFullEventRefresh_ = false;
     eventRefreshInFlight_ = true;
     auto *watcher = new QFutureWatcher<EventRefreshResult>(this);
     connect(watcher, &QFutureWatcher<EventRefreshResult>::finished, this, [this, watcher] {
         const auto result = watcher->result();
         watcher->deleteLater();
         eventRefreshInFlight_ = false;
-        applyEventProjects(result.projects, result.error, result.topics);
-        if (eventRefreshAgain_ || !pendingEventTopics_.isEmpty()) {
+        applyEventProjects(result.projects, result.error, result.topics,
+                           result.missingProjectIds, result.fullRefresh);
+        if (eventRefreshAgain_ || !pendingEventTopics_.isEmpty() ||
+            !pendingEventProjectIds_.isEmpty() || pendingFullEventRefresh_) {
             eventRefreshAgain_ = false;
             eventRefreshTimer_->start();
         }
     });
     const auto config = library_.config();
-    watcher->setFuture(QtConcurrent::run([config, topics] {
+    watcher->setFuture(QtConcurrent::run([config, topics, projectIds, fullRefresh] {
         EventRefreshResult result;
         result.topics = topics;
+        result.fullRefresh = fullRefresh;
         LibraryClient client(config);
-        result.projects = client.list(&result.error);
+        if (fullRefresh) {
+            result.projects = client.list(&result.error);
+            return result;
+        }
+        QStringList errors;
+        for (const auto &projectId : projectIds) {
+            QString error;
+            auto project = client.load(projectId, &error);
+            if (project) {
+                result.projects.append(std::move(*project));
+            } else if (error.contains(QStringLiteral("not found"), Qt::CaseInsensitive)) {
+                result.missingProjectIds.insert(projectId);
+            } else if (!error.isEmpty()) {
+                errors.append(error);
+            }
+        }
+        result.error = errors.join(QLatin1Char('\n'));
         return result;
     }));
 }
 
 void MainWindow::applyEventProjects(QList<Project> projects, const QString &error,
-                                    const QSet<QString> &topics) {
+                                    const QSet<QString> &topics,
+                                    const QSet<QString> &missingProjectIds,
+                                    const bool fullRefresh) {
     if (!error.isEmpty()) {
         statusBar()->showMessage(error, 8000);
         return;
+    }
+    auto removedIds = missingProjectIds;
+    if (fullRefresh) {
+        QSet<QString> incomingIds;
+        incomingIds.reserve(projects.size());
+        for (const auto &candidate : projects) incomingIds.insert(candidate.id);
+        for (auto iterator = projectCache_.cbegin(); iterator != projectCache_.cend(); ++iterator) {
+            if (!incomingIds.contains(iterator.key())) removedIds.insert(iterator.key());
+        }
     }
     const auto selectedId = project_ ? project_->id : QString{};
     const auto found = std::find_if(projects.cbegin(), projects.cend(), [&](const Project &candidate) {
         return candidate.id == selectedId;
     });
-    const bool deleted = !selectedId.isEmpty() && found == projects.cend();
+    const bool selectedWasFetched = found != projects.cend();
+    const bool deleted = !selectedId.isEmpty() && removedIds.contains(selectedId);
     bool externalChange = false;
-    if (project_ && found != projects.cend()) {
-        externalChange = revisionsDiffer(*project_, *found) ||
+    if (project_ && selectedWasFetched) {
+        externalChange = projectListStateDiffers(*project_, *found) ||
                          topics.contains(QStringLiteral("repository"));
     }
     const bool hasDraft = hasUnsavedProjectDraft();
@@ -100,18 +262,71 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
         projectStale_ = true;
         showExternalChange(deleted);
     }
-    const bool preserve = projectStale_ || hasDraft;
-    applyProjectList(std::move(projects), selectedId, error, preserve);
-    if (!preserve && project_) {
+    const bool preserveSelected = projectStale_ || ((deleted || externalChange) && hasDraft);
+    const auto updateState = BackgroundUpdateStateStore::load();
+    QSignalBlocker blocker(projectList_);
+    for (const auto &projectId : removedIds) {
+        removeProjectListItem(projectId);
+        projectCache_.remove(projectId);
+        hydratedProjectIds_.remove(projectId);
+    }
+    for (const auto &candidate : projects) {
+        const auto cached = projectCache_.constFind(candidate.id);
+        const bool listItemChanged = cached == projectCache_.cend() ||
+                                     projectListStateDiffers(cached.value(), candidate);
+        if (fullRefresh && project_ && project_->id == candidate.id &&
+            hydratedProjectIds_.contains(candidate.id)) {
+            auto hydrated = *project_;
+            hydrated.installedVersion = candidate.installedVersion;
+            hydrated.installedReleaseId = candidate.installedReleaseId;
+            hydrated.externallyInstalled = candidate.externallyInstalled;
+            projectCache_.insert(candidate.id, std::move(hydrated));
+        } else {
+            projectCache_.insert(candidate.id, candidate);
+            if (!fullRefresh) hydratedProjectIds_.insert(candidate.id);
+        }
+        if (listItemChanged) updateProjectListItem(candidate, updateState);
+    }
+    if (auto *selectedItem = projectListItem(selectedId); selectedItem != nullptr) {
+        projectList_->setCurrentItem(selectedItem);
+    } else if (!preserveSelected && projectList_->currentItem() == nullptr &&
+               projectList_->count() > 0) {
+        projectList_->setCurrentRow(0);
+    }
+    const auto nextSelectedId = projectList_->currentItem() == nullptr
+        ? QString{} : projectList_->currentItem()->data(Qt::UserRole).toString();
+    blocker.unblock();
+
+    if (projectCache_.isEmpty()) {
+        applyProjectList({}, {}, {}, preserveSelected);
+    } else if (!preserveSelected && selectedWasFetched) {
+        const auto releaseId = currentReleaseId_;
+        project_ = projectCache_.value(selectedId);
+        if (project_->release(releaseId) != nullptr) {
+            currentReleaseId_ = releaseId;
+        } else {
+            const auto *release = project_->activeTrackingRelease();
+            if (release == nullptr) release = project_->newestRelease();
+            currentReleaseId_ = release == nullptr ? QString{} : release->id;
+        }
         pendingExternalProject_.reset();
         pendingExternalDeletion_ = false;
         projectStale_ = false;
         externalChangeBanner_->setVisible(false);
         const QScopedValueRollback applying(applyingServerRefresh_, true);
         refreshCurrentProject();
-        static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(projectCache_.values()));
-        static_cast<void>(GuiInstanceServer::requestTray());
+    } else if (!preserveSelected && deleted) {
+        project_.reset();
+        currentReleaseId_.clear();
+        if (!nextSelectedId.isEmpty()) loadProject(nextSelectedId);
+    } else if (!preserveSelected && !project_ && !nextSelectedId.isEmpty()) {
+        loadProject(nextSelectedId);
     }
+    static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(projectCache_.values()));
+    static_cast<void>(GuiInstanceServer::requestTray());
+    syncActivityTimer();
+    updateUpdateCheckIndicators();
+    prefetchProjectIcons();
 }
 
 void MainWindow::showExternalChange(const bool deleted) {
@@ -210,7 +425,15 @@ bool MainWindow::hasUnsavedProjectDraft() const {
     }
     if ((!workbench || currentSection() == EditorSection::ConfigRepository) &&
         repoPublishCheck_ != nullptr &&
+        repoSoakOverrideCheck_ != nullptr && repoSoakDays_ != nullptr &&
         (repoPublishCheck_->isChecked() != project_->repository.publish ||
+         repoAutomaticSoakCheck_->isChecked() != project_->repository.automaticSoak ||
+         repoSoakOverrideCheck_->isChecked() !=
+             (project_->repository.soakSecondsOverride >= 0) ||
+         (repoSoakOverrideCheck_->isChecked() &&
+          project_->repository.soakSecondsOverride >= 0 &&
+          repoSoakDays_->value() !=
+              (project_->repository.soakSecondsOverride + 86399) / 86400) ||
          repoOverrideEdit_->text().trimmed() != project_->repository.packageNameOverride)) {
         return true;
     }

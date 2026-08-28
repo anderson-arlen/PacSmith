@@ -1,5 +1,6 @@
 #include "core/repository_key_download_service.hpp"
 
+#include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -16,6 +17,32 @@ constexpr qsizetype maximumSigningKeySize = 4 * 1024 * 1024;
 bool isAcceptableRepositoryKeyUrl(const QUrl &url) {
     return url.isValid() && url.scheme() == QStringLiteral("https") && !url.host().isEmpty() &&
            url.userInfo().isEmpty() && !url.hasFragment();
+}
+
+std::optional<RepositoryKeyDownload> downloadRepositorySigningKey(const QUrl &url, QString *error) {
+    RepositoryKeyDownloadService downloader;
+    RepositoryKeyDownload downloaded;
+    QString failure;
+    QEventLoop loop;
+    QObject::connect(&downloader, &RepositoryKeyDownloadService::finished,
+                     [&](const QByteArray &contents, const QUrl &requestedUrl, const QUrl &resolvedUrl) {
+                         downloaded = {contents, requestedUrl, resolvedUrl};
+                         loop.quit();
+                     });
+    QObject::connect(&downloader, &RepositoryKeyDownloadService::failed, [&](const QString &message) {
+        failure = message;
+        loop.quit();
+    });
+    downloader.start(url);
+    if (downloader.isRunning()) loop.exec();
+    if (downloaded.contents.isEmpty()) {
+        if (error != nullptr) {
+            *error = failure.isEmpty() ? QStringLiteral("The signing-key URL returned an empty response")
+                                       : failure;
+        }
+        return std::nullopt;
+    }
+    return downloaded;
 }
 
 RepositoryKeyDownloadService::RepositoryKeyDownloadService(QObject *parent)

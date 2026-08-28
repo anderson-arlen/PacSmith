@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	KindImport      = "import"
-	KindBuild       = "build"
-	KindUpdateCheck = "update_check"
-	KindReanalyze   = "reanalyze"
+	KindImport                 = "import"
+	KindBuild                  = "build"
+	KindUpdateCheck            = "update_check"
+	KindReanalyze              = "reanalyze"
+	KindRepositoryDistribution = "repository_distribution"
 )
 
 var ErrNotFound = errors.New("job not found")
@@ -30,6 +31,8 @@ type Job struct {
 	Kind       string          `json:"kind"`
 	Status     string          `json:"status"`
 	ProjectID  string          `json:"project_id,omitempty"`
+	ProjectName string         `json:"project_name,omitempty"`
+	PackageName string         `json:"package_name,omitempty"`
 	ReleaseID  string          `json:"release_id,omitempty"`
 	Error      string          `json:"error,omitempty"`
 	LogOffset  int64           `json:"log_offset"`
@@ -93,13 +96,16 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) Enqueue(ctx context.Context, kind string, payload any, projectID, releaseID string) (Job, error) {
-	if kind == KindUpdateCheck {
+	if kind == KindUpdateCheck || kind == KindRepositoryDistribution {
 		active, err := m.DB.Queries.ListActiveJobsByKind(ctx, kind)
 		if err != nil {
 			return Job{}, err
 		}
 		for _, existing := range active {
-			if existing.ReleaseID.String == releaseID && releaseID != "" {
+			if kind == KindUpdateCheck && existing.ReleaseID.String == releaseID && releaseID != "" {
+				return jobFromRow(existing), nil
+			}
+			if kind == KindRepositoryDistribution && existing.ProjectID.String == projectID && projectID != "" {
 				return jobFromRow(existing), nil
 			}
 		}
@@ -176,6 +182,18 @@ func (m *Manager) Get(ctx context.Context, id string) (Job, error) {
 	job.Result = m.results[id]
 	m.mu.Unlock()
 	return job, nil
+}
+
+func (m *Manager) Active(ctx context.Context, kind string) ([]Job, error) {
+	rows, err := m.DB.Queries.ListActiveJobsByKind(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Job, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, jobFromRow(row))
+	}
+	return result, nil
 }
 
 func (m *Manager) Log(id string, after int64) (string, int64, error) {

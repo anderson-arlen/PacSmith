@@ -76,6 +76,9 @@ QString finishedUpdateCheckStatus(const BackgroundUpdateState &state) {
 QString downloadStatusText(const QString &name, const QString &phase, const qint64 received,
                            const qint64 total) {
     const auto label = name.isEmpty() ? QStringLiteral("update") : name;
+    if (phase == QStringLiteral("Building")) {
+        return QStringLiteral("Building package %1…").arg(label);
+    }
     if (phase.isEmpty() || phase == QStringLiteral("Downloading")) {
         if (total > 0) {
             return QStringLiteral("Downloading %1 update… %2 / %3 MiB")
@@ -413,6 +416,8 @@ int githubArtifactPreference(const QString &asset) {
     if (lower.endsWith(QStringLiteral(".deb"))) return 1;
     if (lower.endsWith(QStringLiteral(".rpm"))) return 2;
     if (lower.endsWith(QStringLiteral(".appimage"))) return 3;
+    if (lower == QStringLiteral("source code (tar.gz)") ||
+        lower == QStringLiteral("source code (zip)")) return 4;
     if (lower.endsWith(QStringLiteral(".tar.gz")) || lower.endsWith(QStringLiteral(".tgz")) ||
         lower.endsWith(QStringLiteral(".tar.xz")) || lower.endsWith(QStringLiteral(".tar.zst")) ||
         lower.endsWith(QStringLiteral(".zip")) || lower.endsWith(QStringLiteral(".7z"))) return 4;
@@ -422,8 +427,8 @@ int githubArtifactPreference(const QString &asset) {
 std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
     QWidget *parent, const QStringList &assets, const bool includePrereleases) {
     if (assets.isEmpty()) {
-        QMessageBox::warning(parent, QStringLiteral("No release assets"),
-                             QStringLiteral("The selected GitHub release has no downloadable assets."));
+        QMessageBox::warning(parent, QStringLiteral("No release artifacts"),
+                             QStringLiteral("The selected GitHub release has no downloadable artifacts."));
         return std::nullopt;
     }
     QStringList installableAssets;
@@ -432,18 +437,18 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
     }
     if (installableAssets.isEmpty()) {
         QMessageBox::warning(
-            parent, QStringLiteral("No installable release assets"),
+            parent, QStringLiteral("No installable release artifacts"),
             QStringLiteral("This release contains only signatures, checksums, or manifest files. PacSmith could not find a package artifact to import."));
         return std::nullopt;
     }
     QDialog dialog(parent);
-    dialog.setWindowTitle(QStringLiteral("Select GitHub Release Asset"));
+    dialog.setWindowTitle(QStringLiteral("Select GitHub Release Artifact"));
     dialog.resize(720, 520);
     auto *layout = new QVBoxLayout(&dialog);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Choose the prebuilt artifact family PacSmith should track in later releases."),
+        QStringLiteral("Choose the artifact family PacSmith should track in later releases."),
         &dialog,
-        QStringLiteral("The regular expression is saved as this release's GitHub update rule; it must match exactly one asset in each release.")));
+        QStringLiteral("The regular expression is saved as this release's GitHub update rule; it must match exactly one artifact in each release.")));
     auto *expressionRow = new QWidget(&dialog);
     auto *expressionLayout = new QHBoxLayout(expressionRow);
     expressionLayout->setContentsMargins(0, 0, 0, 0);
@@ -486,7 +491,7 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
         }
         status->setText(!regex.isValid()
             ? QStringLiteral("Invalid expression: %1").arg(regex.errorString())
-            : QStringLiteral("%1 matching asset(s); exactly one is required.").arg(matches));
+            : QStringLiteral("%1 matching artifact(s); exactly one is required.").arg(matches));
         ok->setEnabled(regex.isValid() && !expression->text().isEmpty() && matches == 1);
     };
     QObject::connect(expression, &QLineEdit::textChanged, &dialog, update);

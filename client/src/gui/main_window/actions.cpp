@@ -25,6 +25,11 @@ struct ReleaseDeletionResult {
     QString error;
 };
 
+struct RetentionCleanupResult {
+    bool succeeded{false};
+    QString error;
+};
+
 struct InstallPreparationResult {
     std::optional<Project> project;
     QString releaseId;
@@ -195,23 +200,40 @@ void MainWindow::askExternalHarness() {
 }
 
 void MainWindow::applyRetentionCleanup() {
-    if (!project_ || !appSettings_.updates.automaticallyPrepare) return;
-    QString error;
-    const auto result = library_.cleanup(
-        *project_,
-        {appSettings_.updates.retainedPackageVersions,
-         appSettings_.updates.retainedCompleteReleases, true},
-        &error);
-    if (result.removedReleases.isEmpty() && result.removedArtifacts.isEmpty()) return;
+    if (!project_ || retentionCleanupInFlight_) return;
     const auto projectId = project_->id;
     const auto releaseId = currentReleaseId_;
-    refreshProjectList(projectId);
-    if (!project_ || project_->id != projectId) loadProject(projectId);
-    if (project_ && project_->release(releaseId) == nullptr) {
-        if (const auto *newest = project_->newestRelease()) currentReleaseId_ = newest->id;
-        else currentReleaseId_.clear();
-    }
-    refreshCurrentProject();
+    const auto config = library_.config();
+    retentionCleanupInFlight_ = true;
+    statusBar()->showMessage(QStringLiteral("Cleaning up excess outdated package versions…"));
+    auto *watcher = new QFutureWatcher<RetentionCleanupResult>(this);
+    connect(watcher, &QFutureWatcher<RetentionCleanupResult>::finished, this,
+            [this, watcher, projectId, releaseId] {
+        const auto cleanup = watcher->result();
+        watcher->deleteLater();
+        retentionCleanupInFlight_ = false;
+        if (!cleanup.succeeded) {
+            statusBar()->showMessage(
+                cleanup.error.isEmpty() ? QStringLiteral("Package cleanup failed") : cleanup.error,
+                8000);
+            return;
+        }
+        statusBar()->showMessage(QStringLiteral("Excess outdated package versions cleaned up"), 5000);
+        refreshProjectList(projectId);
+        if (!project_ || project_->id != projectId) return;
+        if (project_->release(releaseId) == nullptr) {
+            if (const auto *newest = project_->newestRelease()) currentReleaseId_ = newest->id;
+            else currentReleaseId_.clear();
+        }
+        refreshCurrentProject();
+    });
+    watcher->setFuture(QtConcurrent::run([config] {
+        LibraryClient client(config);
+        RetentionCleanupResult result;
+        const auto cleanup = client.cleanup(&result.error);
+        result.succeeded = !cleanup.skipped && result.error.isEmpty();
+        return result;
+    }));
 }
 
 void MainWindow::startUpdateCheck() {
@@ -436,7 +458,7 @@ void MainWindow::finishCommandProgress(const bool success, const QString &summar
     commandProgress_->markFinished(success, summary);
 }
 
-void MainWindow::startBuild(const bool installWhenSuccessful) {
+void MainWindow::startBuild(const bool installWhenSuccessful, const bool automatic) {
     installAfterSuccessfulBuild_ = false;
     if (!project_ || currentRelease() == nullptr || buildInProgress() ||
         !ensureCurrentProjectWritable()) return;
@@ -571,7 +593,7 @@ void MainWindow::startBuild(const bool installWhenSuccessful) {
     showCommandProgress(QStringLiteral("Building %1").arg(project_->displayName),
                         QStringLiteral("Running makepkg…"), true);
     QString error;
-    const auto job = library_.startBuild(currentRelease()->id, &error);
+    const auto job = library_.startBuild(currentRelease()->id, &error, automatic);
     if (!job || job->id.isEmpty()) {
         currentRelease()->buildStatus = BuildStatus::Failed;
         finishCommandProgress(false, QStringLiteral("Build could not start: %1").arg(error));
@@ -581,12 +603,19 @@ void MainWindow::startBuild(const bool installWhenSuccessful) {
         return;
     }
     buildJobId_ = job->id;
+    buildProjectId_ = project_->id;
+    buildReleaseId_ = currentRelease()->id;
+    buildProjectName_ = project_->displayName.isEmpty() ? project_->archPackageName
+                                                       : project_->displayName;
+    buildLogContents_.clear();
     buildLogAfter_ = 0;
     if (buildPollTimer_ == nullptr) {
         buildPollTimer_ = new QTimer(this);
         connect(buildPollTimer_, &QTimer::timeout, this, &MainWindow::pollBuildJob);
     }
     buildPollTimer_->start(100);
+    updatePreparationIndicators();
+    syncActivityTimer();
     populateBuild();
     updateDashboardActions();
     updateDeleteButton();
@@ -594,6 +623,36 @@ void MainWindow::startBuild(const bool installWhenSuccessful) {
 
 bool MainWindow::buildInProgress() const {
     return !buildJobId_.isEmpty();
+}
+
+bool MainWindow::releaseBuildInProgress(const QString &releaseId) const {
+    if (releaseId.isEmpty()) return false;
+    if (buildInProgress() && buildReleaseId_ == releaseId) return true;
+    return std::any_of(activeBuildJobs_.cbegin(), activeBuildJobs_.cend(),
+                       [&](const auto &event) { return event.releaseId == releaseId; });
+}
+
+QString MainWindow::buildActivityForProject(const QString &projectId) const {
+    if (projectId.isEmpty()) return {};
+    const bool active = (buildInProgress() && buildProjectId_ == projectId) ||
+        std::any_of(activeBuildJobs_.cbegin(), activeBuildJobs_.cend(),
+                    [&](const auto &event) { return event.projectId == projectId; });
+    return active ? QStringLiteral("Building...") : QString{};
+}
+
+void MainWindow::showBuildOutput() {
+    if (!buildInProgress()) return;
+    if (commandProgress_ == nullptr) {
+        showCommandProgress(QStringLiteral("Building %1").arg(buildProjectName_),
+                            QStringLiteral("Running makepkg..."), true);
+        if (commandProgress_ != nullptr && !buildLogContents_.isEmpty()) {
+            commandProgress_->appendOutput(buildLogContents_);
+        }
+    } else {
+        commandProgress_->show();
+        commandProgress_->raise();
+        commandProgress_->activateWindow();
+    }
 }
 
 void MainWindow::cancelRemoteBuild() {
@@ -621,8 +680,9 @@ void MainWindow::pollBuildJob() {
         watcher->deleteLater();
         buildPollInFlight_ = false;
         if (jobId != buildJobId_ || !result.job) return;
-        if (!result.logChunk.isEmpty() && commandProgress_ != nullptr) {
-            commandProgress_->appendOutput(result.logChunk);
+        if (!result.logChunk.isEmpty()) {
+            buildLogContents_.append(result.logChunk);
+            if (commandProgress_ != nullptr) commandProgress_->appendOutput(result.logChunk);
         }
         buildLogAfter_ = result.nextOffset;
         if (result.job->status == QStringLiteral("succeeded") ||
@@ -648,7 +708,7 @@ void MainWindow::finishBuildJob() {
     if (buildFinishInFlight_ || buildJobId_.isEmpty()) return;
     buildFinishInFlight_ = true;
     const auto jobId = buildJobId_;
-    const auto projectId = project_ ? project_->id : QString{};
+    const auto projectId = buildProjectId_;
     const auto config = library_.config();
     auto *watcher = new QFutureWatcher<BuildFinishResult>(this);
     connect(watcher, &QFutureWatcher<BuildFinishResult>::finished, this,
@@ -658,6 +718,12 @@ void MainWindow::finishBuildJob() {
         buildFinishInFlight_ = false;
         if (jobId != buildJobId_) return;
         buildJobId_.clear();
+        buildProjectId_.clear();
+        buildReleaseId_.clear();
+        buildProjectName_.clear();
+        activeBuildJobs_.remove(jobId);
+        updatePreparationIndicators();
+        syncActivityTimer();
         if (!projectId.isEmpty() && result.project && result.project->id == projectId) {
             project_ = std::move(*result.project);
             projectCache_.insert(project_->id, *project_);
@@ -876,6 +942,10 @@ void MainWindow::beginReleasePreparation(const QString &releaseId,
 
     preparingProjectId_ = project_->id;
     preparingReleaseId_ = release->id;
+    const auto *sourceRelease = project_->activeTrackingRelease();
+    preparationSourceReleaseId_ = sourceRelease == nullptr ? QString{} : sourceRelease->id;
+    automaticPreparationBuild_ = !askForConfirmation &&
+                                 appSettings_.updates.automaticallyPrepare;
     preparationPhase_ = QStringLiteral("Downloading");
     preparationBytesReceived_ = 0;
     preparationBytesTotal_ = -1;

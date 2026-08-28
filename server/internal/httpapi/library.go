@@ -7,19 +7,59 @@ import (
 
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/library"
+	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 )
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.Library.ListProjects(r.Context())
+	var projects []library.Project
+	var err error
+	if r.URL.Query().Get("summary") == "1" {
+		projects, err = s.Library.ListProjectSummaries(r.Context())
+	} else {
+		projects, err = s.Library.ListProjects(r.Context())
+	}
 	if err != nil {
 		writeRequestError(w, err)
 		return
 	}
+	var summaryRepoSettings *repo.Settings
+	if r.URL.Query().Get("summary") == "1" && s.Repo != nil {
+		settings, settingsErr := s.Repo.Settings(r.Context())
+		if settingsErr != nil {
+			writeRequestError(w, settingsErr)
+			return
+		}
+		summaryRepoSettings = &settings
+	}
 	encoded := make([]map[string]any, 0, len(projects))
 	for _, project := range projects {
-		encoded = append(encoded, s.projectJSON(r, project))
+		if r.URL.Query().Get("summary") == "1" {
+			encoded = append(encoded, encodeProjectSummary(project, summaryRepoSettings))
+		} else {
+			encoded = append(encoded, s.projectJSON(r, project))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": encoded})
+}
+
+func encodeProjectSummary(project library.Project, settings *repo.Settings) map[string]any {
+	out := encodeProject(project)
+	prefix := ""
+	if settings != nil {
+		prefix = settings.PackageNamePrefix
+	}
+	original := project.ArchPackageName
+	if original == "" {
+		original = project.DisplayName
+	}
+	effective, _ := repo.EffectiveName(project.ArchPackageName, original, prefix,
+		project.RepoPkgnameOverride)
+	out["repository"] = map[string]any{
+		"publish":                project.RepoPublish,
+		"effective_package_name": effective,
+		"published_package_name": project.RepoPublishedPkgname,
+	}
+	return out
 }
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +290,16 @@ func (s *Server) createBuild(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
-	job, err := s.Jobs.Enqueue(r.Context(), jobs.KindBuild, map[string]string{"release_id": id}, release.ProjectID, id)
+	var body struct {
+		Automatic bool `json:"automatic"`
+	}
+	if r.ContentLength != 0 && !decodeJSON(w, r, &body) {
+		return
+	}
+	job, err := s.Jobs.Enqueue(r.Context(), jobs.KindBuild, map[string]string{
+		"release_id": id,
+		"automatic":  strconv.FormatBool(body.Automatic),
+	}, release.ProjectID, id)
 	if err != nil {
 		writeRequestError(w, err)
 		return

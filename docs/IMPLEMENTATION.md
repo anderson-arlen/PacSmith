@@ -30,7 +30,7 @@ Custom support-file operations are also exposed to people through `pacsmith cust
 
 The tool descriptions stand alone, while the Skill under `agent-plugin/skills/pacsmith/` supplies trust and packaging judgment. The source and installed package contain an Agent Plugins 1.0 bundle with a root `plugin.json` and an `mcp.json` stdio declaration for executable `pacsmith` with argument `mcp`; `pacsmith plugin path` prints that bundle directory. `pacsmith skill install` atomically installs or upgrades the standalone user copy at `~/.agents/skills/pacsmith`, and `pacsmith skill path` prints the active Skill directory. An unmanaged existing directory is preserved unless the user explicitly supplies `--force`.
 
-`check_updates` runs the same deterministic update-check operation as the GUI/CLI for one project or all projects, records discovery evidence, and honors automatic-preparation settings without invoking a model. Generic harness profiles have typed list/upsert/remove/default tools backed by `AppSettingsStore`, the same persistence used by the GUI. An executable and each argument remain separate strings; MCP never constructs a shell command.
+`check_updates` runs the same deterministic update-check operation as the GUI/CLI for one project or all projects, records discovery evidence, and honors automatic-preparation settings without invoking a model. `import_repository_signing_key` is the same Fetch & Review path as the GUI: PacSmith downloads a first-party HTTPS OpenPGP key, inspects its fingerprint, elicits confirmation, and only then pins it as the release's trusted APT/RPM signing key. Generic harness profiles have typed list/upsert/remove/default tools backed by `AppSettingsStore`, the same persistence used by the GUI. An executable and each argument remain separate strings; MCP never constructs a shell command.
 
 If the Skill loads without MCP, it requires a consent question before installation and treats missing MCP as a hard stop. It prohibits CLI project commands, direct HTTP/socket/D-Bus access, daemon management, database access, and filesystem scraping as fallbacks. After consent, the harness maps the portable plugin or `pacsmith mcp` command into its own configuration and approval UX. PacSmith emits no harness-specific configuration and uses neither ACP nor an online harness registry.
 
@@ -45,9 +45,11 @@ Tool annotations include all four MCP behavior hints. PacSmith additionally enfo
 - promoting a repository package to stable;
 - changing global repository/listener/signing configuration or trust keys;
 - changing automatic update/preparation/retention policy;
+- writing or replacing a Custom PKGBUILD, because it is executable build input;
 - changing desktop-session autostart;
 - changing the remote management listener or client enrollment/trust;
-- storing or deleting the server-side GitHub credential.
+- storing or deleting the server-side GitHub credential;
+- trusting and pinning a vendor APT/RPM repository signing key.
 
 These checks live in the central MCP permission policy. Missing client elicitation support, an elicitation error, cancellation, decline, disconnect, or a response without the explicit boolean confirmation all fail closed. Ordinary maintained-state edits do not require this extra round trip.
 
@@ -92,7 +94,11 @@ Historical `ValueOrigin::Ai` and AI provenance records remain readable so old pr
 
 ## Deterministic updates
 
-Update discovery and automatic preparation never invoke an AI model. The pipeline remains acquire/verify, inspect, compare/carry known decisions, continue when current safety rules allow, and otherwise mark Needs Review. External agents participate only when a user starts an interactive conversation in their harness.
+Update discovery and automatic handling never invoke an AI model. The pipeline remains acquire/verify, inspect, compare/carry known decisions, continue when current safety rules allow, and otherwise mark Needs Review. Automatic builds require a previously successful, fully reviewed package configuration; unchanged vendor dependency declarations and lifecycle behavior; no current structured review issues; available Arch dependencies; and an enabled, signed repository with publication enabled for the project. The checker retries already-prepared, still-unbuilt releases on later runs, so a release whose persisted state says Needs Review but whose structured checklist is clear does not get stranded. A successful build is marked as automatic and published to unstable. Stable is enabled only as a system-wide second channel; once present, promotion may be manual or automatic per project, and automatic projects inherit the library soak duration unless they store a project override. PacSmith never installs an update automatically. External agents participate only when a user starts an interactive conversation in their harness.
+
+The repository-wide `stable_enabled` setting is the sole active channel-existence switch. The older `project_repo_policies.stable_enabled` column remains populated only to preserve compatibility with existing databases and its historical constraint; project APIs and clients cannot use it to add or remove a channel.
+
+The Updates settings page also owns a single `retention_versions` policy. For each project, cleanup resolves every active channel entry back to its release and uses the oldest pointer as the boundary. A populated Stable pointer therefore protects Stable and every release through Unstable; without Stable, Unstable is the boundary. Cleanup walks completed releases behind that boundary from newest to oldest, keeps the configured number, deletes excess release records, and garbage-collects their source and built-package artifacts in the same pass. Disabling HTTP serving does not remove the internal Unstable pointer. Superseded retention columns remain in SQLite for compatibility but are not part of the current API or UI.
 
 ## GUI harness launching
 

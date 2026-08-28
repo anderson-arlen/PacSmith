@@ -6,7 +6,9 @@
 #include "core/deb_download_service.hpp"
 #include "core/direct_url_update_service.hpp"
 #include "core/github_update_service.hpp"
+#include "core/release_review.hpp"
 #include "core/rpm_update_service.hpp"
+#include "core/system_package_query.hpp"
 #include "core/update_source.hpp"
 
 #include <QElapsedTimer>
@@ -27,6 +29,9 @@ QString projectActivityName(const Project &project) {
 
 QString downloadStatusMessage(const QString &name, const QString &phase, const qint64 received,
                               const qint64 total) {
+    if (phase == QStringLiteral("Building")) {
+        return QStringLiteral("Building package %1…").arg(name);
+    }
     if (!phase.isEmpty() && phase != QStringLiteral("Downloading")) {
         return QStringLiteral("Preparing %1: %2").arg(name, phase);
     }
@@ -48,6 +53,7 @@ void savePreparation(BackgroundUpdateState *state, const QString &projectId,
                      const QString &projectName, const QString &phase, const qint64 received,
                      const qint64 total) {
     if (state == nullptr) return;
+    BackgroundUpdateStateStore::claimActivity(*state);
     state->preparingProjectId = projectId;
     state->preparingProjectName = projectName;
     state->preparationPhase = phase;
@@ -69,9 +75,91 @@ void clearPreparation(BackgroundUpdateState *state) {
 }
 
 void publishCheckProgress(BackgroundUpdateState &state, const LibraryClient &library) {
+    BackgroundUpdateStateStore::claimActivity(state);
     applyAvailableUpdateCensus(state, library.list());
     static_cast<void>(BackgroundUpdateStateStore::save(state));
-    static_cast<void>(notifyRunningGui(QStringLiteral("projects")));
+}
+
+bool buildPreparedUpdate(LibraryClient &library, const QString &projectId,
+                         const QString &previousReleaseId, const QString &preparedReleaseId,
+                         QTextStream &diagnostics, BackgroundUpdateState *activity) {
+    QString error;
+    auto project = library.load(projectId, &error);
+    if (!project) {
+        diagnostics << "warning: automatic build could not load the prepared project: "
+                    << error << '\n';
+        return false;
+    }
+    const auto *previous = project->release(previousReleaseId);
+    auto *prepared = project->release(preparedReleaseId);
+    if (previous == nullptr || prepared == nullptr) {
+        diagnostics << "warning: automatic build could not identify the previous and prepared releases\n";
+        return false;
+    }
+    QStringList blockers = automaticUpdateBuildBlockers(*previous, *prepared);
+    if (!project->repository.publish) {
+        blockers.append(QStringLiteral("Repository publishing is not enabled for this project."));
+    }
+    QString repoError;
+    const auto repo = library.repoSettings(&repoError);
+    if (!repo) {
+        blockers.append(repoError.isEmpty()
+                            ? QStringLiteral("Repository settings are unavailable.")
+                            : QStringLiteral("Repository settings are unavailable: %1").arg(repoError));
+    } else {
+        if (!repo->enabled) {
+            blockers.append(QStringLiteral("The PacSmith package repository is not enabled."));
+        }
+        if (!repo->signingInitialized) {
+            blockers.append(QStringLiteral("Repository signing is not initialized."));
+        }
+    }
+    for (const auto &dependency : prepared->dependencies) {
+        const bool repositoryPackage = !dependency.ignored && !dependency.bundled &&
+                                       !dependency.provided &&
+                                       dependency.status != MappingStatus::Ignored &&
+                                       dependency.status != MappingStatus::Bundled &&
+                                       dependency.status != MappingStatus::Provided &&
+                                       !dependency.archPackage.isEmpty();
+        if (repositoryPackage &&
+            !SystemPackageQuery::repositoryPackageAvailable(dependency.archPackage)) {
+            blockers.append(QStringLiteral("Required Arch dependency %1 is unavailable.")
+                                .arg(dependency.archPackage));
+        }
+    }
+    if (!blockers.isEmpty()) {
+        const auto detail = QStringLiteral("Automatic build paused: %1")
+                                .arg(blockers.join(QStringLiteral("; ")));
+        prepared->history.append({QDateTime::currentDateTimeUtc(),
+                                  QStringLiteral("automatic-build-paused"), detail});
+        QString saveError;
+        if (!library.save(*project, &saveError)) {
+            diagnostics << "warning: automatic build pause could not be recorded: "
+                        << saveError << '\n';
+        }
+        diagnostics << detail << '\n';
+        return false;
+    }
+
+    const auto name = projectActivityName(*project);
+    savePreparation(activity, project->id, name, QStringLiteral("Building"), 0, -1);
+    const auto started = library.startBuild(prepared->id, &error, true);
+    if (!started || started->id.isEmpty()) {
+        diagnostics << "warning: automatic build could not start: " << error << '\n';
+        clearPreparation(activity);
+        return false;
+    }
+    const auto job = library.waitForJob(started->id, &error);
+    clearPreparation(activity);
+    if (!job || job->status != QStringLiteral("succeeded")) {
+        const auto message = !error.isEmpty() ? error
+            : job && !job->error.isEmpty() ? job->error
+                                           : QStringLiteral("the build failed");
+        diagnostics << "warning: automatic build failed: " << message << '\n';
+        return false;
+    }
+    diagnostics << "built " << name << " and published it to the unstable repository channel\n";
+    return true;
 }
 
 UpdateCheckResult checkRelease(LibraryClient &library, const PackageRelease &release,
@@ -227,7 +315,7 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
         }
         return runResult;
     }
-
+    const auto checkedReleaseId = release->id;
     const auto result = checkRelease(library, *release, diagnostics, forceFullContentCheck);
     release->update.lastChecked = QDateTime::currentDateTimeUtc();
     release->update.lastCheckMessage = result.message;
@@ -261,8 +349,14 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
     project.history.append({release->update.lastChecked, QStringLiteral("update-check"), result.message});
     release->history.append({release->update.lastChecked, QStringLiteral("update-check"), result.message});
     QString saveError;
+    // Discovery, preparation, and building reload project state from the library. Persist the
+    // observation first so those reloads cannot discard a completed check that found no update.
+    if (!library.save(project, &saveError)) {
+        diagnostics << "warning: could not save update-check result: " << saveError << '\n';
+    }
+    release = project.release(checkedReleaseId);
     QString discoveredId;
-    if (result.success && result.updateAvailable) {
+    if (result.success && result.updateAvailable && release != nullptr) {
         if (auto *discovered = library.recordDiscoveredRelease(
                 project, *release, result.detectedVersion, result.filename,
                 result.sha256, result.downloadUrl, &saveError, result.releaseId,
@@ -360,13 +454,33 @@ UpdateCheckRunResult UpdateCheckRunner::run(LibraryClient &library, Project proj
             clearPreparation(activity);
         }
     }
+    if (automaticallyPrepare) {
+        BackgroundUpdateState ownedBuildActivity;
+        auto *buildActivity = backgroundState;
+        if (buildActivity == nullptr) {
+            ownedBuildActivity = BackgroundUpdateStateStore::load();
+            buildActivity = &ownedBuildActivity;
+        }
+        if (const auto preparedProject = library.load(project.id, &saveError)) {
+            if (const auto selection = automaticUpdateBuildSelection(*preparedProject)) {
+                const auto *candidate = preparedProject->release(selection->preparedReleaseId);
+                runResult.built = buildPreparedUpdate(
+                    library, project.id, selection->previousReleaseId,
+                    selection->preparedReleaseId, diagnostics, buildActivity);
+                if (runResult.built && candidate != nullptr) {
+                    runResult.detectedVersion = candidate->debian.version;
+                }
+            }
+        } else if (!saveError.isEmpty()) {
+            diagnostics << "warning: automatic build retry could not load the project: "
+                        << saveError << '\n';
+        }
+    }
     if (auto reloaded = library.load(project.id, nullptr)) project = std::move(*reloaded);
-    const auto cleanup = library.cleanup(
-        project, {settings ? settings->retainedPackageVersions : 2,
-                  settings ? settings->retainedCompleteReleases : 3,
-                  automaticallyPrepare}, &saveError);
+    QString cleanupError;
+    const auto cleanup = library.cleanup(&cleanupError);
     if (!cleanup.message.isEmpty()) diagnostics << cleanup.message << '\n';
-    if (!library.save(project, &saveError)) diagnostics << "warning: " << saveError << '\n';
+    if (!cleanupError.isEmpty()) diagnostics << "warning: cleanup failed: " << cleanupError << '\n';
     if (!result.success && backgroundState != nullptr) ++backgroundState->failedChecks;
     runResult.status = !result.success ? QStringLiteral("error")
                            : result.fullContentCheckDeferred ? QStringLiteral("deferred")
@@ -391,6 +505,7 @@ UpdateCheckBatchResult UpdateCheckRunner::runAll(LibraryClient &library,
         batch.error = listError;
         batch.exitCode = 1;
         state.checking = false;
+        BackgroundUpdateStateStore::clearActivityOwner(state);
         state.message = QStringLiteral("Could not load PacSmith projects for update checking");
         static_cast<void>(BackgroundUpdateStateStore::save(state));
         diagnostics << "error: " << listError << '\n';
@@ -408,6 +523,7 @@ UpdateCheckBatchResult UpdateCheckRunner::runAll(LibraryClient &library,
         publishCheckProgress(state, library);
     }
     state.checking = false;
+    BackgroundUpdateStateStore::clearActivityOwner(state);
     state.checkingProjectId.clear();
     state.checkingProjectName.clear();
     state.preparingProjectId.clear();
@@ -422,7 +538,6 @@ UpdateCheckBatchResult UpdateCheckRunner::runAll(LibraryClient &library,
         : state.failedChecks > 0 ? QStringLiteral("Update checks completed with failures")
                                  : QStringLiteral("All eligible project trackers are current");
     static_cast<void>(BackgroundUpdateStateStore::save(state));
-    static_cast<void>(notifyRunningGui(QStringLiteral("projects")));
     return batch;
 }
 

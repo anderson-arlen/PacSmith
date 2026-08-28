@@ -156,7 +156,7 @@ func TestGenerateDebianPkgbuild(t *testing.T) {
 	if !strings.Contains(iconVars, "_PACSMITH_ICON='pacsmith-icon.png'") {
 		t.Fatalf("icon vars missing source name:\n%s", iconVars)
 	}
-	if !strings.Contains(iconBuild, `/usr/share/icons/hicolor/256x256/apps/vendor-app.png`) {
+	if !strings.Contains(iconBuild, `/usr/share/pixmaps/vendor-app.png`) {
 		t.Fatalf("PKGBUILD missing icon install:\n%s", iconBuild)
 	}
 }
