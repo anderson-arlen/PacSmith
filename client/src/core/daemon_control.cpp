@@ -4,12 +4,40 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QThread>
 
 #include <unistd.h>
 
 namespace pacsmith {
 namespace {
+
+QProcessEnvironment userServiceEnvironment() {
+    auto environment = QProcessEnvironment::systemEnvironment();
+    auto runtime = environment.value(QStringLiteral("XDG_RUNTIME_DIR"));
+    if (!QDir::isAbsolutePath(runtime)) {
+        runtime = QStringLiteral("/run/user/%1").arg(::getuid());
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtime);
+    }
+    if (environment.value(QStringLiteral("DBUS_SESSION_BUS_ADDRESS")).isEmpty()) {
+        const auto bus = QDir(runtime).filePath(QStringLiteral("bus"));
+        if (QFileInfo::exists(bus)) {
+            // MCP hosts often sanitize session variables while leaving the user's runtime
+            // sockets accessible, so systemctl needs the canonical bus address restored.
+            environment.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"),
+                               QStringLiteral("unix:path=%1").arg(bus));
+        }
+    }
+    return environment;
+}
+
+QString daemonStartFailure(const QString &detail) {
+    return QStringLiteral(
+               "Could not start pacsmithd.service: %1\n"
+               "Run 'systemctl --user start pacsmithd.service', then retry. If it still fails, "
+               "inspect 'journalctl --user -u pacsmithd.service'.")
+        .arg(detail);
+}
 
 bool runSystemctl(const QStringList &arguments, QString *error, QByteArray *standardOutput = nullptr,
                   QByteArray *standardError = nullptr) {
@@ -22,6 +50,7 @@ bool runSystemctl(const QStringList &arguments, QString *error, QByteArray *stan
     QProcess process;
     process.setProgram(QStringLiteral("/usr/bin/systemctl"));
     process.setArguments(QStringList{QStringLiteral("--user")} + arguments);
+    process.setProcessEnvironment(userServiceEnvironment());
     process.start();
     if (!process.waitForStarted(3000) || !process.waitForFinished(20000)) {
         if (error != nullptr) *error = process.errorString();
@@ -111,7 +140,7 @@ bool startLocalLibraryDaemon(QString *error) {
         if (!runSystemctl({QStringLiteral("enable"), QStringLiteral("--now"),
                            QStringLiteral("pacsmithd.service")},
                           &enableError)) {
-            if (error != nullptr) *error = enableError;
+            if (error != nullptr) *error = daemonStartFailure(enableError);
             return false;
         }
     } else {
@@ -124,7 +153,7 @@ bool startLocalLibraryDaemon(QString *error) {
             return false;
         }
         if (!runSystemctl({QStringLiteral("enable"), QStringLiteral("--now"), unit}, &enableError)) {
-            if (error != nullptr) *error = enableError;
+            if (error != nullptr) *error = daemonStartFailure(enableError);
             return false;
         }
         static_cast<void>(runSystemctl({QStringLiteral("daemon-reload")}, nullptr));

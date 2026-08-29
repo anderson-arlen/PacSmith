@@ -178,8 +178,10 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                 .value(QStringLiteral("inputSchema")).toObject()
                 .value(QStringLiteral("properties")).toObject()
                 .contains(QStringLiteral("asset_regex")));
-    const auto profileAnnotations =
-        findTool(QStringLiteral("upsert_harness_profile")).value(QStringLiteral("annotations")).toObject();
+    const auto harnessProfile = findTool(QStringLiteral("upsert_harness_profile"));
+    QVERIFY(harnessProfile.value(QStringLiteral("description")).toString()
+                .contains(QStringLiteral("visible terminal emulator")));
+    const auto profileAnnotations = harnessProfile.value(QStringLiteral("annotations")).toObject();
     QCOMPARE(profileAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), false);
     QCOMPARE(profileAnnotations.value(QStringLiteral("idempotentHint")).toBool(), true);
     const auto removeAnnotations =
@@ -456,6 +458,8 @@ void CoreTests::validatesPortableAgentPluginBundle() {
     QVERIFY(instructions.contains(QStringLiteral("remote HTTPS/mTLS")));
     QVERIFY(instructions.contains(QStringLiteral("check_updates")));
     QVERIFY(instructions.contains(QStringLiteral("upsert_harness_profile")));
+    QVERIFY(instructions.contains(QStringLiteral(
+        "A terminal or TUI harness must open in a visible terminal emulator")));
     QVERIFY(instructions.contains(QStringLiteral("`pacsmith check --all`")));
     QVERIFY(instructions.contains(QStringLiteral(
         "Prefer a first-party signed APT or RPM repository")));

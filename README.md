@@ -22,6 +22,72 @@ PacSmith takes the packages developers actually publish, including Debian `.deb`
 
 It is not an AUR helper. It does not download community PKGBUILDs. You import the developer's own packages, review the generated recipe, and become the package maintainer. The point is a shorter trust chain: developer → you, with no extra packager in the middle.
 
+## Install and get started
+
+### Install PacSmith
+
+Download the newest `pacsmith-*.pkg.tar.zst` and its `SHA256SUMS` file from [GitHub Releases](https://github.com/anderson-arlen/PacSmith/releases). From a directory containing only that PacSmith package and checksum file, verify the download and install it with pacman:
+
+```bash
+sha256sum -c SHA256SUMS
+sudo pacman -U ./pacsmith-*.pkg.tar.zst
+```
+
+PacSmith includes its GUI, CLI, user daemon, Agent Skill, and MCP server. Launch the GUI with `pacsmith-gui`. The GUI, a library-using CLI command, or `pacsmith mcp` starts the local user daemon automatically, so an MCP harness does not require the GUI to be opened first. A client configured for a remote library connects to that server instead.
+
+### Connect an AI harness
+
+Install the bundled PacSmith Skill for your user:
+
+```bash
+pacsmith skill install
+```
+
+This installs the Skill at `~/.agents/skills/pacsmith` for harnesses that discover shared Agent Skills. Restart or reload the harness if it was already running. `pacsmith skill path` prints the active Skill path, and `pacsmith plugin path` prints the complete portable Agent Plugin containing both the Skill and MCP declaration.
+
+Register PacSmith's local stdio MCP server in the harnesses you use:
+
+- **[Codex](https://developers.openai.com/codex/mcp/):** `codex mcp add pacsmith -- pacsmith mcp`
+- **[Claude Code](https://code.claude.com/docs/en/mcp):** `claude mcp add --scope user --transport stdio pacsmith -- pacsmith mcp`
+- **[Gemini CLI](https://geminicli.com/docs/tools/mcp-server/):** `gemini mcp add --scope user pacsmith pacsmith mcp`
+- **[Cursor](https://cursor.com/docs/mcp):** add the following entry to the `mcpServers` object in `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pacsmith": {
+      "type": "stdio",
+      "command": "pacsmith",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+If the harness supports Agent Plugins 1.0 directly, you can instead give its plugin installer the directory printed by `pacsmith plugin path`. Review and approve the MCP tools when the harness asks.
+
+PacSmith can also launch your harness from contextual **Ask AI** buttons in the GUI. After MCP is connected, send this prompt to the harness once:
+
+> Install yourself as the default pacsmith AI harness
+
+This launch profile is separate from MCP registration. It tells PacSmith how to open the harness with project and release context when you choose **Ask AI**. Terminal-based harnesses are opened inside a visible terminal emulator.
+
+## Quick start
+
+### Use the GUI
+
+Open `pacsmith-gui`, choose **New**, and import an official vendor package file, direct download, GitHub project, or signed APT/RPM repository. Review the detected metadata, dependencies, scripts, payload decisions, desktop integration, and generated PKGBUILD. When the review is clear, build and install the resulting native package. Configure update monitoring to keep the project current from the same upstream source.
+
+### Use an AI agent
+
+With the PacSmith Skill installed and MCP connected, just ask your agent:
+
+> What's the best way to install X on this machine?
+
+The agent can weigh the available options and suggest PacSmith when it is a good fit. If it does, tell it to “set it up.” It can add and configure the project, build the native Arch package, and install it without you ever opening the GUI. Elevated privileges are needed only for the final pacman installation. PacSmith requests them through polkit, which asks you for your password directly, so the agent never has access to it.
+
+The GUI and agent stay synchronized through the same server-owned library, so you can begin a project in one and continue in the other.
+
 ## Why PacSmith
 
 Arch Linux is excellent at what it ships in the official repositories. Third-party application support outside those repos is another story. The Arch User Repository exists to fill that gap, and for years it has been the default answer to "how do I install this on Arch?" It has real problems.

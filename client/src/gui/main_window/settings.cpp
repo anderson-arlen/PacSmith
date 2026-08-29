@@ -287,7 +287,9 @@ void MainWindow::showSettings() {
                        "the Skill and MCP declaration. Install and approve it through the harness's "
                        "own plugin controls. `pacsmith skill install` remains available for harnesses "
                        "that only discover shared Agent Skills. Arguments are passed directly "
-                       "without a shell. Put {prompt} in an argument to receive PacSmith context.")));
+                       "without a shell. Put {prompt} in an argument to receive PacSmith context. "
+                       "For a terminal harness, use a terminal emulator as the executable and put "
+                       "its execute arguments followed by the harness command in Arguments.")));
     auto *harnessForm = new QFormLayout;
     auto *harnessSelector = new QComboBox(harnessGroup);
     auto *harnessName = new QLineEdit(harnessGroup);
