@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -88,6 +89,9 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if runtime.Recovered {
+		log.Printf("PacSmith CA secrets were missing or invalid; generated replacement CAs and invalidated existing client enrollment")
+	}
 	store, err := artifact.New(cfg.Dirs.Objects, cfg.Dirs.Tmp)
 	if err != nil {
 		_ = db.Close()
@@ -100,6 +104,10 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		WorkDir:   filepath.Join(cfg.Dirs.Work, "releases"),
 	}
 	repoSvc := repo.New(db, registry, opened.Store, filepath.Join(cfg.Dirs.Work, "repo"), filepath.Join(cfg.Dirs.Data, "gnupg"))
+	if _, err := repoSvc.RecoverMissingSigningKey(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	eventHub := events.New()
 	lib.Repo = repoSvc
 	githubSvc := &githubapi.Service{Secrets: opened.Store, Artifacts: registry}

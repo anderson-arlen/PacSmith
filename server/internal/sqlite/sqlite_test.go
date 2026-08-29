@@ -36,7 +36,7 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := again.SQL.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 16 {
+	if version != 17 {
 		t.Fatalf("migration version %d", version)
 	}
 	settings, err := again.Queries.GetLibrarySettings(ctx)

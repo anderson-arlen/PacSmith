@@ -10,6 +10,19 @@ import (
 	"database/sql"
 )
 
+const countJobsByKind = `-- name: CountJobsByKind :one
+SELECT COUNT(*)
+FROM jobs
+WHERE kind = ?
+`
+
+func (q *Queries) CountJobsByKind(ctx context.Context, kind string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countJobsByKind, kind)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getJob = `-- name: GetJob :one
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,
        message, current, total, failed_items, paused_items, created_at, started_at, finished_at
@@ -39,6 +52,22 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const getLatestLibraryJobCreatedAt = `-- name: GetLatestLibraryJobCreatedAt :one
+SELECT created_at
+FROM jobs
+WHERE kind = ?
+  AND COALESCE(json_extract(payload_json, '$.release_id'), '') = ''
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestLibraryJobCreatedAt(ctx context.Context, kind string) (string, error) {
+	row := q.db.QueryRowContext(ctx, getLatestLibraryJobCreatedAt, kind)
+	var created_at string
+	err := row.Scan(&created_at)
+	return created_at, err
 }
 
 const insertJob = `-- name: InsertJob :one

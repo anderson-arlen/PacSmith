@@ -559,6 +559,11 @@ void MainWindow::showSettings() {
                                            "0 12px; }"
                                            "QWidget#repositorySettingsPage QListWidget { border-radius: 5px; }"
                                            "QLabel#repositoryPageTitle { font-size: 18px; font-weight: 600; }"
+                                           "QLabel#repositoryRecoveryNotice {"
+                                           "  background-color: rgba(205, 145, 35, 28);"
+                                           "  border: 1px solid rgba(205, 145, 35, 150);"
+                                           "  border-radius: 7px; padding: 10px 12px;"
+                                           "}"
                                            "QWidget#repositoryFingerprintField {"
                                            "  background-color: rgba(127, 127, 127, 18); border-radius: 5px; "
                                            "padding: 4px;"
@@ -588,6 +593,12 @@ void MainWindow::showSettings() {
         repoLoadNotice->setWordWrap(true);
         repoLayout->addWidget(repoLoadNotice);
     }
+    auto *repoRecoveryNotice = new QLabel(repoPage);
+    repoRecoveryNotice->setObjectName(QStringLiteral("repositoryRecoveryNotice"));
+    repoRecoveryNotice->setWordWrap(true);
+    repoRecoveryNotice->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    repoRecoveryNotice->setVisible(false);
+    repoLayout->addWidget(repoRecoveryNotice);
 
     auto *repoListenGroup = new QGroupBox(QStringLiteral("Network"), repoPage);
     auto *repoListenForm = new QFormLayout(repoListenGroup);
@@ -771,6 +782,8 @@ void MainWindow::showSettings() {
         const QScopedValueRollback applying(applyingRepoFields, true);
         const auto keepRootCertified = repoTrustMode->currentData().toString() == QStringLiteral("root-certified") &&
                                        settings.trustMode != QStringLiteral("root-certified");
+        repoRecoveryNotice->setText(settings.recoveryMessage);
+        repoRecoveryNotice->setVisible(!settings.recoveryMessage.isEmpty());
         repoEnabled->setChecked(settings.enabled);
         repoListenPort->setValue(settings.listenPort);
         {

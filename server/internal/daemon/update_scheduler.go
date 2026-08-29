@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
@@ -36,15 +37,12 @@ func (d *Daemon) enqueueScheduledUpdateIfDue(ctx context.Context, now time.Time)
 	if occurrence.After(now) {
 		return
 	}
-	var latest sql.NullString
-	err = d.db.SQL.QueryRowContext(ctx,
-		`SELECT MAX(created_at) FROM jobs WHERE kind = ? AND release_id IS NULL`,
-		jobs.KindUpdateCheck).Scan(&latest)
-	if err != nil {
+	latest, err := d.db.Queries.GetLatestLibraryJobCreatedAt(ctx, jobs.KindUpdateCheck)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return
 	}
-	if latest.Valid {
-		if checked, parseErr := time.Parse(time.RFC3339Nano, latest.String); parseErr == nil && !checked.Before(occurrence) {
+	if err == nil {
+		if checked, parseErr := time.Parse(time.RFC3339Nano, latest); parseErr == nil && !checked.Before(occurrence) {
 			return
 		}
 	}

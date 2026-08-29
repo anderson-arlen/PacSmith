@@ -42,3 +42,16 @@ SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset
 FROM jobs
 WHERE kind = ? AND status IN ('queued', 'running')
 ORDER BY created_at;
+
+-- name: GetLatestLibraryJobCreatedAt :one
+SELECT created_at
+FROM jobs
+WHERE kind = ?
+  AND COALESCE(json_extract(payload_json, '$.release_id'), '') = ''
+ORDER BY created_at DESC
+LIMIT 1;
+
+-- name: CountJobsByKind :one
+SELECT COUNT(*)
+FROM jobs
+WHERE kind = ?;

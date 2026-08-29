@@ -21,6 +21,37 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 )
 
+func librarySettingsUpdate(row sqlcdb.LibrarySetting) sqlcdb.UpdateLibrarySettingsParams {
+	return sqlcdb.UpdateLibrarySettingsParams{
+		AiProvider: row.AiProvider, AiModel: row.AiModel,
+		AiReasoningEffort: row.AiReasoningEffort, AiExecutionMode: row.AiExecutionMode,
+		AiAutoResolve: row.AiAutoResolve, UpdatesEnabled: row.UpdatesEnabled,
+		UpdatesDaily: row.UpdatesDaily, UpdatesWeekday: row.UpdatesWeekday,
+		UpdatesHour: row.UpdatesHour, UpdatesMinute: row.UpdatesMinute,
+		UpdatesAutoPrepare: row.UpdatesAutoPrepare, RetentionVersions: row.RetentionVersions,
+		BuildParallelism: row.BuildParallelism, Revision: row.Revision,
+	}
+}
+
+func repoSettingsUpdate(row sqlcdb.RepoSetting) sqlcdb.UpdateRepoSettingsParams {
+	return sqlcdb.UpdateRepoSettingsParams{
+		Enabled: row.Enabled, ListenHosts: row.ListenHosts, ListenPort: row.ListenPort,
+		AdvertisedUrl: row.AdvertisedUrl, StableEnabled: row.StableEnabled,
+		SoakSeconds: row.SoakSeconds, PackageNamePrefix: row.PackageNamePrefix,
+		TrustMode: row.TrustMode, SigningFingerprint: row.SigningFingerprint,
+		SigningInitialized:      row.SigningInitialized,
+		SigningPubkeyArtifactID: row.SigningPubkeyArtifactID,
+		RootPubkeyArtifactID:    row.RootPubkeyArtifactID, RootFingerprint: row.RootFingerprint,
+		CertifiedPubkeyArtifactID:   row.CertifiedPubkeyArtifactID,
+		KeyringGpgArtifactID:        row.KeyringGpgArtifactID,
+		KeyringTrustedArtifactID:    row.KeyringTrustedArtifactID,
+		KeyringRevokedArtifactID:    row.KeyringRevokedArtifactID,
+		KeyringPackageArtifactID:    row.KeyringPackageArtifactID,
+		KeyringPackageSigArtifactID: row.KeyringPackageSigArtifactID,
+		KeyringVersion:              row.KeyringVersion, ModifiedAt: row.ModifiedAt, Revision: row.Revision,
+	}
+}
+
 func TestBuildParallelismArguments(t *testing.T) {
 	arguments := buildParallelismArguments(6)
 	if got, want := strings.Join(arguments, " "),
@@ -899,7 +930,13 @@ func TestCleanupKeepsConfiguredNumberOfOutdatedVersionsAndPrunesArtifactsTogethe
 	}
 	registry := &artifact.Registry{DB: db, Store: store}
 	svc := &Service{DB: db, Artifacts: registry}
-	if _, err := db.SQL.ExecContext(ctx, `UPDATE library_settings SET retention_versions = 1 WHERE id = 1`); err != nil {
+	settings, err := db.Queries.GetLibrarySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsUpdate := librarySettingsUpdate(settings)
+	settingsUpdate.RetentionVersions = 1
+	if _, err := db.Queries.UpdateLibrarySettings(ctx, settingsUpdate); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
@@ -965,7 +1002,13 @@ func TestCleanupKeepsConfiguredNumberOfOutdatedVersionsAndPrunesArtifactsTogethe
 	retained := insertBuiltRelease("release-recent", "2.0", 70, 90)
 	stable := insertBuiltRelease("release-stable", "3.0", 60, 60)
 	newest := insertBuiltRelease("release-newest", "4.0", 50, 50)
-	if _, err := db.SQL.ExecContext(ctx, `UPDATE repo_settings SET stable_enabled = 1 WHERE id = 1`); err != nil {
+	repoSettings, err := db.Queries.GetRepoSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoUpdate := repoSettingsUpdate(repoSettings)
+	repoUpdate.StableEnabled = 1
+	if _, err := db.Queries.UpdateRepoSettings(ctx, repoUpdate); err != nil {
 		t.Fatal(err)
 	}
 	for _, pointer := range []struct {

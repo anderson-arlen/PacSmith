@@ -1,10 +1,16 @@
 package daemon
 
 import (
+	"context"
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
+	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
+	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 	"github.com/anderson-arlen/pacsmith/server/internal/updatecheck"
 )
 
@@ -18,6 +24,70 @@ func TestScheduledOccurrence(t *testing.T) {
 	weekly := scheduledOccurrence(now, false, 3, 9, 15)
 	if weekly.Day() != 26 || weekly.Hour() != 9 || weekly.Minute() != 15 {
 		t.Fatalf("weekly occurrence %s", weekly)
+	}
+}
+
+func TestSchedulerRecognizesCompletedLibraryCheckAfterProgressAttachesRelease(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager, err := jobs.New(db, filepath.Join(t.TempDir(), "jobs"),
+		func(_ context.Context, _ jobs.Job, _ json.RawMessage, _ func(string), progress func(jobs.Progress)) (json.RawMessage, error) {
+			progress(jobs.Progress{ProjectID: "project-1", ReleaseID: "release-1"})
+			return nil, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Stop)
+
+	now := time.Now()
+	due := now.Add(-time.Minute)
+	settings, err := db.Queries.GetLibrarySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Queries.UpdateLibrarySettings(ctx, sqlcdb.UpdateLibrarySettingsParams{
+		AiProvider: settings.AiProvider, AiModel: settings.AiModel,
+		AiReasoningEffort: settings.AiReasoningEffort, AiExecutionMode: settings.AiExecutionMode,
+		AiAutoResolve: settings.AiAutoResolve, UpdatesEnabled: 1, UpdatesDaily: 1,
+		UpdatesWeekday: settings.UpdatesWeekday, UpdatesHour: int64(due.Hour()),
+		UpdatesMinute: int64(due.Minute()), UpdatesAutoPrepare: settings.UpdatesAutoPrepare,
+		RetentionVersions: settings.RetentionVersions, BuildParallelism: settings.BuildParallelism,
+		Revision: settings.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := manager.Enqueue(ctx, jobs.KindUpdateCheck, struct {
+		Scheduled bool `json:"scheduled"`
+	}{Scheduled: true}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	completed, err := jobs.Wait(waitCtx, manager.Get, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ReleaseID != "release-1" {
+		t.Fatalf("completed job release = %q, want progress-attached release", completed.ReleaseID)
+	}
+
+	daemon := &Daemon{db: db, jobs: manager}
+	daemon.enqueueScheduledUpdateIfDue(ctx, now)
+	count, err := db.Queries.CountJobsByKind(ctx, jobs.KindUpdateCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("update-check job count = %d, want 1", count)
 	}
 }
 

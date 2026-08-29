@@ -265,6 +265,79 @@ func TestEnablingPublicationPublishesLatestSuccessfulBuild(t *testing.T) {
 	}
 }
 
+func TestSigningRecoveryRestoresPreviouslyPublishedProjects(t *testing.T) {
+	fx := newRepoFixture(t)
+	fx.insertProject(t, "proj-a", "demo-bin")
+	artifactID := fx.publish(t, "proj-a", "1.5.0", "1")
+	stamp := fx.now.Format("2006-01-02T15:04:05.000Z07:00")
+	build, err := fx.db.Queries.InsertBuild(fx.ctx, sqlcdb.InsertBuildParams{
+		ID: "build-before-key-loss", ReleaseID: "proj-a-rel", Status: "succeeded", LogText: "ok",
+		StartedAt: ns(stamp), FinishedAt: ns(stamp),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.db.Queries.InsertBuildArtifact(fx.ctx, sqlcdb.InsertBuildArtifactParams{
+		BuildID: build.ID, ArtifactID: artifactID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.svc.Secrets.Delete(fx.ctx, SecretSigningKey); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := fx.svc.RecoverMissingSigningKey(fx.ctx)
+	if err != nil || !changed {
+		t.Fatalf("recover missing signing key: changed=%v err=%v", changed, err)
+	}
+	status, err := fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Unstable != nil {
+		t.Fatalf("recovery retained an index signed by the lost key: %+v", status.Unstable)
+	}
+
+	settings, err := fx.svc.InitSigning(fx.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.RecoveryMessage == "" {
+		t.Fatal("recovery notice was cleared before repository serving was re-enabled")
+	}
+	status, err = fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Unstable != nil {
+		t.Fatalf("signing initialization unexpectedly restored publication: %+v", status.Unstable)
+	}
+	enabled := true
+	settings, err = fx.svc.PatchSettings(fx.ctx, SettingsPatch{Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.RecoveryMessage != "" {
+		t.Fatalf("recovery notice remained after repository was re-enabled: %q", settings.RecoveryMessage)
+	}
+	projectIDs, err := fx.svc.PublishedProjectIDs(fx.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectIDs) != 1 || projectIDs[0] != "proj-a" {
+		t.Fatalf("projects selected for background republishing: %v", projectIDs)
+	}
+	if err := fx.svc.ReconcileProjectDistribution(fx.ctx, "proj-a"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = fx.svc.ProjectView(fx.ctx, "proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Unstable == nil || status.Unstable.Artifact != artifactID {
+		t.Fatalf("background reconciliation did not restore publication: %+v", status.Unstable)
+	}
+}
+
 func TestDeferredPublicationWaitsForReconciliation(t *testing.T) {
 	fx := newRepoFixture(t)
 	fx.insertProject(t, "proj-a", "demo-bin")

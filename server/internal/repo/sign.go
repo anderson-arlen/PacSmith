@@ -343,6 +343,7 @@ func trustParams(row sqlcdb.RepoSetting) sqlcdb.UpdateRepoTrustParams {
 		KeyringPackageArtifactID:    row.KeyringPackageArtifactID,
 		KeyringPackageSigArtifactID: row.KeyringPackageSigArtifactID,
 		KeyringVersion:              row.KeyringVersion,
+		RecoveryMessage:             row.RecoveryMessage,
 		ModifiedAt:                  row.ModifiedAt,
 	}
 }

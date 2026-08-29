@@ -196,6 +196,7 @@ void MainWindow::restoreActiveBuildJobs() {
         LibraryClient client(config);
         auto jobs = client.activeJobs(QStringLiteral("build"));
         jobs.append(client.activeJobs(QStringLiteral("remote_import")));
+        jobs.append(client.activeJobs(QStringLiteral("repository_distribution")));
         return jobs;
     }));
 }
@@ -236,7 +237,14 @@ bool MainWindow::updateRepositoryDistributionStatus(const ServerEvent &event) {
     } else if (event.jobStatus == QStringLiteral("succeeded")) {
         statusBar()->showMessage(QStringLiteral("Repository distribution is up to date"), 6000);
     } else if (event.jobStatus == QStringLiteral("failed")) {
-        statusBar()->showMessage(QStringLiteral("Repository distribution failed"), 8000);
+        const auto name = !event.projectName.isEmpty() ? event.projectName
+                                                       : !event.packageName.isEmpty() ? event.packageName
+                                                                                      : event.projectId;
+        QString message = name.isEmpty()
+            ? QStringLiteral("Repository distribution failed")
+            : QStringLiteral("Repository distribution failed for %1").arg(name);
+        if (!event.jobMessage.isEmpty()) message += QStringLiteral(": %1").arg(event.jobMessage);
+        statusBar()->showMessage(message, 12000);
     } else if (event.jobStatus == QStringLiteral("interrupted")) {
         statusBar()->showMessage(QStringLiteral("Repository distribution was canceled"), 6000);
     }

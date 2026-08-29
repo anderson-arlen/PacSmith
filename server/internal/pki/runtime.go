@@ -25,10 +25,11 @@ const (
 )
 
 type Runtime struct {
-	Material Material
-	Leaves   *LeafCache
-	Abbrev   string
-	Full     string
+	Material  Material
+	Leaves    *LeafCache
+	Abbrev    string
+	Full      string
+	Recovered bool
 }
 
 func LoadOrGenerate(ctx context.Context, db *sqlite.DB, secrets secret.Store) (*Runtime, error) {
@@ -39,9 +40,16 @@ func LoadOrGenerate(ctx context.Context, db *sqlite.DB, secrets secret.Store) (*
 	if state.PkiReady != 0 {
 		material, err := loadMaterial(ctx, secrets)
 		if err != nil {
-			return nil, fmt.Errorf("initialized server is missing CA material: %w", err)
+			if !errors.Is(err, secret.ErrNotFound) {
+				return nil, fmt.Errorf("load initialized CA material: %w", err)
+			}
+			return recoverMaterial(ctx, db, secrets, state.SecretBackend)
 		}
-		return newRuntime(material)
+		runtime, err := newRuntime(material)
+		if err == nil {
+			return runtime, nil
+		}
+		return recoverMaterial(ctx, db, secrets, state.SecretBackend)
 	}
 	material, err := GenerateCAs()
 	if err != nil {
@@ -57,6 +65,52 @@ func LoadOrGenerate(ctx context.Context, db *sqlite.DB, secrets secret.Store) (*
 		return nil, err
 	}
 	return newRuntime(material)
+}
+
+func recoverMaterial(ctx context.Context, db *sqlite.DB, secrets secret.Store, backend string) (*Runtime, error) {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	queries := db.Queries.WithTx(tx)
+	if err := queries.DeleteAllRegistrations(ctx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := queries.DeleteAllClients(ctx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := queries.UpdateServerBackend(ctx, sqlcdb.UpdateServerBackendParams{
+		SecretBackend: backend,
+		PkiReady:      0,
+	}); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	material, err := GenerateCAs()
+	if err != nil {
+		return nil, err
+	}
+	if err := storeMaterial(ctx, secrets, material); err != nil {
+		return nil, err
+	}
+	if err := db.Queries.UpdateServerBackend(ctx, sqlcdb.UpdateServerBackendParams{
+		SecretBackend: backend,
+		PkiReady:      1,
+	}); err != nil {
+		return nil, err
+	}
+	runtime, err := newRuntime(material)
+	if err != nil {
+		return nil, err
+	}
+	runtime.Recovered = true
+	return runtime, nil
 }
 
 func newRuntime(material Material) (*Runtime, error) {

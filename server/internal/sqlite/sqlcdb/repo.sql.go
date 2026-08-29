@@ -10,6 +10,33 @@ import (
 	"database/sql"
 )
 
+const deleteAllChannelEntries = `-- name: DeleteAllChannelEntries :exec
+DELETE FROM repo_channel_entries
+`
+
+func (q *Queries) DeleteAllChannelEntries(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllChannelEntries)
+	return err
+}
+
+const deleteAllRepoDatabases = `-- name: DeleteAllRepoDatabases :exec
+DELETE FROM repo_databases
+`
+
+func (q *Queries) DeleteAllRepoDatabases(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllRepoDatabases)
+	return err
+}
+
+const deleteAllSoaks = `-- name: DeleteAllSoaks :exec
+DELETE FROM repo_soaks
+`
+
+func (q *Queries) DeleteAllSoaks(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllSoaks)
+	return err
+}
+
 const deleteChannelEntriesForProject = `-- name: DeleteChannelEntriesForProject :exec
 DELETE FROM repo_channel_entries WHERE project_id = ?
 `
@@ -75,6 +102,33 @@ func (q *Queries) DeleteSoaksForProject(ctx context.Context, projectID sql.NullS
 	return err
 }
 
+const deleteStableChannelEntriesForProject = `-- name: DeleteStableChannelEntriesForProject :exec
+DELETE FROM repo_channel_entries WHERE project_id = ? AND channel = 'stable'
+`
+
+func (q *Queries) DeleteStableChannelEntriesForProject(ctx context.Context, projectID sql.NullString) error {
+	_, err := q.db.ExecContext(ctx, deleteStableChannelEntriesForProject, projectID)
+	return err
+}
+
+const deleteStableProjectChannelEntries = `-- name: DeleteStableProjectChannelEntries :exec
+DELETE FROM repo_channel_entries WHERE channel = 'stable' AND project_id IS NOT NULL
+`
+
+func (q *Queries) DeleteStableProjectChannelEntries(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteStableProjectChannelEntries)
+	return err
+}
+
+const deleteStableRepoDatabases = `-- name: DeleteStableRepoDatabases :exec
+DELETE FROM repo_databases WHERE channel = 'stable'
+`
+
+func (q *Queries) DeleteStableRepoDatabases(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteStableRepoDatabases)
+	return err
+}
+
 const getChannelEntry = `-- name: GetChannelEntry :one
 SELECT channel, arch, pkgname, project_id, release_id, epoch, pkgver, pkgrel, artifact_id, sig_artifact_id, filename, published_at FROM repo_channel_entries
 WHERE channel = ? AND arch = ? AND pkgname = ?
@@ -103,6 +157,24 @@ func (q *Queries) GetChannelEntry(ctx context.Context, arg GetChannelEntryParams
 		&i.Filename,
 		&i.PublishedAt,
 	)
+	return i, err
+}
+
+const getProjectRepoPolicy = `-- name: GetProjectRepoPolicy :one
+SELECT automatic_soak, soak_seconds_override
+FROM project_repo_policies
+WHERE project_id = ?
+`
+
+type GetProjectRepoPolicyRow struct {
+	AutomaticSoak       int64 `json:"automatic_soak"`
+	SoakSecondsOverride int64 `json:"soak_seconds_override"`
+}
+
+func (q *Queries) GetProjectRepoPolicy(ctx context.Context, projectID string) (GetProjectRepoPolicyRow, error) {
+	row := q.db.QueryRowContext(ctx, getProjectRepoPolicy, projectID)
+	var i GetProjectRepoPolicyRow
+	err := row.Scan(&i.AutomaticSoak, &i.SoakSecondsOverride)
 	return i, err
 }
 
@@ -165,7 +237,7 @@ func (q *Queries) GetRepoPackageByProject(ctx context.Context, projectID sql.Nul
 }
 
 const getRepoSettings = `-- name: GetRepoSettings :one
-SELECT id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at FROM repo_settings WHERE id = 1
+SELECT id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, recovery_message, modified_at FROM repo_settings WHERE id = 1
 `
 
 func (q *Queries) GetRepoSettings(ctx context.Context) (RepoSetting, error) {
@@ -194,6 +266,7 @@ func (q *Queries) GetRepoSettings(ctx context.Context) (RepoSetting, error) {
 		&i.KeyringPackageArtifactID,
 		&i.KeyringPackageSigArtifactID,
 		&i.KeyringVersion,
+		&i.RecoveryMessage,
 		&i.ModifiedAt,
 	)
 	return i, err
@@ -570,6 +643,66 @@ func (q *Queries) ListSoaksForPackage(ctx context.Context, arg ListSoaksForPacka
 	return items, nil
 }
 
+const resetRepoAfterSigningKeyLoss = `-- name: ResetRepoAfterSigningKeyLoss :one
+UPDATE repo_settings
+SET revision = revision + 1,
+    enabled = 0,
+    trust_mode = 'direct',
+    signing_fingerprint = '',
+    signing_initialized = 0,
+    signing_pubkey_artifact_id = NULL,
+    root_pubkey_artifact_id = NULL,
+    root_fingerprint = '',
+    certified_pubkey_artifact_id = NULL,
+    keyring_gpg_artifact_id = NULL,
+    keyring_trusted_artifact_id = NULL,
+    keyring_revoked_artifact_id = NULL,
+    keyring_package_artifact_id = NULL,
+    keyring_package_sig_artifact_id = NULL,
+    keyring_version = 0,
+    recovery_message = ?,
+    modified_at = ?
+WHERE id = 1
+RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, recovery_message, modified_at
+`
+
+type ResetRepoAfterSigningKeyLossParams struct {
+	RecoveryMessage string `json:"recovery_message"`
+	ModifiedAt      string `json:"modified_at"`
+}
+
+func (q *Queries) ResetRepoAfterSigningKeyLoss(ctx context.Context, arg ResetRepoAfterSigningKeyLossParams) (RepoSetting, error) {
+	row := q.db.QueryRowContext(ctx, resetRepoAfterSigningKeyLoss, arg.RecoveryMessage, arg.ModifiedAt)
+	var i RepoSetting
+	err := row.Scan(
+		&i.ID,
+		&i.Revision,
+		&i.Enabled,
+		&i.ListenHosts,
+		&i.ListenPort,
+		&i.AdvertisedUrl,
+		&i.StableEnabled,
+		&i.SoakSeconds,
+		&i.PackageNamePrefix,
+		&i.TrustMode,
+		&i.SigningFingerprint,
+		&i.SigningInitialized,
+		&i.SigningPubkeyArtifactID,
+		&i.RootPubkeyArtifactID,
+		&i.RootFingerprint,
+		&i.CertifiedPubkeyArtifactID,
+		&i.KeyringGpgArtifactID,
+		&i.KeyringTrustedArtifactID,
+		&i.KeyringRevokedArtifactID,
+		&i.KeyringPackageArtifactID,
+		&i.KeyringPackageSigArtifactID,
+		&i.KeyringVersion,
+		&i.RecoveryMessage,
+		&i.ModifiedAt,
+	)
+	return i, err
+}
+
 const updateProjectRepo = `-- name: UpdateProjectRepo :one
 UPDATE projects
 SET repo_publish = ?,
@@ -688,9 +821,10 @@ SET revision = revision + 1,
     keyring_package_artifact_id = ?,
     keyring_package_sig_artifact_id = ?,
     keyring_version = ?,
+    recovery_message = ?,
     modified_at = ?
 WHERE id = 1 AND revision = ?
-RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at
+RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, recovery_message, modified_at
 `
 
 type UpdateRepoSettingsParams struct {
@@ -714,6 +848,7 @@ type UpdateRepoSettingsParams struct {
 	KeyringPackageArtifactID    sql.NullString `json:"keyring_package_artifact_id"`
 	KeyringPackageSigArtifactID sql.NullString `json:"keyring_package_sig_artifact_id"`
 	KeyringVersion              int64          `json:"keyring_version"`
+	RecoveryMessage             string         `json:"recovery_message"`
 	ModifiedAt                  string         `json:"modified_at"`
 	Revision                    int64          `json:"revision"`
 }
@@ -740,6 +875,7 @@ func (q *Queries) UpdateRepoSettings(ctx context.Context, arg UpdateRepoSettings
 		arg.KeyringPackageArtifactID,
 		arg.KeyringPackageSigArtifactID,
 		arg.KeyringVersion,
+		arg.RecoveryMessage,
 		arg.ModifiedAt,
 		arg.Revision,
 	)
@@ -767,6 +903,7 @@ func (q *Queries) UpdateRepoSettings(ctx context.Context, arg UpdateRepoSettings
 		&i.KeyringPackageArtifactID,
 		&i.KeyringPackageSigArtifactID,
 		&i.KeyringVersion,
+		&i.RecoveryMessage,
 		&i.ModifiedAt,
 	)
 	return i, err
@@ -788,9 +925,10 @@ SET revision = revision + 1,
     keyring_package_artifact_id = ?,
     keyring_package_sig_artifact_id = ?,
     keyring_version = ?,
+    recovery_message = ?,
     modified_at = ?
 WHERE id = 1
-RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, modified_at
+RETURNING id, revision, enabled, listen_hosts, listen_port, advertised_url, stable_enabled, soak_seconds, package_name_prefix, trust_mode, signing_fingerprint, signing_initialized, signing_pubkey_artifact_id, root_pubkey_artifact_id, root_fingerprint, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id, keyring_version, recovery_message, modified_at
 `
 
 type UpdateRepoTrustParams struct {
@@ -807,6 +945,7 @@ type UpdateRepoTrustParams struct {
 	KeyringPackageArtifactID    sql.NullString `json:"keyring_package_artifact_id"`
 	KeyringPackageSigArtifactID sql.NullString `json:"keyring_package_sig_artifact_id"`
 	KeyringVersion              int64          `json:"keyring_version"`
+	RecoveryMessage             string         `json:"recovery_message"`
 	ModifiedAt                  string         `json:"modified_at"`
 }
 
@@ -825,6 +964,7 @@ func (q *Queries) UpdateRepoTrust(ctx context.Context, arg UpdateRepoTrustParams
 		arg.KeyringPackageArtifactID,
 		arg.KeyringPackageSigArtifactID,
 		arg.KeyringVersion,
+		arg.RecoveryMessage,
 		arg.ModifiedAt,
 	)
 	var i RepoSetting
@@ -851,6 +991,7 @@ func (q *Queries) UpdateRepoTrust(ctx context.Context, arg UpdateRepoTrustParams
 		&i.KeyringPackageArtifactID,
 		&i.KeyringPackageSigArtifactID,
 		&i.KeyringVersion,
+		&i.RecoveryMessage,
 		&i.ModifiedAt,
 	)
 	return i, err
@@ -924,6 +1065,28 @@ func (q *Queries) UpsertChannelEntry(ctx context.Context, arg UpsertChannelEntry
 		arg.Filename,
 		arg.PublishedAt,
 	)
+	return err
+}
+
+const upsertProjectRepoPolicy = `-- name: UpsertProjectRepoPolicy :exec
+INSERT INTO project_repo_policies (
+    project_id, stable_enabled, automatic_soak, soak_seconds_override
+)
+VALUES (?, 1, ?, ?)
+ON CONFLICT (project_id) DO UPDATE SET
+    stable_enabled = excluded.stable_enabled,
+    automatic_soak = excluded.automatic_soak,
+    soak_seconds_override = excluded.soak_seconds_override
+`
+
+type UpsertProjectRepoPolicyParams struct {
+	ProjectID           string `json:"project_id"`
+	AutomaticSoak       int64  `json:"automatic_soak"`
+	SoakSecondsOverride int64  `json:"soak_seconds_override"`
+}
+
+func (q *Queries) UpsertProjectRepoPolicy(ctx context.Context, arg UpsertProjectRepoPolicyParams) error {
+	_, err := q.db.ExecContext(ctx, upsertProjectRepoPolicy, arg.ProjectID, arg.AutomaticSoak, arg.SoakSecondsOverride)
 	return err
 }
 

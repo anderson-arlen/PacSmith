@@ -19,35 +19,39 @@ type projectRepoPolicy struct {
 	SoakSecondsOverride int64
 }
 
+func (s *Service) PublishedProjectIDs(ctx context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	projects, err := s.DB.Queries.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(projects))
+	for _, project := range projects {
+		if project.RepoPublish != 0 {
+			ids = append(ids, project.ID)
+		}
+	}
+	return ids, nil
+}
+
 func (s *Service) projectPolicy(ctx context.Context, projectID string) (projectRepoPolicy, error) {
-	var automatic, soakSecondsOverride int64
-	err := s.DB.SQL.QueryRowContext(ctx, `
-SELECT automatic_soak, soak_seconds_override
-FROM project_repo_policies
-WHERE project_id = ?`, projectID).Scan(&automatic, &soakSecondsOverride)
+	row, err := s.DB.Queries.GetProjectRepoPolicy(ctx, projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return projectRepoPolicy{SoakSecondsOverride: -1}, nil
 	}
 	return projectRepoPolicy{
-		AutomaticSoak:       automatic != 0,
-		SoakSecondsOverride: soakSecondsOverride,
+		AutomaticSoak:       row.AutomaticSoak != 0,
+		SoakSecondsOverride: row.SoakSecondsOverride,
 	}, err
 }
 
 func (s *Service) saveProjectPolicy(ctx context.Context, projectID string,
 	policy projectRepoPolicy) error {
-	_, err := s.DB.SQL.ExecContext(ctx, `
-INSERT INTO project_repo_policies (
-    project_id, stable_enabled, automatic_soak, soak_seconds_override
-)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (project_id) DO UPDATE SET
-    stable_enabled = excluded.stable_enabled,
-    automatic_soak = excluded.automatic_soak,
-    soak_seconds_override = excluded.soak_seconds_override`,
-		projectID, 1, boolInt(policy.AutomaticSoak),
-		policy.SoakSecondsOverride)
-	return err
+	return s.DB.Queries.UpsertProjectRepoPolicy(ctx, sqlcdb.UpsertProjectRepoPolicyParams{
+		ProjectID: projectID, AutomaticSoak: boolInt(policy.AutomaticSoak),
+		SoakSecondsOverride: policy.SoakSecondsOverride,
+	})
 }
 
 func effectiveSoakSeconds(libraryDefault int64, policy projectRepoPolicy) int64 {

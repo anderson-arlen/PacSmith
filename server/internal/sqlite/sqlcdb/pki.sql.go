@@ -21,6 +21,24 @@ func (q *Queries) CountPendingRegistrations(ctx context.Context) (int64, error) 
 	return count, err
 }
 
+const deleteAllClients = `-- name: DeleteAllClients :exec
+DELETE FROM clients
+`
+
+func (q *Queries) DeleteAllClients(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllClients)
+	return err
+}
+
+const deleteAllRegistrations = `-- name: DeleteAllRegistrations :exec
+DELETE FROM registrations
+`
+
+func (q *Queries) DeleteAllRegistrations(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllRegistrations)
+	return err
+}
+
 const getClient = `-- name: GetClient :one
 SELECT id, name, cert_pem, cert_sha256, revoked, created_at
 FROM clients

@@ -60,6 +60,7 @@ type Settings struct {
 	KeyringVersion        int64    `json:"keyring_version"`
 	KeyringPackage        string   `json:"keyring_package,omitempty"`
 	KeyringURL            string   `json:"keyring_url,omitempty"`
+	RecoveryMessage       string   `json:"recovery_message,omitempty"`
 	Bound                 []string `json:"bound,omitempty"`
 }
 
@@ -189,6 +190,7 @@ func settingsFromRow(row sqlcdb.RepoSetting) Settings {
 		RootFingerprintSpaced: FormatFingerprint(row.RootFingerprint),
 		Certified:             row.CertifiedPubkeyArtifactID.Valid,
 		KeyringVersion:        row.KeyringVersion,
+		RecoveryMessage:       row.RecoveryMessage,
 	}
 	settings.KeyringPackage = KeyringPackageFilename(settings.KeyringVersion)
 	settings.KeyringURL = KeyringPackageURL(settings)
@@ -239,7 +241,13 @@ func (s *Service) PatchSettings(ctx context.Context, patch SettingsPatch) (Setti
 	}
 	next := current
 	if patch.Enabled != nil {
+		if *patch.Enabled && current.SigningInitialized == 0 {
+			return Settings{}, fmt.Errorf("%w: initialize repository signing before enabling the repository", ErrInvalid)
+		}
 		next.Enabled = boolInt(*patch.Enabled)
+		if *patch.Enabled {
+			next.RecoveryMessage = ""
+		}
 	}
 	if patch.ListenPort != nil {
 		if *patch.ListenPort < 1 || *patch.ListenPort > 65535 {
@@ -324,14 +332,13 @@ func (s *Service) PatchSettings(ctx context.Context, patch SettingsPatch) (Setti
 		}
 	}
 	if next.StableEnabled == 0 && current.StableEnabled != 0 {
-		if _, err := s.DB.SQL.ExecContext(ctx, `DELETE FROM repo_soaks`); err != nil {
+		if err := s.DB.Queries.DeleteAllSoaks(ctx); err != nil {
 			return Settings{}, err
 		}
-		if _, err := s.DB.SQL.ExecContext(ctx,
-			`DELETE FROM repo_channel_entries WHERE channel = 'stable' AND project_id IS NOT NULL`); err != nil {
+		if err := s.DB.Queries.DeleteStableProjectChannelEntries(ctx); err != nil {
 			return Settings{}, err
 		}
-		if _, err := s.DB.SQL.ExecContext(ctx, `DELETE FROM repo_databases WHERE channel = 'stable'`); err != nil {
+		if err := s.DB.Queries.DeleteStableRepoDatabases(ctx); err != nil {
 			return Settings{}, err
 		}
 	}
@@ -403,6 +410,7 @@ func updateParamsFrom(row sqlcdb.RepoSetting, revision int64) sqlcdb.UpdateRepoS
 		KeyringPackageArtifactID:    row.KeyringPackageArtifactID,
 		KeyringPackageSigArtifactID: row.KeyringPackageSigArtifactID,
 		KeyringVersion:              row.KeyringVersion,
+		RecoveryMessage:             row.RecoveryMessage,
 		ModifiedAt:                  row.ModifiedAt,
 		Revision:                    revision,
 	}
@@ -649,9 +657,7 @@ func (s *Service) patchProject(ctx context.Context, projectID string, patch Proj
 		}
 		rebuild = true
 	} else if !settings.StableEnabled {
-		if _, err := s.DB.SQL.ExecContext(ctx,
-			`DELETE FROM repo_channel_entries WHERE project_id = ? AND channel = 'stable'`,
-			projectID); err != nil {
+		if err := s.DB.Queries.DeleteStableChannelEntriesForProject(ctx, ns(projectID)); err != nil {
 			return ProjectStatus{}, err
 		}
 		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {
@@ -724,9 +730,7 @@ func (s *Service) ReconcileProjectDistribution(ctx context.Context, projectID st
 		return s.republishAllLocked(ctx)
 	}
 	if !settings.StableEnabled {
-		if _, err := s.DB.SQL.ExecContext(ctx,
-			`DELETE FROM repo_channel_entries WHERE project_id = ? AND channel = 'stable'`,
-			projectID); err != nil {
+		if err := s.DB.Queries.DeleteStableChannelEntriesForProject(ctx, ns(projectID)); err != nil {
 			return err
 		}
 		if err := s.DB.Queries.DeleteSoaksForProject(ctx, ns(projectID)); err != nil {

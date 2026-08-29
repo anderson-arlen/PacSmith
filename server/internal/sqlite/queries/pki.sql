@@ -51,3 +51,9 @@ UPDATE clients
 SET revoked = 1
 WHERE id = ?
 RETURNING id, name, cert_pem, cert_sha256, revoked, created_at;
+
+-- name: DeleteAllRegistrations :exec
+DELETE FROM registrations;
+
+-- name: DeleteAllClients :exec
+DELETE FROM clients;

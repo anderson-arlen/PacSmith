@@ -178,6 +178,7 @@ RepoSettings repoSettingsFromObject(const QJsonObject &object) {
     settings.keyringVersion = object.value(QStringLiteral("keyring_version")).toInteger();
     settings.keyringPackage = object.value(QStringLiteral("keyring_package")).toString();
     settings.keyringUrl = object.value(QStringLiteral("keyring_url")).toString();
+    settings.recoveryMessage = object.value(QStringLiteral("recovery_message")).toString();
     settings.bound = jsonStringList(object.value(QStringLiteral("bound")));
     settings.certificationHelp = object.value(QStringLiteral("certification_help")).toString();
     settings.certificationCommands = object.value(QStringLiteral("certification_commands")).toString();

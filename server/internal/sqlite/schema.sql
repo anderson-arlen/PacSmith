@@ -213,6 +213,7 @@ CREATE TABLE repo_settings (
     keyring_package_artifact_id TEXT REFERENCES artifacts (id),
     keyring_package_sig_artifact_id TEXT REFERENCES artifacts (id),
     keyring_version INTEGER NOT NULL DEFAULT 0,
+    recovery_message TEXT NOT NULL DEFAULT '',
     modified_at TEXT NOT NULL
 );
 

@@ -12,19 +12,19 @@ import (
 
 const appendProjectHistory = `-- name: AppendProjectHistory :one
 UPDATE projects
-SET history_json = json_insert(history_json, '$[#]', json(?)),
-    modified_at = ?,
+SET history_json = json_insert(history_json, '$[#]', json(?1)),
+    modified_at = ?2,
     revision = revision + 1
-WHERE id = ?
+WHERE id = ?3
   AND json_valid(history_json)
   AND json_type(history_json) = 'array'
 RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy
 `
 
 type AppendProjectHistoryParams struct {
-	EntryJson  string `json:"entry_json"`
-	ModifiedAt string `json:"modified_at"`
-	ID         string `json:"id"`
+	EntryJson  interface{} `json:"entry_json"`
+	ModifiedAt string      `json:"modified_at"`
+	ID         string      `json:"id"`
 }
 
 func (q *Queries) AppendProjectHistory(ctx context.Context, arg AppendProjectHistoryParams) (Project, error) {

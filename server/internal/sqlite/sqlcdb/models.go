@@ -202,6 +202,7 @@ type RepoSetting struct {
 	KeyringPackageArtifactID    sql.NullString `json:"keyring_package_artifact_id"`
 	KeyringPackageSigArtifactID sql.NullString `json:"keyring_package_sig_artifact_id"`
 	KeyringVersion              int64          `json:"keyring_version"`
+	RecoveryMessage             string         `json:"recovery_message"`
 	ModifiedAt                  string         `json:"modified_at"`
 }
 

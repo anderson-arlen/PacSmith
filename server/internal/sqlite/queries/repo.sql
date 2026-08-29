@@ -24,6 +24,7 @@ SET revision = revision + 1,
     keyring_package_artifact_id = ?,
     keyring_package_sig_artifact_id = ?,
     keyring_version = ?,
+    recovery_message = ?,
     modified_at = ?
 WHERE id = 1 AND revision = ?
 RETURNING *;
@@ -44,6 +45,29 @@ SET revision = revision + 1,
     keyring_package_artifact_id = ?,
     keyring_package_sig_artifact_id = ?,
     keyring_version = ?,
+    recovery_message = ?,
+    modified_at = ?
+WHERE id = 1
+RETURNING *;
+
+-- name: ResetRepoAfterSigningKeyLoss :one
+UPDATE repo_settings
+SET revision = revision + 1,
+    enabled = 0,
+    trust_mode = 'direct',
+    signing_fingerprint = '',
+    signing_initialized = 0,
+    signing_pubkey_artifact_id = NULL,
+    root_pubkey_artifact_id = NULL,
+    root_fingerprint = '',
+    certified_pubkey_artifact_id = NULL,
+    keyring_gpg_artifact_id = NULL,
+    keyring_trusted_artifact_id = NULL,
+    keyring_revoked_artifact_id = NULL,
+    keyring_package_artifact_id = NULL,
+    keyring_package_sig_artifact_id = NULL,
+    keyring_version = 0,
+    recovery_message = ?,
     modified_at = ?
 WHERE id = 1
 RETURNING *;
@@ -103,6 +127,15 @@ ON CONFLICT (channel, arch, pkgname) DO UPDATE SET
 -- name: DeleteChannelEntriesForProject :exec
 DELETE FROM repo_channel_entries WHERE project_id = ?;
 
+-- name: DeleteAllChannelEntries :exec
+DELETE FROM repo_channel_entries;
+
+-- name: DeleteStableChannelEntriesForProject :exec
+DELETE FROM repo_channel_entries WHERE project_id = ? AND channel = 'stable';
+
+-- name: DeleteStableProjectChannelEntries :exec
+DELETE FROM repo_channel_entries WHERE channel = 'stable' AND project_id IS NOT NULL;
+
 -- name: DeleteChannelEntry :exec
 DELETE FROM repo_channel_entries WHERE channel = ? AND arch = ? AND pkgname = ?;
 
@@ -140,6 +173,9 @@ UPDATE repo_soaks SET status = ? WHERE pkgname = ? AND arch = ? AND pkgver = ?;
 -- name: DeleteSoaksForProject :exec
 DELETE FROM repo_soaks WHERE project_id = ?;
 
+-- name: DeleteAllSoaks :exec
+DELETE FROM repo_soaks;
+
 -- name: GetRepoDatabase :one
 SELECT * FROM repo_databases WHERE channel = ? AND arch = ?;
 
@@ -160,6 +196,27 @@ ON CONFLICT (channel, arch) DO UPDATE SET
 
 -- name: DeleteRepoDatabase :exec
 DELETE FROM repo_databases WHERE channel = ? AND arch = ?;
+
+-- name: DeleteAllRepoDatabases :exec
+DELETE FROM repo_databases;
+
+-- name: DeleteStableRepoDatabases :exec
+DELETE FROM repo_databases WHERE channel = 'stable';
+
+-- name: GetProjectRepoPolicy :one
+SELECT automatic_soak, soak_seconds_override
+FROM project_repo_policies
+WHERE project_id = ?;
+
+-- name: UpsertProjectRepoPolicy :exec
+INSERT INTO project_repo_policies (
+    project_id, stable_enabled, automatic_soak, soak_seconds_override
+)
+VALUES (?, 1, ?, ?)
+ON CONFLICT (project_id) DO UPDATE SET
+    stable_enabled = excluded.stable_enabled,
+    automatic_soak = excluded.automatic_soak,
+    soak_seconds_override = excluded.soak_seconds_override;
 
 -- name: UpdateProjectRepo :one
 UPDATE projects

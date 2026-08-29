@@ -361,6 +361,48 @@ func (q *Queries) ListBuildsForRelease(ctx context.Context, releaseID string) ([
 	return items, nil
 }
 
+const listPreparingReleases = `-- name: ListPreparingReleases :many
+SELECT id, project_id, revision, state, source_type, vendor_version, original_filename, source_sha256, source_artifact_id, arch_package_name, arch_pkgrel, body_json, created_at, modified_at FROM releases WHERE state = 'preparing' ORDER BY created_at
+`
+
+func (q *Queries) ListPreparingReleases(ctx context.Context) ([]Release, error) {
+	rows, err := q.db.QueryContext(ctx, listPreparingReleases)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Release
+	for rows.Next() {
+		var i Release
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Revision,
+			&i.State,
+			&i.SourceType,
+			&i.VendorVersion,
+			&i.OriginalFilename,
+			&i.SourceSha256,
+			&i.SourceArtifactID,
+			&i.ArchPackageName,
+			&i.ArchPkgrel,
+			&i.BodyJson,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReleaseArtifacts = `-- name: ListReleaseArtifacts :many
 SELECT artifact_id, role FROM release_artifacts WHERE release_id = ?
 `
@@ -431,48 +473,6 @@ SELECT id, project_id, revision, state, source_type, vendor_version, original_fi
 
 func (q *Queries) ListReleasesForProject(ctx context.Context, projectID string) ([]Release, error) {
 	rows, err := q.db.QueryContext(ctx, listReleasesForProject, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Release
-	for rows.Next() {
-		var i Release
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.Revision,
-			&i.State,
-			&i.SourceType,
-			&i.VendorVersion,
-			&i.OriginalFilename,
-			&i.SourceSha256,
-			&i.SourceArtifactID,
-			&i.ArchPackageName,
-			&i.ArchPkgrel,
-			&i.BodyJson,
-			&i.CreatedAt,
-			&i.ModifiedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPreparingReleases = `-- name: ListPreparingReleases :many
-SELECT id, project_id, revision, state, source_type, vendor_version, original_filename, source_sha256, source_artifact_id, arch_package_name, arch_pkgrel, body_json, created_at, modified_at FROM releases WHERE state = 'preparing' ORDER BY created_at
-`
-
-func (q *Queries) ListPreparingReleases(ctx context.Context) ([]Release, error) {
-	rows, err := q.db.QueryContext(ctx, listPreparingReleases)
 	if err != nil {
 		return nil, err
 	}

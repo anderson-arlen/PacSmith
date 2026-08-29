@@ -32,6 +32,23 @@ func (s *Server) patchRepo(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &patch) {
 		return
 	}
+	before, err := s.Repo.Settings(r.Context())
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	var projectIDs []string
+	if patch.Enabled != nil && *patch.Enabled && !before.Enabled {
+		if s.Jobs == nil {
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "job queue is not configured")
+			return
+		}
+		projectIDs, err = s.Repo.PublishedProjectIDs(r.Context())
+		if err != nil {
+			writeRequestError(w, err)
+			return
+		}
+	}
 	settings, err := s.Repo.PatchSettings(r.Context(), patch)
 	if err != nil {
 		writeRequestError(w, err)
@@ -39,6 +56,13 @@ func (s *Server) patchRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.ApplyRepo != nil {
 		if err := s.ApplyRepo(settings.ListenConfig()); err != nil {
+			writeRequestError(w, err)
+			return
+		}
+	}
+	for _, projectID := range projectIDs {
+		if _, err := s.Jobs.Enqueue(r.Context(), jobs.KindRepositoryDistribution,
+			map[string]string{"project_id": projectID}, projectID, ""); err != nil {
 			writeRequestError(w, err)
 			return
 		}
@@ -248,6 +272,7 @@ func (s *Server) repoJSON(settings repo.Settings) map[string]any {
 		"keyring_version":         settings.KeyringVersion,
 		"keyring_package":         settings.KeyringPackage,
 		"keyring_url":             settings.KeyringURL,
+		"recovery_message":        settings.RecoveryMessage,
 		"bound":                   settings.Bound,
 		"certification_help":      repo.CertificationHelp(settings),
 		"certification_commands":  repo.CertificationCommands(settings),

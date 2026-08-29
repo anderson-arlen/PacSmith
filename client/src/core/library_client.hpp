@@ -111,6 +111,7 @@ struct RepoSettings {
     qint64 keyringVersion{0};
     QString keyringPackage;
     QString keyringUrl;
+    QString recoveryMessage;
     QStringList bound;
     QString certificationHelp;
     QString certificationCommands;
