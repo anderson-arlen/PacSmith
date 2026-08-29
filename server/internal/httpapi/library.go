@@ -92,6 +92,26 @@ func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.projectJSON(r, project))
 }
 
+func (s *Server) recordPackageOperation(w http.ResponseWriter, r *http.Request) {
+	var result struct {
+		ReleaseID string `json:"release_id"`
+		Operation string `json:"operation"`
+		ExitCode  int    `json:"exit_code"`
+		Canceled  bool   `json:"canceled"`
+		Failure   string `json:"failure"`
+	}
+	if !decodeJSON(w, r, &result) {
+		return
+	}
+	project, err := s.Library.RecordPackageOperation(r.Context(), r.PathValue("id"),
+		result.ReleaseID, result.Operation, result.ExitCode, result.Canceled, result.Failure)
+	if err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.projectJSON(r, project))
+}
+
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	if err := s.Library.DeleteProject(r.Context(), r.PathValue("id")); err != nil {
 		writeRequestError(w, err)

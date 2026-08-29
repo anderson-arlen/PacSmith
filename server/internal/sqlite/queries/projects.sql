@@ -30,5 +30,15 @@ SET display_name = ?,
 WHERE id = ? AND revision = ?
 RETURNING *;
 
+-- name: AppendProjectHistory :one
+UPDATE projects
+SET history_json = json_insert(history_json, '$[#]', json(sqlc.arg(entry_json))),
+    modified_at = sqlc.arg(modified_at),
+    revision = revision + 1
+WHERE id = sqlc.arg(id)
+  AND json_valid(history_json)
+  AND json_type(history_json) = 'array'
+RETURNING *;
+
 -- name: DeleteProject :exec
 DELETE FROM projects WHERE id = ?;

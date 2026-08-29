@@ -1,7 +1,10 @@
 #include "gui/future_button_guard.hpp"
 #include "gui/appearance.hpp"
 #include "gui/main_window/project_list_delegate.hpp"
+#include "gui/project_history_view.hpp"
 #include "gui/wheel_scroll_guard.hpp"
+
+#include "core/model.hpp"
 
 #include <QApplication>
 #include <QComboBox>
@@ -108,6 +111,25 @@ private slots:
         promise.addResult(1);
         promise.finish();
         QTRY_VERIFY(finished);
+    }
+
+    void projectHistoryRendersNewestFirst() {
+        Project project;
+        project.history.append({QDateTime::fromString(QStringLiteral("2026-08-28T12:00:00Z"),
+                                                      Qt::ISODate),
+                                QStringLiteral("import"), QStringLiteral("Imported release")});
+        project.history.append({QDateTime::fromString(QStringLiteral("2026-08-28T13:00:00Z"),
+                                                      Qt::ISODate),
+                                QStringLiteral("update-check"),
+                                QStringLiteral("No newer version")});
+        QListWidget list;
+
+        populateProjectHistory(&list, &project);
+
+        QCOMPARE(list.count(), 2);
+        QVERIFY(list.item(0)->text().contains(QStringLiteral("update-check")));
+        QVERIFY(list.item(0)->text().contains(QStringLiteral("No newer version")));
+        QVERIFY(list.item(1)->text().contains(QStringLiteral("import")));
     }
 
     void projectListDelegateRendersStatusBadge() {

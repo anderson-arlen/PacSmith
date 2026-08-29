@@ -112,6 +112,7 @@ QWidget *MainWindow::createOverviewPage() {
     layout->addLayout(buttons);
     layout->addWidget(new QLabel(QStringLiteral("Project history"), page));
     historyList_ = new QListWidget(page);
+    historyList_->setObjectName(QStringLiteral("projectHistoryList"));
     historyList_->setMinimumHeight(120);
     layout->addWidget(historyList_, 1);
     connect(historyCheckUpdatesButton_, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
@@ -1281,15 +1282,5 @@ QWidget *MainWindow::createRepositoryPage() {
             [updateChannelControls](const bool) { updateChannelControls(); });
     return page;
 }
-
-QWidget *MainWindow::createHistoryPage() {
-    auto *page = new QWidget(this);
-    auto *layout = new QVBoxLayout(page);
-    layout->addWidget(pageIntroduction(QStringLiteral("Project creation, imports, builds, and installations."), page));
-    historyList_ = new QListWidget(page);
-    layout->addWidget(historyList_, 1);
-    return page;
-}
-
 
 } // namespace pacsmith::gui

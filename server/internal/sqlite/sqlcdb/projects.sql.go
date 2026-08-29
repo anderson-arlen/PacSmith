@@ -10,6 +10,47 @@ import (
 	"database/sql"
 )
 
+const appendProjectHistory = `-- name: AppendProjectHistory :one
+UPDATE projects
+SET history_json = json_insert(history_json, '$[#]', json(?)),
+    modified_at = ?,
+    revision = revision + 1
+WHERE id = ?
+  AND json_valid(history_json)
+  AND json_type(history_json) = 'array'
+RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy
+`
+
+type AppendProjectHistoryParams struct {
+	EntryJson  string `json:"entry_json"`
+	ModifiedAt string `json:"modified_at"`
+	ID         string `json:"id"`
+}
+
+func (q *Queries) AppendProjectHistory(ctx context.Context, arg AppendProjectHistoryParams) (Project, error) {
+	row := q.db.QueryRowContext(ctx, appendProjectHistory, arg.EntryJson, arg.ModifiedAt, arg.ID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Revision,
+		&i.DisplayName,
+		&i.ArchPackageName,
+		&i.VendorName,
+		&i.SourceIdentity,
+		&i.IconArtifactID,
+		&i.IconSha256,
+		&i.HistoryJson,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+		&i.RepoPublish,
+		&i.RepoPkgnameOverride,
+		&i.RepoPublishedPkgname,
+		&i.AutoBuildPolicy,
+		&i.CompileCachePolicy,
+	)
+	return i, err
+}
+
 const deleteProject = `-- name: DeleteProject :exec
 DELETE FROM projects WHERE id = ?
 `

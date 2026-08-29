@@ -331,8 +331,16 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 			log("Running makepkg…\n")
 			result, err := lib.BuildRelease(ctx, req.ReleaseID, log, req.Automatic == "true")
 			raw, marshalErr := json.Marshal(result)
+			historyErr := lib.RecordBuildOutcome(context.WithoutCancel(ctx), req.ReleaseID,
+				req.Automatic == "true", err)
 			if err != nil {
+				if historyErr != nil {
+					log("Could not record build history: " + historyErr.Error() + "\n")
+				}
 				return raw, err
+			}
+			if historyErr != nil {
+				return raw, fmt.Errorf("record build history: %w", historyErr)
 			}
 			return raw, marshalErr
 		case jobs.KindUpdateCheck:
@@ -354,6 +362,12 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 				})
 			raw, marshalErr := json.Marshal(result)
 			if err != nil {
+				if job.ProjectID != "" {
+					if _, historyErr := lib.AppendProjectHistory(context.WithoutCancel(ctx),
+						job.ProjectID, "update-check", "error: "+err.Error()); historyErr != nil {
+						log("Could not record update-check history: " + historyErr.Error() + "\n")
+					}
+				}
 				return raw, err
 			}
 			progress(jobs.Progress{Message: updateBatchSummary(result),

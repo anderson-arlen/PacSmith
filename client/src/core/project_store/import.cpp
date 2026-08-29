@@ -255,11 +255,6 @@ std::optional<ImportResult> ProjectStore::importDeb(const std::filesystem::path 
                                            : release.generatedPkgbuild, error)) {
         return std::nullopt;
     }
-    release.history.append({release.createdAt, QStringLiteral("created"),
-                            QStringLiteral("Imported %1 (%2)")
-                                .arg(release.originalSourceFilename, release.debian.version)});
-    project.history.append({release.createdAt, QStringLiteral("release-imported"),
-                            QStringLiteral("Imported vendor release %1").arg(release.debian.version)});
     if (discovered != project.releases.end()) {
         const auto index = std::distance(project.releases.begin(), discovered);
         project.releases[static_cast<qsizetype>(index)] = release;
@@ -538,12 +533,6 @@ std::optional<ImportResult> ProjectStore::importSource(
                                            : release.generatedPkgbuild, error)) {
         return std::nullopt;
     }
-    release.history.append({release.createdAt, QStringLiteral("import"),
-                            QStringLiteral("Imported %1 source %2")
-                                .arg(sourcePackageTypeName(release.sourceType),
-                                     release.originalSourceFilename)});
-    project.history.append({release.createdAt, QStringLiteral("release-imported"),
-                            QStringLiteral("Imported release %1").arg(release.debian.version)});
     if (discovered != project.releases.end()) {
         const auto index = std::distance(project.releases.begin(), discovered);
         project.releases[static_cast<qsizetype>(index)] = release;
@@ -635,15 +624,8 @@ std::optional<ImportResult> ProjectStore::reanalyzeRelease(
     reset.update = previous.update;
     reset.buildStatus = BuildStatus::NeverBuilt;
     reset.builds = previous.builds;
-    reset.history = previous.history;
     reset.createdAt = previous.createdAt;
     reset.modifiedAt = QDateTime::currentDateTimeUtc();
-    reset.history.append(
-        {reset.modifiedAt, QStringLiteral("reanalyzed"),
-         QStringLiteral("Reset package setup and reran static artifact analysis")});
-    project.history.append(
-        {reset.modifiedAt, QStringLiteral("release-reanalyzed"),
-         QStringLiteral("Reset and reanalyzed release %1").arg(reset.debian.version)});
 
     const auto directory = releasePath(reset);
     std::error_code filesystemError;

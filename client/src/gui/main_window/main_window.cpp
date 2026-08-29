@@ -459,8 +459,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     connect(&buildService_, &BuildService::failedToStart, this, [this](const QString &message) {
         if (project_ && currentRelease()->buildStatus == BuildStatus::Building) {
             currentRelease()->buildStatus = BuildStatus::Failed;
-            currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("build"),
-                                      QStringLiteral("Build could not start")});
             persistCurrent();
         }
         finishCommandProgress(false, QStringLiteral("Build could not start: %1").arg(message));
@@ -485,10 +483,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
             result.producedPackages, library_.releasePath(*currentRelease()),
             result.startedAt, result.finishedAt));
         if (result.succeeded()) currentRelease()->state = ReleaseState::Built;
-        currentRelease()->history.append({result.finishedAt, QStringLiteral("build"),
-                                  result.canceled ? QStringLiteral("Build canceled by user")
-                                  : result.succeeded() ? QStringLiteral("Build succeeded")
-                                                       : QStringLiteral("Build failed (exit %1)").arg(result.exitCode)});
         persistCurrent();
         populateOverview();
         populateBuild();
@@ -518,31 +512,41 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
             });
     connect(&installService_, &InstallService::failedToStart, this, [this](const QString &message) {
         projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
+        const auto operation = pendingPackageOperation_.isEmpty()
+            ? QStringLiteral("install") : pendingPackageOperation_;
         pendingPackageOperation_.clear();
-        if (project_ && currentRelease() != nullptr) {
-            currentRelease()->history.append(
-                {QDateTime::currentDateTimeUtc(), QStringLiteral("install"),
-                 QStringLiteral("Installation session failed: %1").arg(message)});
-            projectCache_.insert(project_->id, *project_);
-            populateHistory();
+        if (project_ && (operation == QStringLiteral("uninstall") || currentRelease() != nullptr)) {
             const auto config = library_.config();
             const auto projectSnapshot = *project_;
-            auto *watcher = new QFutureWatcher<QString>(this);
-            connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
-                const auto error = watcher->result();
+            const auto projectId = project_->id;
+            const auto releaseId = operation == QStringLiteral("uninstall")
+                ? QString{} : currentReleaseId_;
+            auto *watcher = new QFutureWatcher<PackageOperationFinishResult>(this);
+            connect(watcher, &QFutureWatcher<PackageOperationFinishResult>::finished, this,
+                    [this, watcher, projectId] {
+                auto finalized = watcher->result();
                 watcher->deleteLater();
-                if (!error.isEmpty()) {
+                if (finalized.project && project_ && project_->id == projectId) {
+                    project_ = std::move(*finalized.project);
+                    projectCache_.insert(projectId, *project_);
+                    populateHistory();
+                }
+                if (!finalized.error.isEmpty()) {
                     statusBar()->showMessage(
-                        QStringLiteral("Could not record package-operation failure: %1").arg(error),
+                        QStringLiteral("Could not record package-operation failure: %1")
+                            .arg(finalized.error),
                         10000);
                 }
             });
-            watcher->setFuture(QtConcurrent::run([config, projectSnapshot] mutable {
+            watcher->setFuture(QtConcurrent::run([config, projectSnapshot, releaseId, operation, message] mutable {
                 LibraryClient client(config);
-                QString error;
+                PackageOperationFinishResult finalized;
                 auto project = projectSnapshot;
-                static_cast<void>(client.save(project, &error));
-                return error;
+                if (client.recordPackageOperation(
+                        project, releaseId, operation, -1, false, message, &finalized.error)) {
+                    finalized.project = std::move(project);
+                }
+                return finalized;
             }));
         }
         statusBar()->showMessage(QStringLiteral("Package operation failed"), 10000);
@@ -566,7 +570,8 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
         const auto operation = pendingPackageOperation_.isEmpty()
             ? QStringLiteral("install") : pendingPackageOperation_;
         const auto projectId = project_->id;
-        const auto releaseId = currentReleaseId_;
+        const auto releaseId = operation == QStringLiteral("uninstall")
+            ? QString{} : currentReleaseId_;
         const auto projectSnapshot = *project_;
         const auto config = library_.config();
         const auto succeeded = result.succeeded();
@@ -624,24 +629,15 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
                 LibraryClient client(config);
                 PackageOperationFinishResult finalized;
                 auto project = projectSnapshot;
+                if (!client.recordPackageOperation(project, releaseId, operation,
+                                                   result.exitCode, result.canceled,
+                                                   result.errorOutput,
+                                                   &finalized.error)) {
+                    finalized.project = std::move(project);
+                    return finalized;
+                }
                 if (result.succeeded()) {
                     static_cast<void>(client.reconcileInstalled(project, &finalized.error));
-                }
-                if (auto *release = project.release(releaseId); release != nullptr) {
-                    release->history.append(
-                        {result.finishedAt, operation,
-                         result.succeeded()
-                             ? QStringLiteral("Package operation succeeded")
-                             : QStringLiteral("Package operation failed (exit %1)")
-                                   .arg(result.exitCode)});
-                }
-                project.history.append(
-                    {result.finishedAt, operation,
-                     result.succeeded() ? QStringLiteral("Package operation succeeded")
-                                        : QStringLiteral("Package operation failed")});
-                QString saveError;
-                if (!client.save(project, &saveError) && finalized.error.isEmpty()) {
-                    finalized.error = saveError;
                 }
                 finalized.project = std::move(project);
                 return finalized;
@@ -758,9 +754,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
         tracker->update.trustedSigningFingerprint = key->fingerprints.first();
         tracker->fieldProvenance.insert(QStringLiteral("update.aptSigningKeyring"), key->provenance);
         tracker->fieldProvenance.insert(QStringLiteral("update.trustedSigningFingerprint"), key->provenance);
-        tracker->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("update-key"),
-                                 QStringLiteral("Trusted repository key %1 downloaded from %2")
-                                     .arg(key->fingerprints.first(), requestedUrl.toString())});
         if (persistCurrent()) {
             populateUpdates();
             statusBar()->showMessage(QStringLiteral("Repository signing key trusted and pinned"), 7000);

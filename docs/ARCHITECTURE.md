@@ -29,6 +29,8 @@ The two trees are separate programs with separate toolchains. They share one HTT
 
 The GUI, CLI, and MCP server MUST NOT directly read or write library storage or contact package-update sources on the library's behalf. Persisted library operations always go through `pacsmithd`, including projects, releases, source and update configuration, upstream polling, update-check evidence, dependency mappings, remote downloads, artifact ingestion, package inspection, preparation, builds, editable build files, jobs, server-side credentials, client registration, and client authorization/revocation.
 
+Project history is server-owned audit data. Only `pacsmithd` chooses history events, wording, timestamps, and persistence; project and release configuration patches cannot supply history. For a host-local package operation, the client reports only the operation outcome (target, exit code, cancellation, and process failure), and the server validates that outcome and creates the corresponding project-history entry. Update checks always create a project-history entry containing the check result and any automatic-handling outcome.
+
 There is no in-process local shortcut that invokes a second implementation of library logic. Local and remote management are the same product: the same HTTP API, handlers, authorization/service layer, storage, and artifact-transfer path.
 
 ```text
@@ -230,6 +232,7 @@ These remain C++ client responsibilities and must not move into `pacsmithd`:
 - Determine whether a package is installed locally and which version
 - Reconcile server project/release identity with this machine
 - Privileged local install/remove through fixed argument vectors: terminal-native `sudo` by default, or explicit `pkexec` for graphical clients
+- Report the raw outcome of that local package operation to `pacsmithd` for server-owned project history
 - GUI/CLI presentation of this machine’s install state
 
 `pacsmithd` must never run `pacman -U` on behalf of a client machine. Client-machine installed-package observations are not shared library state.

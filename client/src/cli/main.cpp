@@ -675,9 +675,6 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             iterator->acknowledge();
-            release->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("script-review"),
-                                     QStringLiteral("Acknowledged maintainer script %1 (%2)")
-                                         .arg(iterator->name, iterator->acknowledgedFingerprint)});
             QString saveError;
             if (!library.save(*project, &saveError)) {
                 errorStream << "error: " << saveError << '\n';
@@ -735,8 +732,6 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             release->lifecycleScript.acknowledge();
-            release->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("lifecycle-review"),
-                                     QStringLiteral("Acknowledged Arch lifecycle script %1").arg(fingerprint)});
             QString saveError;
             if (!library.save(*project, &saveError)) {
                 errorStream << "error: " << saveError << '\n';
@@ -861,18 +856,30 @@ int main(int argc, char *argv[]) {
         QObject::connect(&service, &pacsmith::InstallService::outputAvailable, &application,
                          [&out](const QString &text) { out << text << Qt::flush; });
         QObject::connect(&service, &pacsmith::InstallService::failedToStart, &application,
-                         [&errorStream](const QString &message) {
+                         [&library, &project, releaseId = release->id,
+                          &errorStream](const QString &message) {
                              errorStream << "error: " << message << '\n';
+                             QString historyError;
+                             if (!library.recordPackageOperation(*project, releaseId,
+                                                                 QStringLiteral("install"),
+                                                                 -1, false, message,
+                                                                 &historyError)) {
+                                 errorStream << "warning: " << historyError << '\n';
+                             }
                              QCoreApplication::exit(1);
                          });
         QObject::connect(&service, &pacsmith::InstallService::finished, &application,
-                         [&library, &project, release, &errorStream, &exitCode](const pacsmith::ProcessResult &result) {
+                         [&library, &project, releaseId = release->id,
+                          &errorStream, &exitCode](const pacsmith::ProcessResult &result) {
+                             QString historyError;
+                             if (!library.recordPackageOperation(*project, releaseId,
+                                                                 QStringLiteral("install"),
+                                                                 result.exitCode, result.canceled,
+                                                                 result.errorOutput,
+                                                                 &historyError)) {
+                                 errorStream << "warning: " << historyError << '\n';
+                             }
                              if (result.succeeded()) static_cast<void>(library.reconcileInstalled(*project, nullptr));
-                             release->history.append({result.finishedAt, QStringLiteral("install"),
-                                                      result.succeeded() ? QStringLiteral("Installation succeeded")
-                                                                         : QStringLiteral("Installation failed")});
-                             QString saveError;
-                             if (!library.save(*project, &saveError)) errorStream << "warning: " << saveError << '\n';
                              if (result.succeeded()) {
                                  static_cast<void>(
                                      pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates(library.list()));
@@ -932,18 +939,30 @@ int main(int argc, char *argv[]) {
         QObject::connect(&service, &pacsmith::InstallService::outputAvailable, &application,
                          [&out](const QString &text) { out << text << Qt::flush; });
         QObject::connect(&service, &pacsmith::InstallService::failedToStart, &application,
-                         [&errorStream](const QString &message) {
+                         [&library, &project, releaseId = selected->id,
+                          &errorStream](const QString &message) {
                              errorStream << "error: " << message << '\n';
+                             QString historyError;
+                             if (!library.recordPackageOperation(*project, releaseId,
+                                                                 QStringLiteral("rollback"),
+                                                                 -1, false, message,
+                                                                 &historyError)) {
+                                 errorStream << "warning: " << historyError << '\n';
+                             }
                              QCoreApplication::exit(1);
                          });
         QObject::connect(&service, &pacsmith::InstallService::finished, &application,
-                         [&library, &project, &errorStream, &exitCode](const pacsmith::ProcessResult &result) {
+                         [&library, &project, releaseId = selected->id,
+                          &errorStream, &exitCode](const pacsmith::ProcessResult &result) {
+                             QString historyError;
+                             if (!library.recordPackageOperation(*project, releaseId,
+                                                                 QStringLiteral("rollback"),
+                                                                 result.exitCode, result.canceled,
+                                                                 result.errorOutput,
+                                                                 &historyError)) {
+                                 errorStream << "warning: " << historyError << '\n';
+                             }
                              if (result.succeeded()) static_cast<void>(library.reconcileInstalled(*project, nullptr));
-                             project->history.append({result.finishedAt, QStringLiteral("rollback"),
-                                 result.succeeded() ? QStringLiteral("Rollback installed successfully")
-                                                    : QStringLiteral("Rollback failed")});
-                             QString saveError;
-                             if (!library.save(*project, &saveError)) errorStream << "warning: " << saveError << '\n';
                              if (result.succeeded()) {
                                  static_cast<void>(
                                      pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates(library.list()));
@@ -973,18 +992,28 @@ int main(int argc, char *argv[]) {
         QObject::connect(&service, &pacsmith::InstallService::outputAvailable, &application,
                          [&out](const QString &text) { out << text << Qt::flush; });
         QObject::connect(&service, &pacsmith::InstallService::failedToStart, &application,
-                         [&errorStream](const QString &message) {
+                         [&library, &project, &errorStream](const QString &message) {
                              errorStream << "error: " << message << '\n';
+                             QString historyError;
+                             if (!library.recordPackageOperation(*project, {},
+                                                                 QStringLiteral("uninstall"),
+                                                                 -1, false, message,
+                                                                 &historyError)) {
+                                 errorStream << "warning: " << historyError << '\n';
+                             }
                              QCoreApplication::exit(1);
                          });
         QObject::connect(&service, &pacsmith::InstallService::finished, &application,
                          [&library, &project, &errorStream, &exitCode](const pacsmith::ProcessResult &result) {
+                             QString historyError;
+                             if (!library.recordPackageOperation(*project, {},
+                                                                 QStringLiteral("uninstall"),
+                                                                 result.exitCode, result.canceled,
+                                                                 result.errorOutput,
+                                                                 &historyError)) {
+                                 errorStream << "warning: " << historyError << '\n';
+                             }
                              if (result.succeeded()) static_cast<void>(library.reconcileInstalled(*project, nullptr));
-                             project->history.append({result.finishedAt, QStringLiteral("uninstall"),
-                                 result.succeeded() ? QStringLiteral("Package removed")
-                                                    : QStringLiteral("Package removal failed")});
-                             QString saveError;
-                             if (!library.save(*project, &saveError)) errorStream << "warning: " << saveError << '\n';
                              if (result.succeeded()) {
                                  static_cast<void>(
                                      pacsmith::BackgroundUpdateStateStore::syncAvailableUpdates(library.list()));

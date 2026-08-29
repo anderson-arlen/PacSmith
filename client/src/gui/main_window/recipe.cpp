@@ -610,13 +610,7 @@ void MainWindow::populateBuild() {
 }
 
 void MainWindow::populateHistory() {
-    if (!project_) return;
-    historyList_->clear();
-    for (auto iterator = project_->history.crbegin(); iterator != project_->history.crend(); ++iterator) {
-        historyList_->addItem(QStringLiteral("%1  ·  %2  ·  %3")
-                                  .arg(iterator->timestamp.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
-                                       iterator->event, iterator->detail));
-    }
+    populateProjectHistory(historyList_, project_ ? &*project_ : nullptr);
 }
 
 bool MainWindow::persistCurrent() {

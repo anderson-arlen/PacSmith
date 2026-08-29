@@ -4,6 +4,7 @@
 #include "gui/main_window/help_widgets.hpp"
 #include "gui/main_window/project_list_delegate.hpp"
 #include "gui/main_window/support.hpp"
+#include "gui/project_history_view.hpp"
 
 
 #include "core/pkgbuild_generator.hpp"

@@ -120,7 +120,6 @@ private:
     QWidget *createUpdatesPage();
     QWidget *createRepositoryPage();
     QWidget *createBuildPage();
-    QWidget *createHistoryPage();
     QWidget *createStageHost(QListWidget **nav, QStackedWidget **stack,
                              QWidget *navHeader = nullptr);
     void addWorkbenchPage(int stage, QListWidget *nav, QStackedWidget *stack,

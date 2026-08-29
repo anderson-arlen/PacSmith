@@ -577,9 +577,6 @@ void MainWindow::acknowledgeSelectedScript() {
         return;
     }
     script.acknowledge();
-    currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("script-review"),
-                              QStringLiteral("Acknowledged maintainer script %1 (%2)")
-                                  .arg(script.name, script.acknowledgedFingerprint)});
     if (!persistCurrent()) return;
     populateScripts();
     scriptsList_->setCurrentRow(row);
@@ -646,11 +643,6 @@ void MainWindow::saveLifecycleEdit() {
         QMessageBox::critical(this, QStringLiteral("Could not save lifecycle script"), error);
         return;
     }
-    currentRelease()->history.append(
-        {QDateTime::currentDateTimeUtc(), QStringLiteral("lifecycle-script"),
-         QStringLiteral("Saved user-authored Arch lifecycle script %1 (%2)")
-             .arg(lifecycle.fileName,
-                  validation.passed ? QStringLiteral("validated") : QStringLiteral("validation blocked"))});
     const auto lifecycleFileName = lifecycle.fileName;
     lifecycleEditing_ = false;
     lifecycleView_->document()->setModified(false);
@@ -696,9 +688,6 @@ void MainWindow::acknowledgeLifecycleScript() {
         QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
     if (answer != QMessageBox::Yes) return;
     currentRelease()->lifecycleScript.acknowledge();
-    currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("lifecycle-review"),
-                              QStringLiteral("Acknowledged Arch lifecycle script %1")
-                                  .arg(currentRelease()->lifecycleScript.acknowledgedFingerprint)});
     if (!persistCurrent()) return;
     populateScripts();
     populateOverview();
@@ -721,8 +710,6 @@ void MainWindow::discardLifecycleScript() {
         QMessageBox::critical(this, QStringLiteral("Could not discard lifecycle script"), error);
         return;
     }
-    currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("lifecycle-script"),
-                              QStringLiteral("Discarded generated Arch lifecycle script")});
     refreshGeneratedPkgbuildAfterModelChange();
     populateScripts();
     populateOverview();

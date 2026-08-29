@@ -72,6 +72,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/projects", server.listProjects)
 	mux.HandleFunc("GET /api/v1/projects/{id}", server.getProject)
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", server.patchProject)
+	mux.HandleFunc("POST /api/v1/projects/{id}/package-operation-results", server.recordPackageOperation)
 	mux.HandleFunc("DELETE /api/v1/projects/{id}", server.deleteProject)
 	mux.HandleFunc("POST /api/v1/projects/{id}/releases", server.createDiscoveredRelease)
 	mux.HandleFunc("GET /api/v1/releases/{id}", server.getRelease)

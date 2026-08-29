@@ -98,6 +98,17 @@ func (s *Service) BeginPendingImport(ctx context.Context,
 		}
 		return ImportResult{}, err
 	}
+	detail := "Started importing " + request.Filename
+	if request.Version != "" {
+		detail = "Started importing release " + request.Version + " from " + request.Filename
+	}
+	if _, err := s.AppendProjectHistory(ctx, project.ID, "import-started", detail); err != nil {
+		_ = s.DB.Queries.DeleteRelease(ctx, releaseID)
+		if created {
+			_ = s.DB.Queries.DeleteProject(ctx, project.ID)
+		}
+		return ImportResult{}, err
+	}
 	return ImportResult{ProjectID: project.ID, ReleaseID: releaseID, ProjectCreated: created}, nil
 }
 
@@ -129,6 +140,19 @@ func (s *Service) FinishPendingImport(ctx context.Context, releaseID, status, me
 		ArchPkgrel: row.ArchPkgrel, BodyJson: string(raw), ModifiedAt: nowUTC(),
 		ID: row.ID, Revision: row.Revision,
 	})
+	if err != nil {
+		return err
+	}
+	event := "import-failed"
+	detail := "Import of " + row.OriginalFilename + " failed"
+	if status == "canceled" || status == "interrupted" {
+		event = "import-canceled"
+		detail = "Import of " + row.OriginalFilename + " was canceled"
+	}
+	if strings.TrimSpace(message) != "" {
+		detail += ": " + strings.TrimSpace(message)
+	}
+	_, err = s.AppendProjectHistory(ctx, row.ProjectID, event, detail)
 	return err
 }
 

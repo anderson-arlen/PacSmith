@@ -353,6 +353,10 @@ func (s *Service) CreateDiscoveredRelease(ctx context.Context, projectID string,
 	if err != nil {
 		return Release{}, err
 	}
+	if _, err := s.AppendProjectHistory(ctx, projectID, "release-discovered",
+		"Discovered release "+version+" from "+filename); err != nil {
+		return Release{}, err
+	}
 	return releaseDocument(release), nil
 }
 
@@ -454,6 +458,10 @@ func (s *Service) Reanalyze(ctx context.Context, releaseID string) (ImportResult
 	}
 	s.replaceInspectedIcon(ctx, row.ID, analysis)
 	_ = s.associateSigningKeyArtifacts(ctx, row.ID, body)
+	if _, err := s.AppendProjectHistory(ctx, row.ProjectID, "reanalyze",
+		"Reanalyzed release "+analysis.Metadata.Version); err != nil {
+		return ImportResult{}, err
+	}
 	return ImportResult{ProjectID: row.ProjectID, ReleaseID: row.ID}, nil
 }
 
@@ -791,6 +799,9 @@ func (s *Service) ImportArtifact(ctx context.Context, req ImportRequest) (Import
 	}
 	s.replaceInspectedIcon(ctx, release.ID, analysis)
 	_ = s.associateSigningKeyArtifacts(ctx, release.ID, body)
+	if err := s.recordImportedRelease(ctx, project.ID, release.ID); err != nil {
+		return ImportResult{}, err
+	}
 	return ImportResult{
 		ProjectID:      project.ID,
 		ReleaseID:      release.ID,

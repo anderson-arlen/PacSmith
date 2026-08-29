@@ -127,6 +127,77 @@ func TestPatchProjectBuildPolicies(t *testing.T) {
 	}
 }
 
+func TestAppendProjectHistoryIsServerOwnedAndPreservedByProjectPatches(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := nowUTC()
+	row, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "project-history", DisplayName: "History", ArchPackageName: "history-bin",
+		SourceIdentity: "local:history", HistoryJson: "[]", CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{DB: db}
+	first, err := service.AppendProjectHistory(ctx, row.ID, "import", "Imported release 1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.AppendProjectHistory(ctx, row.ID, "update-check", "No update available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.History) != 2 || second.History[0].Event != "import" ||
+		second.History[1].Detail != "No update available" {
+		t.Fatalf("history = %#v", second.History)
+	}
+	if second.Revision != first.Revision+1 {
+		t.Fatalf("revision = %d, want %d", second.Revision, first.Revision+1)
+	}
+	second.DisplayName = "Renamed"
+	patched, err := service.PatchProject(ctx, row.ID, ProjectPatch{
+		Revision: second.Revision, DisplayName: second.DisplayName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(patched.History) != 2 || patched.History[1].Event != "update-check" {
+		t.Fatalf("project patch discarded server history: %#v", patched.History)
+	}
+	operated, err := service.RecordPackageOperation(ctx, row.ID, "", "uninstall", 7, false, "pacman failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operated.History) != 3 || operated.History[2].Event != "uninstall" ||
+		operated.History[2].Detail != "Uninstall of history-bin failed with exit code 7: pacman failed" {
+		t.Fatalf("package-operation history = %#v", operated.History)
+	}
+	release, err := db.Queries.InsertRelease(ctx, sqlcdb.InsertReleaseParams{
+		ID: "release-history", ProjectID: row.ID, State: "built", SourceType: "archive",
+		VendorVersion: "1.0", OriginalFilename: "history-1.0.tar.gz",
+		SourceSha256: strings.Repeat("a", 64), ArchPackageName: row.ArchPackageName,
+		ArchPkgrel: 1, BodyJson: `{}`, CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RecordBuildOutcome(ctx, release.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	withBuild, err := service.GetProject(ctx, row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withBuild.History) != 4 || withBuild.History[3].Event != "build" ||
+		withBuild.History[3].Detail != "Build of release 1.0 succeeded" {
+		t.Fatalf("build history = %#v", withBuild.History)
+	}
+}
+
 func TestBuildResultKeepsJobPayloadCompact(t *testing.T) {
 	raw, err := json.Marshal(BuildResult{Status: "succeeded", Log: strings.Repeat("build output", 100)})
 	if err != nil {
@@ -458,6 +529,10 @@ func TestPatchReleaseConfigurationPreservesLargeInspectionEvidence(t *testing.T)
 		map[string]any{"payload": []any{}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("inspection evidence mutation error = %v, want ErrInvalid", err)
 	}
+	if _, err := svc.PatchReleaseConfiguration(ctx, release.ID, updated.Revision,
+		map[string]any{"history": []any{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("client history mutation error = %v, want ErrInvalid", err)
+	}
 }
 
 func TestCreateDiscoveredReleasePersistsRemoteCandidate(t *testing.T) {
@@ -506,6 +581,14 @@ func TestCreateDiscoveredReleasePersistsRemoteCandidate(t *testing.T) {
 	}
 	if again.ID != created.ID {
 		t.Fatalf("duplicate candidate ID %q, want %q", again.ID, created.ID)
+	}
+	withHistory, err := svc.GetProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withHistory.History) != 1 || withHistory.History[0].Event != "release-discovered" ||
+		!strings.Contains(withHistory.History[0].Detail, "150-105") {
+		t.Fatalf("discovery history = %#v", withHistory.History)
 	}
 }
 

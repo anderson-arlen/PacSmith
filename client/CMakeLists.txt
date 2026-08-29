@@ -114,6 +114,7 @@ add_executable(pacsmith-gui
     src/gui/main_window/settings.cpp
     src/gui/main_window/actions.cpp
     src/gui/pkgbuild_highlighter.cpp
+    src/gui/project_history_view.cpp
     src/gui/shell_highlighter.cpp)
 target_link_libraries(pacsmith-gui PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent)
 qt_add_resources(pacsmith-gui gui_resources
@@ -164,9 +165,10 @@ if(BUILD_TESTING)
     add_executable(pacsmith-gui-tests
         tests/gui_tests/wheel_scroll_guard_test.cpp
         src/gui/appearance.cpp
+        src/gui/project_history_view.cpp
         src/gui/wheel_scroll_guard.cpp)
     target_include_directories(pacsmith-gui-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(pacsmith-gui-tests PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Test)
+    target_link_libraries(pacsmith-gui-tests PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent Qt6::Test)
     pacsmith_target_defaults(pacsmith-gui-tests)
     add_test(NAME pacsmith-gui-tests COMMAND pacsmith-gui-tests)
     set_tests_properties(pacsmith-gui-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

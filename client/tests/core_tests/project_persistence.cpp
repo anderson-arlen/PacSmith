@@ -795,7 +795,7 @@ void CoreTests::recordsUninspectedGitHubDiscoveries() {
     QCOMPARE(discovered->update.strategy, pacsmith::UpdateStrategy::GitHubRelease);
     QCOMPARE(discovered->update.githubOwner, QStringLiteral("vendor"));
     QCOMPARE(discovered->update.githubRepository, QStringLiteral("discovery"));
-    QVERIFY(discovered->history.last().detail.contains(QStringLiteral("without a publisher digest")));
+    QVERIFY(discovered->history.isEmpty());
 
     // A successor owns an independent update snapshot. Editing it later must not
     // rewrite the release from which it was discovered.

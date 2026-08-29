@@ -304,8 +304,10 @@ void MainWindow::startUpdateCheckRequest(const QString &projectId, const QString
             QStringLiteral("Update check completed"));
         if (project_ && project_->id == projectId) setUpdateCheckStatus(message);
         statusBar()->showMessage(message, 10000);
-        refreshProjectList(projectId);
-        syncTrayUpdateCensus();
+        refreshProjectList(projectId, [this, projectId](const bool refreshed) {
+            if (refreshed && project_ && project_->id == projectId) refreshCurrentProject();
+            syncTrayUpdateCensus();
+        });
     });
     watcher->setFuture(QtConcurrent::run([config, releaseId] {
         UpdateCheckJobTask task;

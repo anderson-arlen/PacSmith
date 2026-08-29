@@ -129,6 +129,22 @@ func TestDirectImportAndUpdateCheckStayServerSide(t *testing.T) {
 	if source.Strategy != StrategyDirect || state.Etag != "\"stable\"" || state.LastCheckedAt == "" {
 		t.Fatalf("source = %+v, state = %+v", source, state)
 	}
+	project, err := libraryService.GetProject(ctx, imported.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(project.History) != 3 {
+		t.Fatalf("project history = %#v", project.History)
+	}
+	if project.History[0].Event != "import-started" ||
+		project.History[1].Event != "release-imported" ||
+		project.History[2].Event != "update-check" {
+		t.Fatalf("project history events = %#v", project.History)
+	}
+	if !strings.Contains(project.History[2].Detail, "no-update") ||
+		!strings.Contains(project.History[2].Detail, result.Checks[0].Message) {
+		t.Fatalf("update-check history did not record outcome: %#v", project.History[2])
+	}
 }
 
 func archiveFixture(t *testing.T) []byte {

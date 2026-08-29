@@ -4,12 +4,21 @@
 
 # PacSmith
 
-> [!WARNING]
-> PacSmith is still experimental. Expect rough edges until the first release.
+### Install and manage `.deb`, `.rpm`, and other upstream Linux packages as native Arch Linux packages, without the AUR.
 
-PacSmith lets you install software on Arch Linux directly from the developer.
+- **Automated updates** from upstream releases
+- **Painless distribution** through the included signed pacman repository
+- **Manage from anywhere**, locally or over the network from multiple machines
+- **AI-native management**, either completely through an AI agent or completely manually
+- **Build once, install everywhere**, compiling source packages once and distributing them as binaries
+- **Safer source builds** in isolated, rootless containers
+- **Use it your way** through the GUI, CLI, or MCP + Skill
 
-It takes the packages the developer actually publishes — Debian `.deb` files, RPMs, AppImages, archives, and related artifacts — and converts them into ordinary pacman packages that you can install, update, and remove like anything else on the system. A PacSmith library can also publish those builds through its own signed pacman repository for other Arch machines.
+<p align="center">
+  <img src="docs/images/pacsmith-versions.png" alt="PacSmith managing Brave Browser releases, builds, update checks, and project history">
+</p>
+
+PacSmith takes the packages developers actually publish, including Debian `.deb` files, RPMs, AppImages, archives, and related artifacts, and converts them into ordinary pacman packages that you can install, update, and remove like anything else on the system. A PacSmith library can also publish those builds through its own signed pacman repository for other Arch machines.
 
 It is not an AUR helper. It does not download community PKGBUILDs. You import the developer's own packages, review the generated recipe, and become the package maintainer. The point is a shorter trust chain: developer → you, with no extra packager in the middle.
 

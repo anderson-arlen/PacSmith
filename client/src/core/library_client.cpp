@@ -121,7 +121,6 @@ QJsonObject releaseConfiguration(const PackageRelease &release) {
         QStringLiteral("aiChanges"), QStringLiteral("update"),
         QStringLiteral("buildStatus"), QStringLiteral("state"),
         QStringLiteral("lastBuildLog"), QStringLiteral("producedPackages"),
-        QStringLiteral("history"),
     };
     for (const auto &field : editableFields) configuration.insert(field, document.value(field));
     return configuration;
@@ -267,6 +266,26 @@ bool LibraryClient::save(Project &project, QString *error) const {
     auto reloaded = load(project.id, error);
     if (!reloaded) return false;
     project = *reloaded;
+    return true;
+}
+
+bool LibraryClient::recordPackageOperation(Project &project, const QString &releaseId,
+                                           const QString &operation, const int exitCode,
+                                           const bool canceled, const QString &failure,
+                                           QString *error) const {
+    if (!completeProjectRequired(project, error)) return false;
+    const auto updated = sendJson(
+        QStringLiteral("POST"),
+        QStringLiteral("/api/v1/projects/") + project.id +
+            QStringLiteral("/package-operation-results"),
+        {{QStringLiteral("release_id"), releaseId},
+         {QStringLiteral("operation"), operation},
+         {QStringLiteral("exit_code"), exitCode},
+         {QStringLiteral("canceled"), canceled},
+         {QStringLiteral("failure"), failure}},
+        error, 200);
+    if (!updated) return false;
+    project = projectFromObject(*this, *updated, true);
     return true;
 }
 

@@ -487,9 +487,6 @@ std::optional<Project> ProjectStore::migrateLegacyProject(const QString &id,
         project.iconSha256 = release.iconSha256;
     }
     project.releases.append(release);
-    project.history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("migration"),
-                            QStringLiteral("Migrated the original package into release %1")
-                                .arg(release.debian.version)});
     static_cast<void>(reconcileInstalled(project, nullptr));
     if (!save(project, error)) return std::nullopt;
     return project;
@@ -674,16 +671,6 @@ PackageRelease *ProjectStore::recordDiscoveredRelease(
     release.state = ReleaseState::Discovered;
     release.createdAt = QDateTime::currentDateTimeUtc();
     release.modifiedAt = release.createdAt;
-    const auto discoveryMessage = (trackerCopy.update.strategy == UpdateStrategy::AptRepository ||
-                                   trackerCopy.update.strategy == UpdateStrategy::RpmRepository)
-        ? QStringLiteral("Discovered signature-verified vendor release %1").arg(version)
-        : !publisherDigest.isEmpty()
-            ? QStringLiteral("Discovered GitHub release %1 with publisher digest").arg(version)
-            : QStringLiteral("Discovered GitHub release %1 without a publisher digest; downloaded bytes still require a local SHA256")
-                  .arg(version);
-    release.history.append({release.createdAt, QStringLiteral("discovered"), discoveryMessage});
-    project.history.append({release.createdAt, QStringLiteral("release-discovered"),
-                            discoveryMessage});
     project.releases.append(release);
     if (!save(project, error)) {
         project.releases.removeLast();
@@ -773,9 +760,6 @@ bool ProjectStore::synchronizeLifecycle(Project &project, PackageRelease &releas
         if (!writeImportedLifecycle(releasePath(release), release, error)) return false;
         missing = false;
         contents = release.lifecycleScript.contents;
-        release.history.append(
-            {QDateTime::currentDateTimeUtc(), QStringLiteral("lifecycle-restored"),
-             QStringLiteral("Restored the project-local lifecycle file from its exact recorded content")});
         wasChanged = true;
     }
     if (!missing && contents != release.lifecycleScript.contents) {

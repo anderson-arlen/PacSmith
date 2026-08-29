@@ -1141,6 +1141,7 @@ void MainWindow::refreshCurrentProject() {
             .arg(project_->displayName.toHtmlEscaped(), currentRelease()->debian.version.toHtmlEscaped()));
     configureEditorProfile();
     updateDeleteButton();
+    populateHistory();
     if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
         populateCurrentWorkbenchPage();
         return;

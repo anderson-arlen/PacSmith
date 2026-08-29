@@ -256,6 +256,10 @@ public:
     [[nodiscard]] bool setCredential(const QString &name, const QString &value,
                                      QString *error = nullptr) const;
     [[nodiscard]] bool deleteCredential(const QString &name, QString *error = nullptr) const;
+    [[nodiscard]] bool recordPackageOperation(Project &project, const QString &releaseId,
+                                              const QString &operation, int exitCode,
+                                              bool canceled, const QString &failure,
+                                              QString *error = nullptr) const;
     [[nodiscard]] bool reconcileInstalled(Project &project, QString *error = nullptr) const;
     [[nodiscard]] bool reachable(QString *error = nullptr) const;
     [[nodiscard]] QList<QPair<QString, QString>> statusRows() const;

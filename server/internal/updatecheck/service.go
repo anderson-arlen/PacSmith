@@ -70,6 +70,7 @@ func (s *Service) Run(ctx context.Context, releaseID string, force bool, log fun
 		targetLog(fmt.Sprintf("Checking %s for updates…\n", project.DisplayName))
 		result := s.check(ctx, target, force, targetLog)
 		result = s.reconcilePreparedBuild(ctx, project.ID, result, targetLog)
+		result = s.recordProjectUpdateCheck(ctx, target, result)
 		reportResult(report, target, result, 1, 1)
 		batch := BatchResult{Checks: []Result{result}}
 		if result.Status == "error" {
@@ -91,7 +92,11 @@ func (s *Service) Run(ctx context.Context, releaseID string, force bool, log fun
 			result := Result{ProjectID: project.ID, ProjectName: project.DisplayName,
 				PackageName: project.ArchPackageName, Status: "paused",
 				Message: "project has no analyzed release to track"}
+			result = s.recordProjectUpdateCheck(ctx, checkTarget{Project: project}, result)
 			batch.Checks = append(batch.Checks, result)
+			if result.Status == "error" {
+				batch.Failed++
+			}
 			report(Progress{Message: result.Message, ProjectID: project.ID,
 				ProjectName: project.DisplayName, PackageName: project.ArchPackageName,
 				Current: int64(index + 1), Total: int64(len(projects))})
@@ -102,6 +107,7 @@ func (s *Service) Run(ctx context.Context, releaseID string, force bool, log fun
 		targetLog(fmt.Sprintf("Checking %s for updates…\n", project.DisplayName))
 		result := s.check(ctx, target, force, targetLog)
 		result = s.reconcilePreparedBuild(ctx, project.ID, result, targetLog)
+		result = s.recordProjectUpdateCheck(ctx, target, result)
 		reportResult(report, target, result, index+1, len(projects))
 		batch.Checks = append(batch.Checks, result)
 		if result.Status == "error" {
@@ -109,6 +115,34 @@ func (s *Service) Run(ctx context.Context, releaseID string, force bool, log fun
 		}
 	}
 	return batch, nil
+}
+
+func (s *Service) recordProjectUpdateCheck(ctx context.Context, target checkTarget, result Result) Result {
+	status := strings.TrimSpace(result.Status)
+	if status == "" {
+		status = "unknown"
+	}
+	detail := status
+	if message := strings.TrimSpace(result.Message); message != "" {
+		detail += ": " + message
+	}
+	if target.Version != "" {
+		detail = "Release " + target.Version + " — " + detail
+	}
+	if result.AutomaticStatus != "" {
+		detail += "; automatic handling: " + result.AutomaticStatus
+		if result.AutomaticMessage != "" {
+			detail += " (" + result.AutomaticMessage + ")"
+		}
+	}
+	if _, err := s.Library.AppendProjectHistory(ctx, target.Project.ID, "update-check", detail); err != nil {
+		result.Status = "error"
+		if result.Message != "" {
+			result.Message += "; "
+		}
+		result.Message += "record project update-check history: " + err.Error()
+	}
+	return result
 }
 
 func (s *Service) reconcilePreparedBuild(ctx context.Context, projectID string, result Result,
@@ -463,10 +497,8 @@ func (s *Service) persistObservation(ctx context.Context, target checkTarget, re
 			update["githubTag"] = result.ProviderTag
 			update["githubPublisherDigest"] = result.PublisherDigest
 		}
-		history, _ := release.Document["history"].([]any)
-		history = append(history, map[string]any{"timestamp": now, "event": "update-check", "detail": result.Message})
 		_, err = s.Library.PatchReleaseConfiguration(ctx, release.ID, release.Revision,
-			map[string]any{"update": update, "history": history})
+			map[string]any{"update": update})
 		if errors.Is(err, library.ErrConflict) {
 			continue
 		}
@@ -646,8 +678,15 @@ func (s *Service) buildIfReviewFree(ctx context.Context, target checkTarget, rel
 	}
 	log("Running automatic review-free build…\n")
 	_, err = s.Library.BuildRelease(ctx, releaseID, log, true)
+	historyErr := s.Library.RecordBuildOutcome(context.WithoutCancel(ctx), releaseID, true, err)
 	if err != nil {
+		if historyErr != nil {
+			log("Could not record automatic build history: " + historyErr.Error() + "\n")
+		}
 		return false, err
+	}
+	if historyErr != nil {
+		return false, fmt.Errorf("record automatic build history: %w", historyErr)
 	}
 	return true, nil
 }

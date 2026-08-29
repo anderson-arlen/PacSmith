@@ -311,9 +311,6 @@ void MainWindow::setSelectedPayloadDecision(const bool exclude) {
     const auto review = PayloadReview::state(*currentRelease(), *entry);
     const auto decisionPath = review.decisionPath.isEmpty() ? path : review.decisionPath;
     PayloadReview::decide(*currentRelease(), decisionPath, exclude);
-    currentRelease()->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("payload-review"),
-                              QStringLiteral("%1 /%2 after content-specific review")
-                                  .arg(exclude ? QStringLiteral("Excluded") : QStringLiteral("Kept"), decisionPath)});
     refreshGeneratedPkgbuildAfterModelChange();
     populatePayload();
     populateOverview();

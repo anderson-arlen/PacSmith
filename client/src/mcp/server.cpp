@@ -1771,9 +1771,6 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         release->update.trustedSigningFingerprint = key->fingerprints.first();
         release->fieldProvenance.insert(QStringLiteral("update.aptSigningKeyring"), key->provenance);
         release->fieldProvenance.insert(QStringLiteral("update.trustedSigningFingerprint"), key->provenance);
-        release->history.append({QDateTime::currentDateTimeUtc(), QStringLiteral("update-key"),
-                                 QStringLiteral("Trusted repository key %1 downloaded from %2")
-                                     .arg(key->fingerprints.first(), downloaded->requestedUrl.toString())});
         if (!saveReleaseProject(library_, project, &error)) return fail(error);
         return toolResult(id, QJsonObject{
             {QStringLiteral("project_name"), projectLabel(project)},
