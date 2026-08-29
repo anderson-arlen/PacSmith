@@ -136,6 +136,9 @@ func archiveCommandCandidateScore(entry PayloadEntry, command, prefix string) in
 	if !strings.EqualFold(lastPathComponent(entry.Path), command) {
 		return -1
 	}
+	if pathHasPrefix(entry.Path, "etc") {
+		return -1
+	}
 	if looksLikeLibrary(entry.Path) {
 		return -1
 	}

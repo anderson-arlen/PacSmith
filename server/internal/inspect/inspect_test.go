@@ -771,6 +771,29 @@ func TestInferArchiveLaunchers(t *testing.T) {
 	}
 }
 
+func TestInferArchiveLaunchersIgnoresEtcMaintenanceScript(t *testing.T) {
+	mapping := InstallMapping{
+		DesktopEntries: []DesktopEntry{{
+			Enabled:  true,
+			Contents: "[Desktop Entry]\nType=Application\nName=Slack\nExec=/usr/bin/slack %U\n",
+		}},
+	}
+	payload := []PayloadEntry{
+		{Path: "etc/cron.daily/slack", Type: "file", Size: 18732, Executable: true},
+		{Path: "usr/lib/slack/slack", Type: "file", Size: 221063912, Executable: true},
+	}
+
+	if !InferArchiveLaunchers(&mapping, payload, "slack") {
+		t.Fatal("expected launcher inference to change mapping")
+	}
+	if len(mapping.Launchers) != 1 || mapping.Launchers[0].SourcePath != "usr/lib/slack/slack" {
+		t.Fatalf("launchers %+v", mapping.Launchers)
+	}
+	if mapping.BinarySourcePath != "usr/lib/slack/slack" || mapping.BinaryDestination != "/usr/bin/slack" {
+		t.Fatalf("binary mapping source=%q destination=%q", mapping.BinarySourcePath, mapping.BinaryDestination)
+	}
+}
+
 func TestDebDeclaredOptCommandWithoutExecutingScript(t *testing.T) {
 	bsdtar := mustLookPath(t, "bsdtar")
 	ar := mustLookPath(t, "ar")
