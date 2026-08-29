@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "pacsmith",
-  "version": "0.1.0",
+  "version": "@PACSMITH_VERSION@",
   "description": "Inspect and maintain PacSmith packaging projects through the normal PacSmith MCP client connection.",
   "author": {
     "name": "PacSmith contributors"

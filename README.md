@@ -217,6 +217,8 @@ The AUR is never executable authority in this workflow. PKGBUILDs, comments, ins
 
 ## Build on Arch Linux
 
+Maintainers can publish stable and prerelease packages entirely from the GitHub release UI. The tag supplies every embedded and package version. See the [release checklist and accepted tag formats](docs/RELEASING.md).
+
 Install dependencies from the official repositories:
 
 ```bash

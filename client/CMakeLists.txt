@@ -76,6 +76,15 @@ qt_add_resources(pacsmith_core core_resources
     FILES resources/dependency-mappings.json)
 pacsmith_target_defaults(pacsmith_core)
 
+set(PACSMITH_BUILT_PLUGIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/agent-plugin")
+file(MAKE_DIRECTORY "${PACSMITH_BUILT_PLUGIN_DIR}/skills/pacsmith")
+configure_file(${CMAKE_SOURCE_DIR}/agent-plugin/plugin.json.in
+               ${PACSMITH_BUILT_PLUGIN_DIR}/plugin.json @ONLY)
+configure_file(${CMAKE_SOURCE_DIR}/agent-plugin/mcp.json
+               ${PACSMITH_BUILT_PLUGIN_DIR}/mcp.json COPYONLY)
+configure_file(${CMAKE_SOURCE_DIR}/agent-plugin/skills/pacsmith/SKILL.md
+               ${PACSMITH_BUILT_PLUGIN_DIR}/skills/pacsmith/SKILL.md COPYONLY)
+
 add_executable(pacsmith
     src/cli/main.cpp
     src/cli/agent_integration.cpp
@@ -85,7 +94,7 @@ target_link_libraries(pacsmith PRIVATE pacsmith_core Qt6::Core)
 target_compile_definitions(pacsmith PRIVATE
     PACSMITH_BUILD_DIR="${CMAKE_BINARY_DIR}"
     PACSMITH_PLUGIN_DIR="${CMAKE_INSTALL_FULL_DATADIR}/pacsmith/agent-plugin"
-    PACSMITH_SOURCE_PLUGIN_DIR="${CMAKE_SOURCE_DIR}/agent-plugin")
+    PACSMITH_SOURCE_PLUGIN_DIR="${PACSMITH_BUILT_PLUGIN_DIR}")
 pacsmith_target_defaults(pacsmith)
 
 add_executable(pacsmith-gui
@@ -138,7 +147,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/pacsmith.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(DIRECTORY resources/icons/hicolor
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/agent-plugin/
+install(DIRECTORY ${PACSMITH_BUILT_PLUGIN_DIR}/
         DESTINATION ${CMAKE_INSTALL_DATADIR}/pacsmith/agent-plugin)
 
 if(BUILD_TESTING)
@@ -159,7 +168,7 @@ if(BUILD_TESTING)
     target_include_directories(pacsmith-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/core_tests)
     target_link_libraries(pacsmith-tests PRIVATE pacsmith_core Qt6::Test)
     target_compile_definitions(pacsmith-tests PRIVATE
-        PACSMITH_SOURCE_PLUGIN_DIR="${CMAKE_SOURCE_DIR}/agent-plugin")
+        PACSMITH_SOURCE_PLUGIN_DIR="${PACSMITH_BUILT_PLUGIN_DIR}")
     pacsmith_target_defaults(pacsmith-tests)
     add_test(NAME pacsmith-core-tests COMMAND pacsmith-tests)
     add_executable(pacsmith-gui-tests

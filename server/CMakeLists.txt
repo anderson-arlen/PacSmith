@@ -18,7 +18,7 @@ add_custom_command(
     OUTPUT "${PACSMITHD_OUTPUT}"
     COMMAND "${GO_EXECUTABLE}" build
         -trimpath
-        -ldflags "-X github.com/anderson-arlen/pacsmith/server/internal/version.Version=${PROJECT_VERSION}"
+        -ldflags "-X github.com/anderson-arlen/pacsmith/server/internal/version.Version=${PACSMITH_VERSION}"
         -o "${PACSMITHD_OUTPUT}"
         ./cmd/pacsmithd
     WORKING_DIRECTORY "${PACSMITHD_MODULE_DIR}"

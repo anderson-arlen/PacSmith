@@ -1,7 +1,7 @@
 # This PKGBUILD packages PacSmith's already-built release staging tree.
 # PACSMITH_RELEASE_VERSION is supplied by the release workflow.
 pkgname=pacsmith
-pkgver="${PACSMITH_RELEASE_VERSION:-0.0.0}"
+pkgver="${PACSMITH_RELEASE_VERSION:?PACSMITH_RELEASE_VERSION must be supplied by the release workflow}"
 pkgrel=1
 pkgdesc='Native Arch package workbench for official vendor artifacts'
 arch=('x86_64')

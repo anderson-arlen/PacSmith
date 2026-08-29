@@ -1,9 +1,8 @@
 name: Arch x86_64 release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -20,6 +19,30 @@ jobs:
           polkit gnupg openssl github-cli git
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t versions < <(bash scripts/release-version.sh "$RELEASE_TAG")
+          display_version=${versions[0]}
+          arch_version=${versions[1]}
+          if [[ $display_version == *-* && $RELEASE_IS_PRERELEASE != true ]]; then
+            echo "Tag $RELEASE_TAG is a prerelease, but the GitHub release is not marked as a prerelease" >&2
+            exit 1
+          fi
+          if [[ $display_version != *-* && $RELEASE_IS_PRERELEASE == true ]]; then
+            echo "Tag $RELEASE_TAG is stable, but the GitHub release is marked as a prerelease" >&2
+            exit 1
+          fi
+          echo "display=$display_version" >> "$GITHUB_OUTPUT"
+          echo "arch=$arch_version" >> "$GITHUB_OUTPUT"
 
       - name: Create unprivileged build user
         run: |
@@ -27,47 +50,47 @@ jobs:
           chown -R builder:builder "$GITHUB_WORKSPACE"
 
       - name: Build and test
+        env:
+          PACSMITH_BUILD_VERSION: ${{ steps.version.outputs.display }}
         shell: bash
         run: |
           set -euo pipefail
-          release_version="${GITHUB_REF_NAME#v}"
-          declared_version="$(sed -nE 's/^project\(PacSmith VERSION ([^ ]+).*/\1/p' CMakeLists.txt)"
-          if [[ "$release_version" != "$declared_version" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match CMake version $declared_version" >&2
-            exit 1
-          fi
           runuser -u builder -- cmake -S . -B build-release -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=ON
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=ON \
+            "-DPACSMITH_VERSION=$PACSMITH_BUILD_VERSION"
           runuser -u builder -- cmake --build build-release --parallel
           runuser -u builder -- ctest --test-dir build-release --output-on-failure
+          runuser -u builder -- build-release/pacsmith --version | grep -F "$PACSMITH_BUILD_VERSION" >/dev/null
+          runuser -u builder -- env QT_QPA_PLATFORM=offscreen build-release/pacsmith-gui --version | grep -F "$PACSMITH_BUILD_VERSION" >/dev/null
+          runuser -u builder -- build-release/pacsmithd --version | grep -F "$PACSMITH_BUILD_VERSION" >/dev/null
 
       - name: Stage and build Arch package
+        env:
+          PACSMITH_ARCH_VERSION: ${{ steps.version.outputs.arch }}
         shell: bash
         run: |
           set -euo pipefail
-          release_version="${GITHUB_REF_NAME#v}"
           install -d -o builder -g builder release-package/stage
           install -o builder -g builder -m 0644 packaging/release/PKGBUILD release-package/PKGBUILD
           install -o builder -g builder -m 0644 packaging/release/pacsmith.install release-package/pacsmith.install
           runuser -u builder -- env DESTDIR="$GITHUB_WORKSPACE/release-package/stage" \
             cmake --install build-release --prefix /usr
-          runuser -u builder -- env PACSMITH_RELEASE_VERSION="$release_version" \
+          runuser -u builder -- env PACSMITH_RELEASE_VERSION="$PACSMITH_ARCH_VERSION" \
             bash -lc 'cd "$1" && makepkg --clean --force --noconfirm' _ \
             "$GITHUB_WORKSPACE/release-package"
           bsdtar -xOf release-package/pacsmith-*.pkg.tar.zst .INSTALL | \
             grep -F 'try-restart pacsmithd.service' >/dev/null
-          sha256sum release-package/pacsmith-*.pkg.tar.zst > release-package/SHA256SUMS
+          bsdtar -xOf release-package/pacsmith-*.pkg.tar.zst .PKGINFO | \
+            grep -Fx "pkgver = $PACSMITH_ARCH_VERSION-1" >/dev/null
+          (cd release-package && sha256sum pacsmith-*.pkg.tar.zst > SHA256SUMS)
 
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --generate-notes --title "PacSmith $GITHUB_REF_NAME"
-          fi
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             release-package/pacsmith-*.pkg.tar.zst \
             release-package/SHA256SUMS --clobber

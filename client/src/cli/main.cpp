@@ -37,6 +37,7 @@ namespace {
 void printUsage(QTextStream &stream) {
     stream << "PacSmith - vendor artifact to local Arch package workbench\n\n"
               "Usage:\n"
+              "  pacsmith --version\n"
               "  pacsmith add <artifact>\n"
               "  pacsmith add <github-url> [--asset-regex <regex>] [--prerelease]\n"
               "  pacsmith add apt <repo-url> <suite> <component|-> <architecture> <package> <key-url> [--trust-fingerprint <fingerprint>]\n"
@@ -360,6 +361,10 @@ int main(int argc, char *argv[]) {
     errorStream.setEncoding(QStringConverter::Utf8);
 
     const auto arguments = application.arguments();
+    if (arguments.size() == 2 && arguments.at(1) == QStringLiteral("--version")) {
+        out << "pacsmith " << QCoreApplication::applicationVersion() << '\n';
+        return 0;
+    }
     if (arguments.size() < 2 || arguments.at(1) == QStringLiteral("help") ||
         arguments.at(1) == QStringLiteral("--help") || arguments.at(1) == QStringLiteral("-h")) {
         printUsage(arguments.size() < 2 ? errorStream : out);
