@@ -70,7 +70,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          install -d -o builder -g builder release-package/stage
+          install -d -o builder -g builder release-package release-package/stage
           install -o builder -g builder -m 0644 packaging/release/PKGBUILD release-package/PKGBUILD
           install -o builder -g builder -m 0644 packaging/release/pacsmith.install release-package/pacsmith.install
           runuser -u builder -- env DESTDIR="$GITHUB_WORKSPACE/release-package/stage" \
