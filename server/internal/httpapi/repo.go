@@ -237,18 +237,6 @@ func (s *Server) promoteProjectRepo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (s *Server) runCleanup(w http.ResponseWriter, r *http.Request) {
-	if s.Library == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "library is not configured")
-		return
-	}
-	if err := s.Library.Cleanup(r.Context()); err != nil {
-		writeRequestError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-}
-
 func (s *Server) repoJSON(settings repo.Settings) map[string]any {
 	if s.RepoBound != nil {
 		settings.Bound = s.RepoBound()

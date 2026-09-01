@@ -1437,6 +1437,10 @@ func (s *Service) Cleanup(ctx context.Context) error {
 }
 
 func (s *Service) cleanupWith(ctx context.Context, protected map[string]struct{}) error {
+	if err := s.trimProjectHistories(ctx); err != nil {
+		return err
+	}
+
 	settings, err := s.DB.Queries.GetLibrarySettings(ctx)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err

@@ -123,7 +123,6 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{id}/repo", server.getProjectRepo)
 	mux.HandleFunc("PATCH /api/v1/projects/{id}/repo", server.patchProjectRepo)
 	mux.HandleFunc("POST /api/v1/projects/{id}/repo/promote", server.promoteProjectRepo)
-	mux.HandleFunc("POST /api/v1/cleanup", server.runCleanup)
 	return server.middleware(mux)
 }
 

@@ -25,11 +25,6 @@ struct ReleaseDeletionResult {
     QString error;
 };
 
-struct RetentionCleanupResult {
-    bool succeeded{false};
-    QString error;
-};
-
 struct UpdateCheckJobTask {
     std::optional<JobStatus> job;
     QString log;
@@ -208,43 +203,6 @@ void MainWindow::askExternalHarness() {
             this, QStringLiteral("AI harness launched"),
             QStringLiteral("The profile has no {prompt} placeholder, so the PacSmith context prompt was copied to the clipboard."));
     }
-}
-
-void MainWindow::applyRetentionCleanup() {
-    if (!project_ || retentionCleanupInFlight_) return;
-    const auto projectId = project_->id;
-    const auto releaseId = currentReleaseId_;
-    const auto config = library_.config();
-    retentionCleanupInFlight_ = true;
-    statusBar()->showMessage(QStringLiteral("Cleaning up excess outdated package versions…"));
-    auto *watcher = new QFutureWatcher<RetentionCleanupResult>(this);
-    connect(watcher, &QFutureWatcher<RetentionCleanupResult>::finished, this,
-            [this, watcher, projectId, releaseId] {
-        const auto cleanup = watcher->result();
-        watcher->deleteLater();
-        retentionCleanupInFlight_ = false;
-        if (!cleanup.succeeded) {
-            statusBar()->showMessage(
-                cleanup.error.isEmpty() ? QStringLiteral("Package cleanup failed") : cleanup.error,
-                8000);
-            return;
-        }
-        statusBar()->showMessage(QStringLiteral("Excess outdated package versions cleaned up"), 5000);
-        refreshProjectList(projectId);
-        if (!project_ || project_->id != projectId) return;
-        if (project_->release(releaseId) == nullptr) {
-            if (const auto *newest = project_->newestRelease()) currentReleaseId_ = newest->id;
-            else currentReleaseId_.clear();
-        }
-        refreshCurrentProject();
-    });
-    watcher->setFuture(QtConcurrent::run([config] {
-        LibraryClient client(config);
-        RetentionCleanupResult result;
-        const auto cleanup = client.cleanup(&result.error);
-        result.succeeded = !cleanup.skipped && result.error.isEmpty();
-        return result;
-    }));
 }
 
 void MainWindow::startUpdateCheck() {

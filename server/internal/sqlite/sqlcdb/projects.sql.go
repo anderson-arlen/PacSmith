@@ -232,6 +232,51 @@ func (q *Queries) ListProjectsBySourceIdentity(ctx context.Context, sourceIdenti
 	return items, nil
 }
 
+const replaceProjectHistory = `-- name: ReplaceProjectHistory :one
+UPDATE projects
+SET history_json = ?1,
+    modified_at = ?2,
+    revision = revision + 1
+WHERE id = ?3 AND revision = ?4
+RETURNING id, revision, display_name, arch_package_name, vendor_name, source_identity, icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish, repo_pkgname_override, repo_published_pkgname, auto_build_policy, compile_cache_policy
+`
+
+type ReplaceProjectHistoryParams struct {
+	HistoryJson string `json:"history_json"`
+	ModifiedAt  string `json:"modified_at"`
+	ID          string `json:"id"`
+	Revision    int64  `json:"revision"`
+}
+
+func (q *Queries) ReplaceProjectHistory(ctx context.Context, arg ReplaceProjectHistoryParams) (Project, error) {
+	row := q.db.QueryRowContext(ctx, replaceProjectHistory,
+		arg.HistoryJson,
+		arg.ModifiedAt,
+		arg.ID,
+		arg.Revision,
+	)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Revision,
+		&i.DisplayName,
+		&i.ArchPackageName,
+		&i.VendorName,
+		&i.SourceIdentity,
+		&i.IconArtifactID,
+		&i.IconSha256,
+		&i.HistoryJson,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+		&i.RepoPublish,
+		&i.RepoPkgnameOverride,
+		&i.RepoPublishedPkgname,
+		&i.AutoBuildPolicy,
+		&i.CompileCachePolicy,
+	)
+	return i, err
+}
+
 const updateProject = `-- name: UpdateProject :one
 UPDATE projects
 SET display_name = ?,

@@ -181,7 +181,6 @@ public:
         QString *error = nullptr, qint64 providerReleaseId = 0,
         qint64 providerAssetId = 0, const QString &providerTag = {},
         const QString &publisherDigest = {}, bool providerPrerelease = false) const;
-    [[nodiscard]] CleanupResult cleanup(QString *error = nullptr) const;
     [[nodiscard]] std::optional<ImportResult> reanalyzeRelease(
         const QString &releaseId, QString *error = nullptr) const;
     [[nodiscard]] std::optional<QString> readFile(const QString &releaseId, const QString &name,

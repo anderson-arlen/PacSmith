@@ -364,7 +364,7 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                 return;
             }
             finishServerArtifactImport(
-                *task.result, false,
+                *task.result,
                 rpm ? QStringLiteral("RPM repository package verified and inspected by pacsmithd")
                     : QStringLiteral("APT repository package verified and inspected by pacsmithd"));
         });
@@ -428,7 +428,7 @@ void MainWindow::importPackage(const QString &path) {
         progress->show();
         auto *watcher = new QFutureWatcher<ArtifactImportTask>(this);
         connect(watcher, &QFutureWatcher<ArtifactImportTask>::finished, this,
-                [this, watcher, progress, submittedManualRelease = !existingProjectId.isEmpty()] {
+                [this, watcher, progress] {
             const auto task = watcher->result();
             watcher->deleteLater();
             if (!task.result) {
@@ -460,7 +460,7 @@ void MainWindow::importPackage(const QString &path) {
             const auto config = library_.config();
             auto *completion = new QFutureWatcher<RemoteImportCompletionTask>(this);
             connect(completion, &QFutureWatcher<RemoteImportCompletionTask>::finished, this,
-                    [this, completion, result = *task.result, submittedManualRelease] {
+                    [this, completion, result = *task.result] {
                 const auto completed = completion->result();
                 completion->deleteLater();
                 const bool succeeded = completed.job &&
@@ -471,7 +471,7 @@ void MainWindow::importPackage(const QString &path) {
                 serverImportRunning_ = false;
                 if (succeeded) {
                     finishServerArtifactImport(
-                        result, submittedManualRelease,
+                        result,
                         QStringLiteral("Vendor artifact downloaded and inspected by pacsmithd"));
                 } else {
                     refreshProjectList(result.project.id);
@@ -538,8 +538,6 @@ void MainWindow::importPackage(const QString &path) {
             [this](const QString &projectId, const QString &releaseId, const QString &error) {
         const auto preparationProjectId = preparingProjectId_;
         const bool preparedUpdate = !preparingReleaseId_.isEmpty();
-        const bool submittedManualRelease =
-            !pendingImportOptions_.existingProjectId.isEmpty();
         const auto preparationSourceReleaseId = preparationSourceReleaseId_;
         const bool automaticPreparationBuild = automaticPreparationBuild_;
         pendingImportOptions_ = {};
@@ -557,7 +555,6 @@ void MainWindow::importPackage(const QString &path) {
         }
         resetPreparationState();
         refreshProjectList(projectId, [this, projectId, releaseId, preparedUpdate,
-                                       submittedManualRelease,
                                        preparationSourceReleaseId,
                                        automaticPreparationBuild](const bool succeeded) {
             if (!succeeded || !project_ || project_->id != projectId ||
@@ -632,7 +629,6 @@ void MainWindow::importPackage(const QString &path) {
                 automaticBuildPauseMessage = QStringLiteral(
                     "Update prepared but needs attention: %1").arg(blockers.constFirst());
             }
-            if (preparedUpdate || submittedManualRelease) applyRetentionCleanup();
             if (automaticBuildPauseMessage.isEmpty()) {
                 statusBar()->showMessage(
                     QStringLiteral("Imported to %1").arg(projectDirectory(library_, *project_)), 10000);
@@ -689,11 +685,10 @@ void MainWindow::importPackage(const QString &path) {
 }
 
 void MainWindow::finishServerArtifactImport(const ImportResult &result,
-                                            const bool applyRetention,
                                             const QString &successMessage) {
     const auto projectId = result.project.id;
     const auto releaseId = result.releaseId;
-    refreshProjectList(projectId, [this, projectId, releaseId, applyRetention,
+    refreshProjectList(projectId, [this, projectId, releaseId,
                                    successMessage](const bool succeeded) {
         if (!succeeded || !project_ || project_->id != projectId ||
             project_->release(releaseId) == nullptr) {
@@ -704,7 +699,6 @@ void MainWindow::finishServerArtifactImport(const ImportResult &result,
         }
         currentReleaseId_ = releaseId;
         refreshCurrentProject();
-        if (applyRetention) applyRetentionCleanup();
         showReleaseWorkbenchAtFirstAttention(releaseId);
         statusBar()->showMessage(successMessage, 10000);
     });

@@ -2,6 +2,7 @@
 #include "gui/appearance.hpp"
 #include "gui/main_window/project_list_delegate.hpp"
 #include "gui/project_history_view.hpp"
+#include "gui/project_hydration_cache.hpp"
 #include "gui/wheel_scroll_guard.hpp"
 
 #include "core/model.hpp"
@@ -130,6 +131,20 @@ private slots:
         QVERIFY(list.item(0)->text().contains(QStringLiteral("update-check")));
         QVERIFY(list.item(0)->text().contains(QStringLiteral("No newer version")));
         QVERIFY(list.item(1)->text().contains(QStringLiteral("import")));
+    }
+
+    void projectHydrationExpiresAfterFiveMinutes() {
+        ProjectHydrationCache cache;
+        const auto loadedAt = QDateTime::fromString(QStringLiteral("2026-08-31T12:00:00Z"),
+                                                    Qt::ISODate);
+        cache.markLoaded(QStringLiteral("chatgpt"), loadedAt);
+
+        QVERIFY(cache.contains(QStringLiteral("chatgpt")));
+        QVERIFY(cache.isFresh(QStringLiteral("chatgpt"), loadedAt.addSecs(299)));
+        QVERIFY(!cache.isFresh(QStringLiteral("chatgpt"), loadedAt.addSecs(300)));
+
+        cache.retain(QSet<QString>{QStringLiteral("other")});
+        QVERIFY(!cache.contains(QStringLiteral("chatgpt")));
     }
 
     void projectListDelegateRendersStatusBadge() {

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -913,6 +914,66 @@ func TestCleanupRespectsRepoRoots(t *testing.T) {
 	}
 	if _, err := registry.Get(ctx, orphan.ID); err == nil {
 		t.Fatal("unreferenced artifact survived cleanup")
+	}
+}
+
+func TestCleanupKeepsNewestOneHundredProjectHistoryEntries(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := make([]HistoryEntry, 105)
+	for index := range history {
+		history[index] = HistoryEntry{
+			Timestamp: fmt.Sprintf("2026-08-31T02:%02d:00.000Z", index%60),
+			Event:     "update-check",
+			Detail:    fmt.Sprintf("history entry %03d", index),
+		}
+	}
+	now := nowUTC()
+	inserted, err := db.Queries.InsertProject(ctx, sqlcdb.InsertProjectParams{
+		ID: "history-retention", DisplayName: "History Retention",
+		ArchPackageName: "history-retention-bin", SourceIdentity: "local:history-retention",
+		HistoryJson: encodeHistory(history), CreatedAt: now, ModifiedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{DB: db, Artifacts: &artifact.Registry{DB: db, Store: store}}
+	if err := svc.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	trimmed, err := svc.GetProject(ctx, inserted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trimmed.History) != 100 {
+		t.Fatalf("history length = %d, want 100", len(trimmed.History))
+	}
+	if trimmed.History[0].Detail != "history entry 005" ||
+		trimmed.History[99].Detail != "history entry 104" {
+		t.Fatalf("retained history bounds = %q to %q",
+			trimmed.History[0].Detail, trimmed.History[99].Detail)
+	}
+	if trimmed.Revision != inserted.Revision+1 {
+		t.Fatalf("revision = %d, want %d", trimmed.Revision, inserted.Revision+1)
+	}
+	if err := svc.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := svc.GetProject(ctx, inserted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Revision != trimmed.Revision {
+		t.Fatalf("second cleanup changed revision from %d to %d", trimmed.Revision, unchanged.Revision)
 	}
 }
 

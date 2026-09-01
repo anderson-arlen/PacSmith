@@ -358,6 +358,7 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 			var req struct {
 				ReleaseID string `json:"release_id"`
 				Force     bool   `json:"force"`
+				Scheduled bool   `json:"scheduled"`
 			}
 			if err := json.Unmarshal(payload, &req); err != nil {
 				return nil, err
@@ -378,10 +379,20 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 				}
 				return raw, err
 			}
+			if marshalErr != nil {
+				return raw, marshalErr
+			}
+			if req.Scheduled && req.ReleaseID == "" {
+				log("Running scheduled library cleanup…\n")
+				if cleanupErr := lib.Cleanup(ctx); cleanupErr != nil {
+					return raw, fmt.Errorf("scheduled library cleanup: %w", cleanupErr)
+				}
+				log("Scheduled library cleanup completed\n")
+			}
 			progress(jobs.Progress{Message: updateBatchSummary(result),
 				Current: int64(len(result.Checks)), Total: int64(len(result.Checks)),
 				FailedItems: int64(result.Failed), PausedItems: int64(updatePausedCount(result))})
-			return raw, marshalErr
+			return raw, nil
 		case jobs.KindUpdatePrepare:
 			if updater == nil {
 				return nil, fmt.Errorf("update checker is unavailable")

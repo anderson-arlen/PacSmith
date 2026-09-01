@@ -6,6 +6,7 @@
 #include "core/library_client.hpp"
 #include "core/library_events.hpp"
 #include "core/repository_key_download_service.hpp"
+#include "gui/project_hydration_cache.hpp"
 
 #include <QHash>
 #include <QElapsedTimer>
@@ -141,7 +142,7 @@ private:
                                const QUrl &signingKeyUrl,
                                const QByteArray &signingKeyContents = {},
                                const QString &signingKeySource = {});
-    void finishServerArtifactImport(const ImportResult &result, bool applyRetention,
+    void finishServerArtifactImport(const ImportResult &result,
                                     const QString &successMessage);
     void showProjectDashboard();
     void showReleaseWorkbench(const QString &releaseId);
@@ -160,7 +161,8 @@ private:
     void removeProjectListItem(const QString &projectId);
     void loadProject(const QString &id);
     void loadProjectInteractively(const QString &id);
-    void applyLoadedProject(Project project);
+    void applyLoadedProject(Project project, bool freshlyLoaded);
+    void revalidateProjectIfStale(const QString &id);
     void showDashboardLoading(const QString &displayName);
     void startBackgroundProjectLoad(const QString &id, quint64 generation);
     void prefetchProjectIcons();
@@ -271,7 +273,6 @@ private:
                               bool warning = false);
     void updateMonitoringAttention();
     void startUpdateCheck();
-    void applyRetentionCleanup();
     void startBuild(bool installWhenSuccessful = false, bool automatic = false);
     void pollBuildJob();
     void finishBuildJob();
@@ -352,7 +353,7 @@ private:
     std::optional<Project> pendingExternalProject_;
     std::optional<Project> project_;
     QHash<QString, Project> projectCache_;
-    QSet<QString> hydratedProjectIds_;
+    ProjectHydrationCache projectHydration_;
     quint64 projectLoadGeneration_{0};
     quint64 projectListRefreshGeneration_{0};
     QString loadingProjectId_;
@@ -367,7 +368,6 @@ private:
     InstallService installService_;
     bool installPreparationInFlight_{false};
     bool packageOperationFinishInFlight_{false};
-    bool retentionCleanupInFlight_{false};
     QString buildJobId_;
     QString buildProjectId_;
     QString buildReleaseId_;

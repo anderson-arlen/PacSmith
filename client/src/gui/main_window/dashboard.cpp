@@ -842,17 +842,17 @@ void MainWindow::applyProjectList(QList<Project> projects, const QString &select
     projectCache_.reserve(projects.size());
     for (const auto &project : projects) {
         if (preserveCurrent && project_ && project_->id == project.id &&
-            hydratedProjectIds_.contains(project.id)) {
+            projectHydration_.contains(project.id)) {
             auto hydrated = *project_;
             hydrated.installedVersion = project.installedVersion;
             hydrated.installedReleaseId = project.installedReleaseId;
             hydrated.externallyInstalled = project.externallyInstalled;
             projectCache_.insert(project.id, std::move(hydrated));
-            hydratedProjectIds_.insert(project.id);
+            if (!project.summaryOnly) projectHydration_.markLoaded(project.id);
         } else {
             projectCache_.insert(project.id, project);
-            if (project.summaryOnly) hydratedProjectIds_.remove(project.id);
-            else hydratedProjectIds_.insert(project.id);
+            if (project.summaryOnly) projectHydration_.remove(project.id);
+            else projectHydration_.markLoaded(project.id);
         }
     }
     const auto updateState = BackgroundUpdateStateStore::load();
@@ -883,6 +883,7 @@ void MainWindow::applyProjectList(QList<Project> projects, const QString &select
         }
         project_.reset();
         projectCache_.clear();
+        projectHydration_.clear();
         stageTabs_->setEnabled(false);
         projectTabs_->setEnabled(false);
         if (projectSidebar_ != nullptr) projectSidebar_->show();
@@ -905,7 +906,7 @@ void MainWindow::applyProjectList(QList<Project> projects, const QString &select
     for (auto iterator = projectCache_.cbegin(); iterator != projectCache_.cend(); ++iterator) {
         remaining.insert(iterator.key());
     }
-    hydratedProjectIds_.intersect(remaining);
+    projectHydration_.retain(remaining);
     if (!preserveCurrent && loadingProjectId_.isEmpty() && project_ && projectCache_.contains(project_->id)) {
         const auto releaseId = currentReleaseId_;
         project_ = projectCache_.value(project_->id);
@@ -948,10 +949,11 @@ void MainWindow::showDashboardLoading(const QString &displayName) {
     if (stageTabs_ != nullptr) stageTabs_->setEnabled(false);
 }
 
-void MainWindow::applyLoadedProject(Project project) {
+void MainWindow::applyLoadedProject(Project project, const bool freshlyLoaded) {
     lifecycleEditing_ = false;
     projectCache_.insert(project.id, project);
     project_ = std::move(project);
+    if (freshlyLoaded) projectHydration_.markLoaded(project_->id);
     const auto *initialRelease = project_->activeTrackingRelease();
     if (initialRelease == nullptr) initialRelease = project_->newestRelease();
     currentReleaseId_ = initialRelease == nullptr ? QString{} : initialRelease->id;
@@ -960,8 +962,16 @@ void MainWindow::applyLoadedProject(Project project) {
     if (dashboardBodyStack_ != nullptr && projectTabs_ != nullptr) {
         dashboardBodyStack_->setCurrentWidget(projectTabs_);
     }
-    hydratedProjectIds_.insert(project_->id);
     showProjectDashboard();
+}
+
+void MainWindow::revalidateProjectIfStale(const QString &id) {
+    if (id.isEmpty() || !projectHydration_.contains(id) || projectHydration_.isFresh(id) ||
+        projectStale_ || pendingFullEventRefresh_ || eventRefreshInFlight_ ||
+        projectListRefreshInFlight_) {
+        return;
+    }
+    reloadVisibleProjects();
 }
 
 void MainWindow::loadProject(const QString &id) {
@@ -969,9 +979,10 @@ void MainWindow::loadProject(const QString &id) {
     loadingProjectId_.clear();
     if (id.isEmpty()) return;
     const auto cached = projectCache_.constFind(id);
-    if (cached != projectCache_.cend() && hydratedProjectIds_.contains(id)) {
-        applyLoadedProject(cached.value());
+    if (cached != projectCache_.cend() && projectHydration_.contains(id)) {
+        applyLoadedProject(cached.value(), false);
         prefetchSigningKeys(*project_);
+        revalidateProjectIfStale(id);
         return;
     }
     loadProjectInteractively(id);
@@ -981,7 +992,8 @@ void MainWindow::loadProjectInteractively(const QString &id) {
     if (id.isEmpty()) return;
     if (loadingProjectId_ == id) return;
     if (project_ && project_->id == id && loadingProjectId_.isEmpty() &&
-        hydratedProjectIds_.contains(id)) {
+        projectHydration_.contains(id)) {
+        revalidateProjectIfStale(id);
         return;
     }
     const auto generation = ++projectLoadGeneration_;
@@ -996,7 +1008,7 @@ void MainWindow::loadProjectInteractively(const QString &id) {
     }
     if (displayName.isEmpty()) displayName = QStringLiteral("Package");
     showDashboardLoading(displayName);
-    if (projectCache_.contains(id) && hydratedProjectIds_.contains(id)) {
+    if (projectCache_.contains(id) && projectHydration_.contains(id)) {
         QTimer::singleShot(0, this, [this, generation, id] {
             if (generation != projectLoadGeneration_ || loadingProjectId_ != id) return;
             const auto found = projectCache_.constFind(id);
@@ -1004,9 +1016,10 @@ void MainWindow::loadProjectInteractively(const QString &id) {
                 startBackgroundProjectLoad(id, generation);
                 return;
             }
-            applyLoadedProject(found.value());
+            applyLoadedProject(found.value(), false);
             loadingProjectId_.clear();
             prefetchSigningKeys(*project_);
+            revalidateProjectIfStale(id);
         });
         return;
     }
@@ -1029,7 +1042,7 @@ void MainWindow::startBackgroundProjectLoad(const QString &id, quint64 generatio
             QMessageBox::critical(this, QStringLiteral("Could not load project"), result.error);
             return;
         }
-        applyLoadedProject(std::move(*result.project));
+        applyLoadedProject(std::move(*result.project), true);
     });
     watcher->setFuture(QtConcurrent::run([config, id]() -> ProjectLoadResult {
         LibraryClient client(config);
@@ -1291,6 +1304,7 @@ void MainWindow::deleteCurrentProject() {
         }
         if (project_ && project_->id == deletedId) project_.reset();
         projectCache_.remove(deletedId);
+        projectHydration_.remove(deletedId);
         refreshProjectList({}, [this, deletedName](const bool succeeded) {
             if (succeeded) syncTrayUpdateCensus();
             statusBar()->showMessage(QStringLiteral("Deleted package %1").arg(deletedName), 8000);

@@ -165,7 +165,7 @@ Vendors that publish behind an interactive download page or have no machine-read
 
 That is the difference between "I converted a `.deb` once" and "I can actually live without the AUR." The first is a weekend script. The second is why PacSmith exists.
 
-Update checks can run on demand or on a systemd user timer. An optional tray helper badges available updates. One retention setting chooses how many completed versions to keep behind each package's oldest active distribution pointer. Stable is the boundary when it has a published version; otherwise Unstable is. PacSmith cleans up each excess older version's source artifact and built packages together while preserving the entire Stable-to-Unstable rollout window. Repository HTTP listening does not control these internal pointers.
+Update checks can run on demand or on pacsmithd's schedule. An optional tray helper badges available updates. One retention setting chooses how many completed versions to keep behind each package's oldest active distribution pointer. Stable is the boundary when it has a published version; otherwise Unstable is. After each scheduled library-wide update check, PacSmith cleans up every excess older version's source artifact and built packages together while preserving the entire Stable-to-Unstable rollout window, and trims each project's history to its 100 newest entries. Manual imports and on-demand checks do not trigger cleanup. Repository HTTP listening does not control these internal pointers.
 
 ### Bring your own AI harness
 

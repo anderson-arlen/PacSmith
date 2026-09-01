@@ -14,6 +14,14 @@ SELECT * FROM projects ORDER BY display_name COLLATE NOCASE, id;
 -- name: ListProjectsBySourceIdentity :many
 SELECT * FROM projects WHERE source_identity = ?;
 
+-- name: ReplaceProjectHistory :one
+UPDATE projects
+SET history_json = sqlc.arg(history_json),
+    modified_at = sqlc.arg(modified_at),
+    revision = revision + 1
+WHERE id = sqlc.arg(id) AND revision = sqlc.arg(revision)
+RETURNING *;
+
 -- name: UpdateProject :one
 UPDATE projects
 SET display_name = ?,

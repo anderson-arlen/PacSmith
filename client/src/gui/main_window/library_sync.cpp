@@ -380,23 +380,24 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
     for (const auto &projectId : removedIds) {
         removeProjectListItem(projectId);
         projectCache_.remove(projectId);
-        hydratedProjectIds_.remove(projectId);
+        projectHydration_.remove(projectId);
     }
     for (const auto &candidate : projects) {
         const auto cached = projectCache_.constFind(candidate.id);
         const bool listItemChanged = cached == projectCache_.cend() ||
                                      projectListStateDiffers(cached.value(), candidate);
         if (fullRefresh && preserveSelected && project_ && project_->id == candidate.id &&
-            hydratedProjectIds_.contains(candidate.id)) {
+            projectHydration_.contains(candidate.id)) {
             auto hydrated = *project_;
             hydrated.installedVersion = candidate.installedVersion;
             hydrated.installedReleaseId = candidate.installedReleaseId;
             hydrated.externallyInstalled = candidate.externallyInstalled;
             projectCache_.insert(candidate.id, std::move(hydrated));
+            if (!candidate.summaryOnly) projectHydration_.markLoaded(candidate.id);
         } else {
             projectCache_.insert(candidate.id, candidate);
-            if (candidate.summaryOnly) hydratedProjectIds_.remove(candidate.id);
-            else hydratedProjectIds_.insert(candidate.id);
+            if (candidate.summaryOnly) projectHydration_.remove(candidate.id);
+            else projectHydration_.markLoaded(candidate.id);
         }
         if (listItemChanged) updateProjectListItem(candidate, updateState);
     }
@@ -476,6 +477,7 @@ void MainWindow::reloadExternalProject() {
     if (pendingExternalProject_) {
         project_ = std::move(pendingExternalProject_);
         projectCache_.insert(project_->id, *project_);
+        projectHydration_.markLoaded(project_->id);
         if (project_->release(releaseId) != nullptr) currentReleaseId_ = releaseId;
         else {
             const auto *release = project_->activeTrackingRelease();
@@ -556,7 +558,7 @@ bool MainWindow::hasUnsavedProjectDraft() const {
 bool MainWindow::ensureCurrentProjectWritable() {
     if (project_ && project_->summaryOnly) {
         const auto projectId = project_->id;
-        hydratedProjectIds_.remove(projectId);
+        projectHydration_.remove(projectId);
         loadProjectInteractively(projectId);
         QMessageBox::warning(
             this, QStringLiteral("Loading package"),

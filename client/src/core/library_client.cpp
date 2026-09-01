@@ -1349,18 +1349,4 @@ PackageRelease *LibraryClient::recordDiscoveredRelease(
     return &project.releases.last();
 }
 
-CleanupResult LibraryClient::cleanup(QString *error) const {
-    CleanupResult result;
-    const auto response = transport_.request(QStringLiteral("POST"), QStringLiteral("/api/v1/cleanup"));
-    if (isError(response, error) || response.status != 200) {
-        if (error != nullptr && error->isEmpty()) {
-            *error = apiError(response.body, QStringLiteral("could not clean up outdated versions"));
-        }
-        result.skipped = true;
-        return result;
-    }
-    result.message = QStringLiteral("Excess outdated versions and artifacts were cleaned up.");
-    return result;
-}
-
 } // namespace pacsmith

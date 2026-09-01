@@ -12,6 +12,11 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 )
 
+const (
+	retainedProjectHistoryEntries = 100
+	historyCleanupAttempts        = 3
+)
+
 func (s *Service) AppendProjectHistory(ctx context.Context, projectID, event, detail string) (Project, error) {
 	projectID = strings.TrimSpace(projectID)
 	event = strings.TrimSpace(event)
@@ -39,6 +44,49 @@ func (s *Service) AppendProjectHistory(ctx context.Context, projectID, event, de
 		return Project{}, err
 	}
 	return projectFromRow(row), nil
+}
+
+func (s *Service) trimProjectHistories(ctx context.Context) error {
+	projects, err := s.DB.Queries.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	for _, project := range projects {
+		if err := s.trimProjectHistory(ctx, project); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) trimProjectHistory(ctx context.Context, project sqlcdb.Project) error {
+	for attempt := 0; attempt < historyCleanupAttempts; attempt++ {
+		history := decodeHistory(project.HistoryJson)
+		if len(history) <= retainedProjectHistoryEntries {
+			return nil
+		}
+		retained := history[len(history)-retainedProjectHistoryEntries:]
+		_, err := s.DB.Queries.ReplaceProjectHistory(ctx, sqlcdb.ReplaceProjectHistoryParams{
+			HistoryJson: encodeHistory(retained),
+			ModifiedAt:  nowUTC(),
+			ID:          project.ID,
+			Revision:    project.Revision,
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		project, err = s.DB.Queries.GetProject(ctx, project.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: project %q changed during history cleanup", ErrConflict, project.ID)
 }
 
 func (s *Service) recordImportedRelease(ctx context.Context, projectID, releaseID string) error {

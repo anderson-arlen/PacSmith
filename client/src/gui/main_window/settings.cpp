@@ -481,7 +481,9 @@ void MainWindow::showSettings() {
         QStringLiteral("When Stable has a published version, completed releases older than Stable are outdated. "
                        "Otherwise, completed releases older than Unstable are outdated. Versions from Stable "
                        "through Unstable remain protected, even when repository HTTP serving is off. PacSmith "
-                       "removes each excess outdated version's source artifact and built packages together.")));
+                       "removes each excess outdated version's source artifact and built packages together "
+                       "after a scheduled library-wide update check. That cleanup also keeps only each "
+                       "package's 100 newest history entries.")));
     auto *retentionVersions = new QSpinBox(retentionGroup);
     retentionVersions->setRange(-1, 1000);
     retentionVersions->setSuffix(QStringLiteral(" versions"));

@@ -1321,6 +1321,7 @@ void MainWindow::activateExistingSession(const QString &importPath) {
     if (!importPath.isEmpty()) importPackage(importPath);
     syncActivityTimer();
     updateUpdateCheckIndicators();
+    if (project_) revalidateProjectIfStale(project_->id);
 }
 
 void MainWindow::setKeepRunningInTray(const bool enabled) {

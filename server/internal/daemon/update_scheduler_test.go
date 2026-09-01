@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -8,11 +9,62 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
+	"github.com/anderson-arlen/pacsmith/server/internal/library"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite"
 	"github.com/anderson-arlen/pacsmith/server/internal/sqlite/sqlcdb"
 	"github.com/anderson-arlen/pacsmith/server/internal/updatecheck"
 )
+
+func TestScheduledUpdateCheckRunsCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		scheduled bool
+		collected bool
+	}{
+		{name: "scheduled", scheduled: true, collected: true},
+		{name: "unscheduled", scheduled: false, collected: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			store, err := artifact.New(filepath.Join(root, "objects"), filepath.Join(root, "tmp"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := &artifact.Registry{DB: db, Store: store}
+			orphan, err := registry.Put(ctx, "orphan.bin", "unknown", bytes.NewReader([]byte("orphan")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lib := &library.Service{DB: db, Artifacts: registry,
+				WorkDir: filepath.Join(root, "releases")}
+			updater := &updatecheck.Service{DB: db, Library: lib, Artifacts: registry}
+			handler := JobHandler(lib, nil, updater)
+			payload, err := json.Marshal(map[string]bool{"scheduled": test.scheduled})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := handler(ctx, jobs.Job{Kind: jobs.KindUpdateCheck}, payload,
+				func(string) {}, func(jobs.Progress) {}); err != nil {
+				t.Fatal(err)
+			}
+			_, err = registry.Get(ctx, orphan.ID)
+			if test.collected && err == nil {
+				t.Fatal("scheduled update check did not collect orphaned artifact")
+			}
+			if !test.collected && err != nil {
+				t.Fatalf("unscheduled update check collected orphaned artifact: %v", err)
+			}
+		})
+	}
+}
 
 func TestScheduledOccurrence(t *testing.T) {
 	location := time.FixedZone("test", -7*60*60)

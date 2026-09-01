@@ -110,8 +110,6 @@ func (s *Server) publishMutation(r *http.Request) {
 		event.Topics = []string{"settings"}
 	case path == "/api/v1/repo" || strings.HasPrefix(path, "/api/v1/repo/"):
 		event.Topics = []string{"repository"}
-	case path == "/api/v1/cleanup":
-		event.Topics = []string{"all"}
 	case strings.HasPrefix(path, "/api/v1/jobs/"):
 		event.Topics = []string{"jobs"}
 	case path == "/api/v1/imports" || strings.HasSuffix(path, "/reanalyze") || strings.HasSuffix(path, "/builds"):
