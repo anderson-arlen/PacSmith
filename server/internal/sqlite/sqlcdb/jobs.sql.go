@@ -54,6 +54,35 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 	return i, err
 }
 
+const getLatestBuildJobForRelease = `-- name: GetLatestBuildJobForRelease :one
+SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset, message, "current", total, failed_items, paused_items, created_at, started_at, finished_at FROM jobs WHERE kind = 'build' AND release_id = ?
+ORDER BY created_at DESC, id DESC LIMIT 1
+`
+
+func (q *Queries) GetLatestBuildJobForRelease(ctx context.Context, releaseID sql.NullString) (Job, error) {
+	row := q.db.QueryRowContext(ctx, getLatestBuildJobForRelease, releaseID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Status,
+		&i.ProjectID,
+		&i.ReleaseID,
+		&i.PayloadJson,
+		&i.Error,
+		&i.LogOffset,
+		&i.Message,
+		&i.Current,
+		&i.Total,
+		&i.FailedItems,
+		&i.PausedItems,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const getLatestLibraryJobCreatedAt = `-- name: GetLatestLibraryJobCreatedAt :one
 SELECT created_at
 FROM jobs
@@ -120,19 +149,6 @@ func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) (Job, erro
 	return i, err
 }
 
-const interruptRunningJobs = `-- name: InterruptRunningJobs :exec
-UPDATE jobs
-SET status = 'interrupted',
-    error = 'interrupted by daemon restart',
-    finished_at = ?
-WHERE status = 'running'
-`
-
-func (q *Queries) InterruptRunningJobs(ctx context.Context, finishedAt sql.NullString) error {
-	_, err := q.db.ExecContext(ctx, interruptRunningJobs, finishedAt)
-	return err
-}
-
 const listActiveJobsByKind = `-- name: ListActiveJobsByKind :many
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,
        message, current, total, failed_items, paused_items, created_at, started_at, finished_at
@@ -143,6 +159,94 @@ ORDER BY created_at
 
 func (q *Queries) ListActiveJobsByKind(ctx context.Context, kind string) ([]Job, error) {
 	rows, err := q.db.QueryContext(ctx, listActiveJobsByKind, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Status,
+			&i.ProjectID,
+			&i.ReleaseID,
+			&i.PayloadJson,
+			&i.Error,
+			&i.LogOffset,
+			&i.Message,
+			&i.Current,
+			&i.Total,
+			&i.FailedItems,
+			&i.PausedItems,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listQueuedJobs = `-- name: ListQueuedJobs :many
+SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset, message, "current", total, failed_items, paused_items, created_at, started_at, finished_at FROM jobs WHERE status = 'queued' ORDER BY created_at, id
+`
+
+func (q *Queries) ListQueuedJobs(ctx context.Context) ([]Job, error) {
+	rows, err := q.db.QueryContext(ctx, listQueuedJobs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Status,
+			&i.ProjectID,
+			&i.ReleaseID,
+			&i.PayloadJson,
+			&i.Error,
+			&i.LogOffset,
+			&i.Message,
+			&i.Current,
+			&i.Total,
+			&i.FailedItems,
+			&i.PausedItems,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunningJobs = `-- name: ListRunningJobs :many
+SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset, message, "current", total, failed_items, paused_items, created_at, started_at, finished_at FROM jobs WHERE status = 'running' ORDER BY created_at, id
+`
+
+func (q *Queries) ListRunningJobs(ctx context.Context) ([]Job, error) {
+	rows, err := q.db.QueryContext(ctx, listRunningJobs)
 	if err != nil {
 		return nil, err
 	}

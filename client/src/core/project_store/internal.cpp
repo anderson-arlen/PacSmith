@@ -463,20 +463,24 @@ QString repackagedPkgrel(const QString &upstream) {
     return QStringLiteral("%1.%2").arg(std::max(1, major)).arg(std::max(1, minor));
 }
 
-bool releaseMatchesInstalledVersion(const Project &project, const QString &installedVersion) {
+QString installedReleaseIdForVersion(const Project &project, const QString &installedVersion) {
     for (const auto &release : project.releases) {
-        if (expectedArchVersion(release) == installedVersion) return true;
+        if (expectedArchVersion(release) == installedVersion) return release.id;
         for (const auto &build : release.builds) {
             if (std::any_of(build.artifacts.cbegin(), build.artifacts.cend(),
                             [&](const auto &artifact) {
                                 return artifact.packageName == project.archPackageName &&
                                        artifact.packageVersion == installedVersion;
                             })) {
-                return true;
+                return release.id;
             }
         }
     }
-    return false;
+    return {};
+}
+
+bool releaseMatchesInstalledVersion(const Project &project, const QString &installedVersion) {
+    return !installedReleaseIdForVersion(project, installedVersion).isEmpty();
 }
 
 bool projectOwnsInstalledPackage(const Project &project, const QString &installedVersion) {

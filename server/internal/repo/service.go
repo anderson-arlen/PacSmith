@@ -229,6 +229,15 @@ func encodeListenHosts(hosts []string) string {
 }
 
 func (s *Service) PatchSettings(ctx context.Context, patch SettingsPatch) (Settings, error) {
+	return s.patchSettings(ctx, patch, false)
+}
+
+func (s *Service) PatchSettingsDeferred(ctx context.Context, patch SettingsPatch) (Settings, error) {
+	return s.patchSettings(ctx, patch, true)
+}
+
+func (s *Service) patchSettings(ctx context.Context, patch SettingsPatch,
+	deferStableRebuild bool) (Settings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, err := s.DB.Queries.GetRepoSettings(ctx)
@@ -342,7 +351,7 @@ func (s *Service) PatchSettings(ctx context.Context, patch SettingsPatch) (Setti
 			return Settings{}, err
 		}
 	}
-	if next.StableEnabled != current.StableEnabled && next.StableEnabled != 0 {
+	if next.StableEnabled != current.StableEnabled && next.StableEnabled != 0 && !deferStableRebuild {
 		if err := s.republishAllLocked(ctx); err != nil {
 			return Settings{}, err
 		}
@@ -749,6 +758,12 @@ func (s *Service) ReconcileProjectDistribution(ctx context.Context, projectID st
 		return err
 	}
 	return s.publishBuildLocked(ctx, projectID, latest.ReleaseID, latest.ArtifactIDs)
+}
+
+func (s *Service) ReconcileAllDistribution(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.republishAllLocked(ctx)
 }
 
 func (s *Service) OnProjectDeleted(ctx context.Context, projectID string) error {

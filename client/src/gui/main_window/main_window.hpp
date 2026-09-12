@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/app_settings.hpp"
+#include "core/automatic_update_review.hpp"
 #include "core/background_updates.hpp"
 #include "core/process_services.hpp"
 #include "core/library_client.hpp"
@@ -12,11 +13,14 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QSet>
+#include <QPointer>
 #include <QThread>
 
 #include <functional>
 #include <optional>
 
+class QDialog;
+class QDockWidget;
 class QComboBox;
 class QCheckBox;
 class QCloseEvent;
@@ -48,6 +52,8 @@ class QWidget;
 namespace pacsmith::gui {
 
 class CommandProgressDialog;
+class AcpChatWidget;
+struct ChatScreenContext;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -59,6 +65,7 @@ public:
     void setKeepRunningInTray(bool enabled);
     void reloadVisibleProjects(bool refreshOpenProject = true);
     void noteBackgroundCheckStarted();
+    AcpChatWidget *openAiConversation(const AutomaticReviewRequest &request, bool automatic = false, const QString &sessionKey = {});
 
 signals:
     void clientSettingsReloaded();
@@ -214,7 +221,7 @@ private:
     void acknowledgeSelectedScript();
     void beginLifecycleEdit();
     void saveLifecycleEdit();
-    void cancelLifecycleEdit();
+    void finishLifecycleEdit();
     void acknowledgeLifecycleScript();
     void discardLifecycleScript();
     void populatePayload();
@@ -322,6 +329,10 @@ private:
     void reloadClientSettings();
     void startReanalysis();
     void askExternalHarness();
+    void openScreenChat();
+    ChatScreenContext currentChatContext() const;
+    QDockWidget *aiDock_{nullptr};
+    QStackedWidget *aiConversations_{nullptr};
     void importSigningKey();
     void downloadSigningKey();
     [[nodiscard]] PackageRelease *currentRelease();
@@ -372,9 +383,7 @@ private:
     QString buildProjectId_;
     QString buildReleaseId_;
     QString buildProjectName_;
-    QString buildLogContents_;
     QHash<QString, ServerEvent> activeBuildJobs_;
-    qint64 buildLogAfter_{0};
     QTimer *buildPollTimer_{nullptr};
     bool buildPollInFlight_{false};
     bool buildFinishInFlight_{false};
@@ -509,7 +518,6 @@ private:
     QPlainTextEdit *lifecycleView_{nullptr};
     QLabel *lifecycleStatus_{nullptr};
     QPushButton *editLifecycleButton_{nullptr};
-    QPushButton *saveLifecycleButton_{nullptr};
     QPushButton *cancelLifecycleButton_{nullptr};
     QPushButton *acknowledgeLifecycleButton_{nullptr};
     QPushButton *discardLifecycleButton_{nullptr};
@@ -529,7 +537,6 @@ private:
     QFrame *appRunReviewBanner_{nullptr};
     QLabel *appRunReviewLabel_{nullptr};
     QLabel *appRunStatus_{nullptr};
-    QPushButton *saveAppRunButton_{nullptr};
     QPushButton *keepOriginalAppRunButton_{nullptr};
     QPushButton *restoreAppRunButton_{nullptr};
     QListWidget *desktopEntriesList_{nullptr};
@@ -537,7 +544,6 @@ private:
     QLineEdit *desktopEntryDestination_{nullptr};
     QPlainTextEdit *desktopEntryEditor_{nullptr};
     QLabel *desktopEntryStatus_{nullptr};
-    QPushButton *saveDesktopEntryButton_{nullptr};
     QPushButton *deleteDesktopEntryButton_{nullptr};
     QLabel *iconPreview_{nullptr};
     QComboBox *payloadIconCandidates_{nullptr};
@@ -574,7 +580,6 @@ private:
     QLabel *updateOwnerLabel_{nullptr};
     QComboBox *autoBuildPolicy_{nullptr};
     QLabel *updateCheckStatus_{nullptr};
-    QPushButton *updateSaveButton_{nullptr};
     QPushButton *updateCheckButton_{nullptr};
     QCheckBox *repoPublishCheck_{nullptr};
     QWidget *repoStablePolicy_{nullptr};
@@ -589,7 +594,6 @@ private:
     QLabel *repoPublishedName_{nullptr};
     QLabel *repoNameWarning_{nullptr};
     QTableWidget *repoChannelTable_{nullptr};
-    QPushButton *repoSaveButton_{nullptr};
     QPushButton *repoPromoteButton_{nullptr};
     QLabel *repoStatusLabel_{nullptr};
     QLabel *buildChecklist_{nullptr};

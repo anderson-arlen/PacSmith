@@ -2,6 +2,7 @@ package inspect
 
 import (
 	"archive/tar"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -81,5 +82,90 @@ func TestInspectPayloadFileFollowsHardlink(t *testing.T) {
 		inspection.HardlinkTarget != "usr/lib/libsample.so.1" ||
 		inspection.Text != "library contents" || inspection.SHA256 == "" {
 		t.Fatalf("hardlink inspection %+v", inspection)
+	}
+}
+
+func TestInspectPayloadFileSpillsLargeMemberAndKeepsRealHash(t *testing.T) {
+	body := bytes.Repeat([]byte("PacSmith spill fixture\n"), 64)
+	archive := filepath.Join(t.TempDir(), "payload.tar")
+	spillDir := t.TempDir()
+	writeTar(t, archive, []tarEntry{{
+		Name: "usr/lib/large-fixture", Mode: 0o755, Body: body,
+	}})
+
+	inspection, err := inspectPayloadFileWithOptions(
+		archive, "payload.tar", "usr/lib/large-fixture",
+		payloadInspectionOptions{
+			maxInMemoryBytes: 64,
+			maxTotalBytes:    1 << 20,
+			tempDir:          spillDir,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	emptySum := sha256.Sum256(nil)
+	if inspection.SHA256 != hex.EncodeToString(sum[:]) ||
+		inspection.SHA256 == hex.EncodeToString(emptySum[:]) {
+		t.Fatalf("spilled content identity %+v", inspection)
+	}
+	if inspection.Text != string(body) || inspection.TextTruncated ||
+		inspection.InspectionNotice != "" {
+		t.Fatalf("spilled content inspection %+v", inspection)
+	}
+	entries, err := os.ReadDir(spillDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary inspection files remain: %+v", entries)
+	}
+}
+
+func TestInspectPayloadFileSpillsELFMember(t *testing.T) {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("true not found")
+	}
+	body, err := os.ReadFile(truePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "payload.tar")
+	writeTar(t, archive, []tarEntry{{Name: "usr/bin/large-elf", Mode: 0o755, Body: body}})
+
+	inspection, err := inspectPayloadFileWithOptions(
+		archive, "payload.tar", "usr/bin/large-elf",
+		payloadInspectionOptions{
+			maxInMemoryBytes: 1,
+			maxTotalBytes:    int64(len(body)) + 1,
+			tempDir:          t.TempDir(),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	if inspection.SHA256 != hex.EncodeToString(sum[:]) || inspection.ELF == nil ||
+		inspection.MagicHex[:8] != "7f454c46" {
+		t.Fatalf("spilled ELF inspection %+v", inspection)
+	}
+}
+
+func TestInspectPayloadFileBeyondHardLimitHasNoFalseHash(t *testing.T) {
+	body := bytes.Repeat([]byte("too large"), 16)
+	archive := filepath.Join(t.TempDir(), "payload.tar")
+	writeTar(t, archive, []tarEntry{{Name: "usr/lib/too-large", Body: body}})
+
+	inspection, err := inspectPayloadFileWithOptions(
+		archive, "payload.tar", "usr/lib/too-large",
+		payloadInspectionOptions{maxInMemoryBytes: 32, maxTotalBytes: int64(len(body) - 1)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.SHA256 != "" || inspection.InspectionNotice == "" {
+		t.Fatalf("hard-limit inspection must omit an unknown hash: %+v", inspection)
 	}
 }

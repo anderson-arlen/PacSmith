@@ -181,6 +181,32 @@ func (q *Queries) InsertBuildArtifact(ctx context.Context, arg InsertBuildArtifa
 	return err
 }
 
+const insertRecoveredBuild = `-- name: InsertRecoveredBuild :exec
+INSERT OR IGNORE INTO builds (id, release_id, status, log_text, started_at, finished_at)
+VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type InsertRecoveredBuildParams struct {
+	ID         string         `json:"id"`
+	ReleaseID  string         `json:"release_id"`
+	Status     string         `json:"status"`
+	LogText    string         `json:"log_text"`
+	StartedAt  sql.NullString `json:"started_at"`
+	FinishedAt sql.NullString `json:"finished_at"`
+}
+
+func (q *Queries) InsertRecoveredBuild(ctx context.Context, arg InsertRecoveredBuildParams) error {
+	_, err := q.db.ExecContext(ctx, insertRecoveredBuild,
+		arg.ID,
+		arg.ReleaseID,
+		arg.Status,
+		arg.LogText,
+		arg.StartedAt,
+		arg.FinishedAt,
+	)
+	return err
+}
+
 const insertRelease = `-- name: InsertRelease :one
 INSERT INTO releases (
     id, project_id, revision, state, source_type, vendor_version, original_filename,
@@ -328,7 +354,7 @@ func (q *Queries) ListBuildArtifactsForBuild(ctx context.Context, buildID string
 }
 
 const listBuildsForRelease = `-- name: ListBuildsForRelease :many
-SELECT id, release_id, status, log_text, started_at, finished_at FROM builds WHERE release_id = ? ORDER BY started_at
+SELECT id, release_id, status, log_text, started_at, finished_at FROM builds WHERE release_id = ? ORDER BY COALESCE(started_at, finished_at), id
 `
 
 func (q *Queries) ListBuildsForRelease(ctx context.Context, releaseID string) ([]Build, error) {
@@ -509,6 +535,51 @@ func (q *Queries) ListReleasesForProject(ctx context.Context, projectID string) 
 	return items, nil
 }
 
+const listStaleBuildingReleases = `-- name: ListStaleBuildingReleases :many
+SELECT id, project_id, revision, state, source_type, vendor_version, original_filename, source_sha256, source_artifact_id, arch_package_name, arch_pkgrel, body_json, created_at, modified_at FROM releases
+WHERE json_extract(body_json, '$.buildStatus') = 'building'
+AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.release_id = releases.id
+                AND jobs.kind = 'build' AND jobs.status IN ('queued', 'running'))
+`
+
+func (q *Queries) ListStaleBuildingReleases(ctx context.Context) ([]Release, error) {
+	rows, err := q.db.QueryContext(ctx, listStaleBuildingReleases)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Release
+	for rows.Next() {
+		var i Release
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Revision,
+			&i.State,
+			&i.SourceType,
+			&i.VendorVersion,
+			&i.OriginalFilename,
+			&i.SourceSha256,
+			&i.SourceArtifactID,
+			&i.ArchPackageName,
+			&i.ArchPkgrel,
+			&i.BodyJson,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUpdateSources = `-- name: ListUpdateSources :many
 SELECT id, release_id, revision, strategy, config_json FROM update_sources
 `
@@ -540,6 +611,30 @@ func (q *Queries) ListUpdateSources(ctx context.Context) ([]UpdateSource, error)
 		return nil, err
 	}
 	return items, nil
+}
+
+const recoverReleaseBuildState = `-- name: RecoverReleaseBuildState :exec
+UPDATE releases SET body_json = json_set(body_json, '$.buildStatus', ?1,
+                                         '$.lastBuildLog', ?2),
+                    revision = revision + 1, modified_at = ?3
+WHERE id = ?4
+`
+
+type RecoverReleaseBuildStateParams struct {
+	Status     interface{} `json:"status"`
+	LogText    interface{} `json:"log_text"`
+	ModifiedAt string      `json:"modified_at"`
+	ID         string      `json:"id"`
+}
+
+func (q *Queries) RecoverReleaseBuildState(ctx context.Context, arg RecoverReleaseBuildStateParams) error {
+	_, err := q.db.ExecContext(ctx, recoverReleaseBuildState,
+		arg.Status,
+		arg.LogText,
+		arg.ModifiedAt,
+		arg.ID,
+	)
+	return err
 }
 
 const updateRelease = `-- name: UpdateRelease :one

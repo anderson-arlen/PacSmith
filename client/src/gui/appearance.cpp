@@ -5,9 +5,63 @@
 #include <QPalette>
 #include <QPainter>
 #include <QStyle>
+#include <QProxyStyle>
+#include <QStyleOption>
 #include <QStyleHints>
 
 namespace pacsmith::gui {
+namespace {
+class PaneResizeStyle final : public QProxyStyle {
+public:
+    int pixelMetric(PixelMetric metric, const QStyleOption *option, const QWidget *widget) const override {
+        if (metric == PM_DockWidgetSeparatorExtent || metric == PM_SplitterWidth) return 12;
+        return QProxyStyle::pixelMetric(metric, option, widget);
+    }
+    void drawPrimitive(PrimitiveElement element, const QStyleOption *option, QPainter *painter, const QWidget *widget) const override {
+        if (element != PE_IndicatorDockWidgetResizeHandle) {
+            QProxyStyle::drawPrimitive(element, option, painter, widget);
+            return;
+        }
+        paintHandle(option, painter);
+    }
+    void drawControl(ControlElement element, const QStyleOption *option, QPainter *painter, const QWidget *widget) const override {
+        if (element == CE_Splitter) paintHandle(option, painter);
+        else QProxyStyle::drawControl(element, option, painter, widget);
+    }
+private:
+    static void paintHandle(const QStyleOption *option, QPainter *painter) {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRectF bounds(option->rect);
+        const auto center = bounds.center();
+        const bool vertical = bounds.height() > bounds.width();
+        painter->fillRect(bounds, option->palette.color(QPalette::Window));
+        auto color = option->palette.color(QPalette::WindowText);
+        color.setAlpha(65);
+        painter->setPen(QPen(color, 1));
+        if (vertical) painter->drawLine(QPointF(center.x(), bounds.top()), QPointF(center.x(), bounds.bottom()));
+        else painter->drawLine(QPointF(bounds.left(), center.y()), QPointF(bounds.right(), center.y()));
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(option->palette.color(QPalette::Window));
+        painter->drawRoundedRect(QRectF(center.x() - (vertical ? 5 : 18), center.y() - (vertical ? 18 : 5),
+                                       vertical ? 10 : 36, vertical ? 36 : 10), 4, 4);
+        color = option->palette.color(option->state.testFlag(State_MouseOver) ? QPalette::Highlight : QPalette::WindowText);
+        color.setAlpha(180);
+        painter->setBrush(color);
+        for (int along : {-6, 0, 6}) for (int across : {-2, 2}) {
+            painter->drawEllipse(center + QPointF(vertical ? across : along, vertical ? along : across), 1.2, 1.2);
+        }
+        painter->restore();
+    }
+};
+
+}
+
+void installPaneResizeStyle() {
+    auto *application = qobject_cast<QApplication *>(QCoreApplication::instance());
+    if (application != nullptr && dynamic_cast<PaneResizeStyle *>(application->style()) == nullptr)
+        application->setStyle(new PaneResizeStyle);
+}
 
 void applyInterfaceTheme(const AppearanceMode mode) {
     auto *application = qobject_cast<QApplication *>(QCoreApplication::instance());

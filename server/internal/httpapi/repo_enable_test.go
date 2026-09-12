@@ -91,3 +91,66 @@ func TestEnablingRepositoryQueuesPublishedProjectsAfterBinding(t *testing.T) {
 		t.Fatalf("queued repository jobs: %+v", active)
 	}
 }
+
+func TestEnablingStableQueuesBackgroundRebuild(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := sqlite.Open(ctx, filepath.Join(root, "pacsmith.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	row, err := db.Queries.GetRepoSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Queries.UpdateRepoSettings(ctx, sqlcdb.UpdateRepoSettingsParams{
+		Enabled: row.Enabled, ListenHosts: row.ListenHosts, ListenPort: row.ListenPort,
+		AdvertisedUrl: row.AdvertisedUrl, StableEnabled: row.StableEnabled,
+		SoakSeconds: row.SoakSeconds, PackageNamePrefix: row.PackageNamePrefix,
+		TrustMode: row.TrustMode, SigningFingerprint: "replacement-key",
+		SigningInitialized: 1, SigningPubkeyArtifactID: row.SigningPubkeyArtifactID,
+		RootPubkeyArtifactID: row.RootPubkeyArtifactID, RootFingerprint: row.RootFingerprint,
+		CertifiedPubkeyArtifactID:   row.CertifiedPubkeyArtifactID,
+		KeyringGpgArtifactID:        row.KeyringGpgArtifactID,
+		KeyringTrustedArtifactID:    row.KeyringTrustedArtifactID,
+		KeyringRevokedArtifactID:    row.KeyringRevokedArtifactID,
+		KeyringPackageArtifactID:    row.KeyringPackageArtifactID,
+		KeyringPackageSigArtifactID: row.KeyringPackageSigArtifactID,
+		KeyringVersion:              row.KeyringVersion,
+		ModifiedAt:                  "2026-01-01T00:00:00Z", Revision: row.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := jobs.New(db, filepath.Join(root, "jobs"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Config: Config{
+		DB: db, Repo: repo.New(db, nil, nil, filepath.Join(root, "repo"), filepath.Join(root, "gnupg")),
+		Jobs: manager,
+	}}
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/repo",
+		bytes.NewBufferString(`{"stable_enabled":true}`))
+	recorder := httptest.NewRecorder()
+	server.patchRepo(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	settings, err := server.Repo.Settings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.StableEnabled {
+		t.Fatal("stable setting was not saved before the background rebuild")
+	}
+	active, err := manager.Active(ctx, jobs.KindRepositoryDistribution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ProjectID != "" {
+		t.Fatalf("queued repository jobs: %+v", active)
+	}
+}

@@ -1,4 +1,5 @@
 #include "gui/main_window/common.hpp"
+#include "gui/auto_save.hpp"
 
 namespace pacsmith::gui {
 
@@ -242,7 +243,7 @@ QWidget *MainWindow::createInstallLayoutPage() {
     installBinarySource_->setPlaceholderText(QStringLiteral("relative/path/to/executable"));
     installBinaryDestination_ = new QLineEdit(mappingGroup);
     installBinaryDestination_->setPlaceholderText(QStringLiteral("/usr/bin/application"));
-    auto *saveMapping = new QPushButton(QStringLiteral("Save Install Mapping"), mappingGroup);
+
     mappingLayout->addRow(QStringLiteral("Archive layout"), archiveLayout_);
     mappingLayout->addRow(QStringLiteral("/opt directory"), installOptDirectory_);
     mappingLayout->addRow(QStringLiteral("Detected common root"), installCommonPrefix_);
@@ -254,10 +255,16 @@ QWidget *MainWindow::createInstallLayoutPage() {
     mappingLayout->addRow(installCommandsHint_);
     mappingLayout->addRow(QStringLiteral("Executable inside archive"), installBinarySource_);
     mappingLayout->addRow(QStringLiteral("Command destination"), installBinaryDestination_);
-    mappingLayout->addRow(QString{}, saveMapping);
+
     layout->addWidget(mappingGroup);
     layout->addStretch();
-    connect(saveMapping, &QPushButton::clicked, this, &MainWindow::saveInstallMapping);
+    auto *mappingSave = new AutoSave(mappingGroup, [this] {
+        if (!populating_) saveInstallMapping();
+    });
+    mappingSave->watch(archiveLayout_);
+    mappingSave->watch(installOptDirectory_);
+    mappingSave->watch(installStripPrefix_);
+    mappingSave->watch(installBinaryDestination_);
     connect(archiveLayout_, &QComboBox::currentIndexChanged, this, [this](const int index) {
         if (currentRelease() == nullptr ||
             (currentRelease()->sourceType != SourcePackageType::Archive &&
@@ -367,9 +374,13 @@ QWidget *MainWindow::createPackageMetadataPage() {
     form->addRow(QStringLiteral("Provides"), packageProvides_);
     form->addRow(QStringLiteral("Conflicts"), packageConflicts_);
     layout->addLayout(form);
-    auto *save = new QPushButton(QStringLiteral("Save package metadata"), page);
-    connect(save, &QPushButton::clicked, this, &MainWindow::savePackageMetadata);
-    layout->addWidget(save, 0, Qt::AlignLeft);
+    auto *metadataSave = new AutoSave(page, [this] {
+        if (!populating_) savePackageMetadata();
+    });
+    for (auto *field : {packageDisplayName_, packageArchName_, packageVendorName_,
+                       packageDescription_, packageHomepage_, packageLicenses_,
+                       packageProvides_, packageConflicts_}) metadataSave->watch(field);
+
     layout->addStretch(1);
     return page;
 }
@@ -445,13 +456,11 @@ QWidget *MainWindow::createConfigScriptsPage() {
     new PkgbuildHighlighter(lifecycleView_->document());
     lifecycleView_->setMinimumHeight(140);
     editLifecycleButton_ = new QPushButton(QStringLiteral("Create Lifecycle Script"), lifecycleGroup);
-    saveLifecycleButton_ = new QPushButton(QStringLiteral("Save Script"), lifecycleGroup);
-    cancelLifecycleButton_ = new QPushButton(QStringLiteral("Cancel Edit"), lifecycleGroup);
+    cancelLifecycleButton_ = new QPushButton(QStringLiteral("Done Editing"), lifecycleGroup);
     acknowledgeLifecycleButton_ = new QPushButton(QStringLiteral("Approve Exact Arch Script"), lifecycleGroup);
     discardLifecycleButton_ = new QPushButton(QStringLiteral("Remove Lifecycle Script"), lifecycleGroup);
     auto *lifecycleButtons = new QHBoxLayout;
     lifecycleButtons->addWidget(editLifecycleButton_);
-    lifecycleButtons->addWidget(saveLifecycleButton_);
     lifecycleButtons->addWidget(cancelLifecycleButton_);
     lifecycleButtons->addStretch();
     lifecycleButtons->addWidget(discardLifecycleButton_);
@@ -482,8 +491,11 @@ QWidget *MainWindow::createConfigScriptsPage() {
         }
     });
     connect(editLifecycleButton_, &QPushButton::clicked, this, &MainWindow::beginLifecycleEdit);
-    connect(saveLifecycleButton_, &QPushButton::clicked, this, &MainWindow::saveLifecycleEdit);
-    connect(cancelLifecycleButton_, &QPushButton::clicked, this, &MainWindow::cancelLifecycleEdit);
+    auto *lifecycleSave = new AutoSave(lifecycleGroup, [this] {
+        if (!populating_ && lifecycleEditing_) saveLifecycleEdit();
+    });
+    lifecycleSave->watch(lifecycleView_);
+    connect(cancelLifecycleButton_, &QPushButton::clicked, this, &MainWindow::finishLifecycleEdit);
     connect(acknowledgeLifecycleButton_, &QPushButton::clicked, this, &MainWindow::acknowledgeLifecycleScript);
     connect(discardLifecycleButton_, &QPushButton::clicked, this, &MainWindow::discardLifecycleScript);
     return page;
@@ -599,14 +611,15 @@ QWidget *MainWindow::createAppRunPage() {
     appRunStatus_ = new QLabel(page);
     appRunStatus_->setWordWrap(true);
     restoreAppRunButton_ = new QPushButton(QStringLiteral("Restore original"), page);
-    saveAppRunButton_ = new QPushButton(QStringLiteral("Save"), page);
     auto *buttons = new QHBoxLayout;
     buttons->addWidget(appRunStatus_, 1);
     buttons->addWidget(restoreAppRunButton_);
-    buttons->addWidget(saveAppRunButton_);
     layout->addWidget(appRunEditor_, 1);
     layout->addLayout(buttons);
-    connect(saveAppRunButton_, &QPushButton::clicked, this, &MainWindow::saveAppRun);
+    auto *appRunSave = new AutoSave(page, [this] {
+        if (!populating_) saveAppRun();
+    });
+    appRunSave->watch(appRunEditor_);
     connect(keepOriginalAppRunButton_, &QPushButton::clicked, this, &MainWindow::keepOriginalAppRun);
     connect(restoreAppRunButton_, &QPushButton::clicked, this, &MainWindow::restoreOriginalAppRun);
     connect(appRunEditor_->document(), &QTextDocument::modificationChanged, this, [this](const bool modified) {
@@ -661,13 +674,11 @@ QWidget *MainWindow::createDesktopEntriesPage() {
     new DesktopEntryHighlighter(desktopEntryEditor_->document());
     desktopEntryStatus_ = new QLabel(right);
     desktopEntryStatus_->setWordWrap(true);
-    saveDesktopEntryButton_ = new QPushButton(QStringLiteral("Validate && Save"), right);
     rightLayout->addWidget(desktopEntryEnabled_);
     rightLayout->addLayout(destinationRow);
     rightLayout->addWidget(desktopEntryEditor_, 1);
     auto *saveRow = new QHBoxLayout;
     saveRow->addWidget(desktopEntryStatus_, 1);
-    saveRow->addWidget(saveDesktopEntryButton_);
     rightLayout->addLayout(saveRow);
     splitter->addWidget(left);
     splitter->addWidget(right);
@@ -676,8 +687,12 @@ QWidget *MainWindow::createDesktopEntriesPage() {
     layout->addWidget(splitter, 1);
     connect(desktopEntriesList_, &QListWidget::currentRowChanged,
             this, [this] { updateSelectedDesktopEntry(); });
-    connect(saveDesktopEntryButton_, &QPushButton::clicked,
-            this, &MainWindow::saveSelectedDesktopEntry);
+    auto *desktopSave = new AutoSave(page, [this] {
+        if (!populating_) saveSelectedDesktopEntry();
+    });
+    desktopSave->watch(desktopEntryEditor_);
+    desktopSave->watch(desktopEntryDestination_);
+    desktopSave->watch(desktopEntryEnabled_);
     connect(add, &QPushButton::clicked, this, &MainWindow::addDesktopEntry);
     connect(duplicate, &QPushButton::clicked, this, &MainWindow::duplicateDesktopEntry);
     connect(deleteDesktopEntryButton_, &QPushButton::clicked,
@@ -751,13 +766,13 @@ QWidget *MainWindow::createPkgbuildPage() {
     pkgbuildEditor_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     pkgbuildEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
     new PkgbuildHighlighter(pkgbuildEditor_->document());
-    auto *saveButton = new QPushButton(QStringLiteral("Save"), page);
+
     auto *reloadButton = new QPushButton(QStringLiteral("Reload"), page);
     auto *validateButton = new QPushButton(QStringLiteral("Validate"), page);
     auto *guidedButton = new QPushButton(QStringLiteral("Return to Guided"), page);
     pkgbuildBuildButton_ = new QPushButton(QStringLiteral("Build"), page);
     auto *buttons = new QHBoxLayout;
-    buttons->addWidget(saveButton);
+
     buttons->addWidget(reloadButton);
     buttons->addWidget(validateButton);
     buttons->addWidget(guidedButton);
@@ -768,7 +783,10 @@ QWidget *MainWindow::createPkgbuildPage() {
     layout->addWidget(pkgbuildState_);
     layout->addWidget(pkgbuildEditor_, 1);
     layout->addLayout(buttons);
-    connect(saveButton, &QPushButton::clicked, this, &MainWindow::savePkgbuild);
+    auto *recipeSave = new AutoSave(page, [this] {
+        if (!populating_) static_cast<void>(savePkgbuild());
+    });
+    recipeSave->watch(pkgbuildEditor_);
     connect(reloadButton, &QPushButton::clicked, this, &MainWindow::populatePkgbuild);
     connect(validateButton, &QPushButton::clicked, this, [this]() {
         QMessageBox::information(this, QStringLiteral("PKGBUILD validation"),
@@ -932,7 +950,6 @@ QWidget *MainWindow::createUpdatesPage() {
     updateNotice_ = new QLabel(page);
     updateNotice_->setWordWrap(true);
     updateCandidates_ = new QListWidget(page);
-    updateSaveButton_ = new QPushButton(QStringLiteral("Save Update Configuration"), page);
     updateCheckButton_ = new QPushButton(QStringLiteral("Check for Updates"), page);
     updateCheckStatus_ = new QLabel(page);
     updateCheckStatus_->setWordWrap(true);
@@ -943,14 +960,11 @@ QWidget *MainWindow::createUpdatesPage() {
     layout->addWidget(new QLabel(QStringLiteral("Detected repository/update candidates"), page));
     layout->addWidget(updateCandidates_, 1);
     auto *buttons = new QHBoxLayout;
-    buttons->addWidget(updateSaveButton_);
     buttons->addWidget(updateCheckButton_);
     buttons->addStretch();
     layout->addLayout(buttons);
     layout->addWidget(updateCheckStatus_);
-    connect(updateSaveButton_, &QPushButton::clicked, this, [this] {
-        saveUpdateConfiguration();
-    });
+
     connect(updateCheckButton_, &QPushButton::clicked, this, &MainWindow::startUpdateCheck);
     connect(keyringBrowse, &QPushButton::clicked, this, &MainWindow::importSigningKey);
     connect(aptSigningKeyDownloadButton_, &QPushButton::clicked,
@@ -1042,7 +1056,6 @@ QWidget *MainWindow::createUpdatesPage() {
         githubRepository_->setEnabled(hasRelease && github);
         githubAssetRegex_->setEnabled(hasRelease && github);
         githubPrereleases_->setEnabled(hasRelease && github);
-        updateSaveButton_->setEnabled(hasRelease);
         syncUpdateCheckButtons();
         updateNotice_->setText(index == 0 ? QStringLiteral("Manual updates: PacSmith will not query the network.")
                               : index == 1 ? QStringLiteral("Direct URL checks use HTTP validators first. Servers without usable validators require a scheduled full download and SHA256 comparison.")
@@ -1052,6 +1065,19 @@ QWidget *MainWindow::createUpdatesPage() {
     };
     connect(updateStrategy_, &QComboBox::currentIndexChanged, this, updateStrategyUi);
     updateStrategyUi(updateStrategy_->currentIndex());
+    auto *updateSave = new AutoSave(page, [this] { saveUpdateConfiguration(); });
+    for (auto *field : {updateUrl_, aptSuite_, aptComponent_, aptArchitecture_,
+                       aptPackageName_, rpmArchitecture_, rpmPackageName_,
+                       githubOwner_, githubRepository_, githubAssetRegex_, aptSigningKeyring_}) {
+        updateSave->watch(field);
+    }
+    for (auto *field : {updateStrategy_, autoBuildPolicy_, directUrlFullCheckInterval_, aptSigningKey_}) {
+        updateSave->watch(field);
+    }
+    updateSave->watch(githubPrereleases_);
+    autoBuildPolicy_->setToolTip(QStringLiteral(
+        "Automatic AI review opens the default ACP agent from the running PacSmith desktop session. "
+        "Configure an ACP executable in Settings → AI Harness."));
     connect(updateCandidates_, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem *item) {
                 auto *tracker = updateEditorRelease();
@@ -1066,11 +1092,13 @@ QWidget *MainWindow::createUpdatesPage() {
                     rpmArchitecture_->setText(candidate.architecture);
                     rpmPackageName_->setText(tracker->debian.package);
                     if (!candidate.keyUrls.isEmpty()) aptSigningKeyUrl_->setText(candidate.keyUrls.first());
+                    saveUpdateConfiguration();
                     return;
                 }
                 if (kind != QStringLiteral("apt") || candidateIndex < 0 ||
                     candidateIndex >= tracker->update.aptCandidates.size()) {
                     updateUrl_->setText(item->text());
+                    saveUpdateConfiguration();
                     return;
                 }
                 const auto &candidate = tracker->update.aptCandidates.at(candidateIndex);
@@ -1079,6 +1107,7 @@ QWidget *MainWindow::createUpdatesPage() {
                 aptSuite_->setText(candidate.suite);
                 if (!candidate.components.isEmpty()) aptComponent_->setText(candidate.components.first());
                 if (!candidate.architectures.isEmpty()) aptArchitecture_->setText(candidate.architectures.first());
+                saveUpdateConfiguration();
             });
     return page;
 }
@@ -1226,16 +1255,14 @@ QWidget *MainWindow::createRepositoryPage() {
     layout->addWidget(repoStatusLabel_);
 
     auto *buttons = new QHBoxLayout;
-    repoSaveButton_ = new QPushButton(QStringLiteral("Apply Project Repository Settings"), page);
     repoPromoteButton_ = new QPushButton(QStringLiteral("Promote to Stable"), page);
     repoPromoteButton_->setToolTip(
         QStringLiteral("Promote the newest package that would advance stable, bypassing remaining soak time. Stable is never automatically downgraded."));
-    buttons->addWidget(repoSaveButton_);
     buttons->addWidget(repoPromoteButton_);
     buttons->addStretch();
     layout->addLayout(buttons);
 
-    connect(repoSaveButton_, &QPushButton::clicked, this, &MainWindow::saveProjectRepository);
+
     connect(repoPromoteButton_, &QPushButton::clicked, this, &MainWindow::promoteProjectRepository);
     connect(repoOverrideEdit_, &QLineEdit::textChanged, this, [this](const QString &text) {
         if (populating_ || !project_ || repoEffectiveName_ == nullptr) return;
@@ -1280,6 +1307,14 @@ QWidget *MainWindow::createRepositoryPage() {
             [updateChannelControls](const bool) { updateChannelControls(); });
     connect(repoSoakOverrideCheck_, &QCheckBox::toggled, this,
             [updateChannelControls](const bool) { updateChannelControls(); });
+    auto *repositorySave = new AutoSave(page, [this] {
+        if (!populating_) static_cast<void>(saveProjectRepository());
+    });
+    repositorySave->watch(repoPublishCheck_);
+    repositorySave->watch(repoAutomaticSoakCheck_);
+    repositorySave->watch(repoSoakOverrideCheck_);
+    repositorySave->watch(repoSoakDays_);
+    repositorySave->watch(repoOverrideEdit_);
     return page;
 }
 

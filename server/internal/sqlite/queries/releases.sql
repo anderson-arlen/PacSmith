@@ -18,6 +18,22 @@ SELECT * FROM releases WHERE project_id = ? ORDER BY created_at;
 -- name: ListPreparingReleases :many
 SELECT * FROM releases WHERE state = 'preparing' ORDER BY created_at;
 
+-- name: ListStaleBuildingReleases :many
+SELECT * FROM releases
+WHERE json_extract(body_json, '$.buildStatus') = 'building'
+AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.release_id = releases.id
+                AND jobs.kind = 'build' AND jobs.status IN ('queued', 'running'));
+
+-- name: RecoverReleaseBuildState :exec
+UPDATE releases SET body_json = json_set(body_json, '$.buildStatus', sqlc.arg(status),
+                                         '$.lastBuildLog', sqlc.arg(log_text)),
+                    revision = revision + 1, modified_at = sqlc.arg(modified_at)
+WHERE id = sqlc.arg(id);
+
+-- name: InsertRecoveredBuild :exec
+INSERT OR IGNORE INTO builds (id, release_id, status, log_text, started_at, finished_at)
+VALUES (?, ?, ?, ?, ?, ?);
+
 -- name: UpdateRelease :one
 UPDATE releases
 SET state = ?,
@@ -95,7 +111,7 @@ VALUES (?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: ListBuildsForRelease :many
-SELECT * FROM builds WHERE release_id = ? ORDER BY started_at;
+SELECT * FROM builds WHERE release_id = ? ORDER BY COALESCE(started_at, finished_at), id;
 
 -- name: InsertBuildArtifact :exec
 INSERT OR IGNORE INTO build_artifacts (build_id, artifact_id)

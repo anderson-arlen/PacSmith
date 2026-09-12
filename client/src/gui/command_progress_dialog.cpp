@@ -47,6 +47,10 @@ CommandProgressDialog::CommandProgressDialog(QWidget *parent) : QDialog(parent) 
 
     elapsed_ = new QLabel(QStringLiteral("Elapsed: 0s"), this);
     layout->addWidget(elapsed_);
+    started_ = new QLabel(this);
+    started_->setObjectName(QStringLiteral("buildStartedAt"));
+    started_->hide();
+    layout->addWidget(started_);
 
     detailsToggle_ = new QToolButton(this);
     detailsToggle_->setText(QStringLiteral("Show Details"));
@@ -70,7 +74,6 @@ CommandProgressDialog::CommandProgressDialog(QWidget *parent) : QDialog(parent) 
     auto *buttons = new QDialogButtonBox(this);
     cancelButton_ = buttons->addButton(QDialogButtonBox::Cancel);
     closeButton_ = buttons->addButton(QDialogButtonBox::Close);
-    closeButton_->setVisible(false);
     closeButton_->setDefault(true);
     layout->addWidget(buttons);
 
@@ -87,7 +90,7 @@ CommandProgressDialog::CommandProgressDialog(QWidget *parent) : QDialog(parent) 
     timer_ = new QTimer(this);
     timer_->setInterval(1000);
     connect(timer_, &QTimer::timeout, this, [this] {
-        elapsed_->setText(elapsedText(elapsedTimer_.elapsed()));
+        updateElapsed();
     });
     timer_->start();
 }
@@ -103,8 +106,9 @@ void CommandProgressDialog::appendOutput(const QString &text) {
     output_->moveCursor(QTextCursor::End);
 }
 
-void CommandProgressDialog::setCancelable(const bool cancelable) {
+void CommandProgressDialog::setCancelable(const bool cancelable, const QString &label) {
     cancelable_ = cancelable;
+    cancelButton_->setText(label);
     cancelButton_->setVisible(!finished_ && cancelable_);
     cancelButton_->setEnabled(!finished_ && cancelable_);
 }
@@ -113,7 +117,7 @@ void CommandProgressDialog::markFinished(const bool success, const QString &summ
     finished_ = true;
     cancelable_ = false;
     timer_->stop();
-    elapsed_->setText(elapsedText(elapsedTimer_.elapsed()));
+    updateElapsed();
     progress_->setRange(0, 1);
     progress_->setValue(success ? 1 : 0);
     status_->setText(summary);
@@ -123,21 +127,30 @@ void CommandProgressDialog::markFinished(const bool success, const QString &summ
     closeButton_->setFocus();
 }
 
-void CommandProgressDialog::closeEvent(QCloseEvent *event) {
-    if (finished_) {
-        event->accept();
-        return;
-    }
-    if (cancelable_) emit cancelRequested();
-    event->ignore();
+void CommandProgressDialog::setJobTiming(const QDateTime &startedAt, const QDateTime &finishedAt) {
+    jobTiming_ = true;
+    startedAt_ = startedAt;
+    finishedAt_ = finishedAt;
+    started_->setText(startedAt.isValid()
+        ? QStringLiteral("Started: %1").arg(startedAt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t")))
+        : QStringLiteral("Started: not yet"));
+    started_->show();
+    updateElapsed();
 }
 
-void CommandProgressDialog::reject() {
-    if (finished_) {
-        QDialog::reject();
-        return;
+void CommandProgressDialog::updateElapsed() {
+    if (!jobTiming_) {
+        elapsed_->setText(elapsedText(elapsedTimer_.elapsed()));
+    } else if (!startedAt_.isValid()) {
+        elapsed_->setText(QStringLiteral("Elapsed: waiting for build start"));
+    } else {
+        const auto end = finishedAt_.isValid() ? finishedAt_ : QDateTime::currentDateTimeUtc();
+        elapsed_->setText(elapsedText(qMax<qint64>(0, startedAt_.msecsTo(end))));
     }
-    if (cancelable_) emit cancelRequested();
+}
+
+void CommandProgressDialog::showDetails() {
+    detailsToggle_->setChecked(true);
 }
 
 void CommandProgressDialog::applyDetailsVisibility(const bool shown) {

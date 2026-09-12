@@ -1134,11 +1134,8 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string,
 		}
 		return result, fmt.Errorf("makepkg failed")
 	}
-	entries, _ := filepath.Glob(filepath.Join(work, "*.pkg.tar.*"))
+	entries := builtPackagePaths(work, link, source.SHA256)
 	for _, path := range entries {
-		if strings.HasSuffix(path, ".sig") {
-			continue
-		}
 		file, err := os.Open(path)
 		if err != nil {
 			continue
@@ -1179,6 +1176,39 @@ func (s *Service) BuildRelease(ctx context.Context, releaseID string,
 		}
 	}
 	return result, nil
+}
+
+func builtPackagePaths(work, sourcePath, sourceSHA256 string) []string {
+	entries, _ := filepath.Glob(filepath.Join(work, "*.pkg.tar.*"))
+	packages := make([]string, 0, len(entries))
+	for _, path := range entries {
+		if strings.HasSuffix(path, ".sig") {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if filepath.Clean(path) == filepath.Clean(sourcePath) &&
+			fileMatchesSHA256(path, sourceSHA256) {
+			continue
+		}
+		packages = append(packages, path)
+	}
+	return packages
+}
+
+func fileMatchesSHA256(path, expected string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == strings.ToLower(expected)
 }
 
 func resetBuildWorkspace(work string, preserveCustomSources bool) error {

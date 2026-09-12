@@ -369,12 +369,12 @@ func selectRelease(releases []apiRelease, request ResolveRequest, owner, reposit
 		if result.UpdateAvailable {
 			result.Message = fmt.Sprintf("GitHub release %s is available (%s)", result.Tag, result.Filename)
 			if fallback {
-				result.Message = fmt.Sprintf("No matching stable release is available; GitHub prerelease %s is available (%s)", result.Tag, result.Filename)
+				result.Message = fmt.Sprintf("GitHub prerelease %s is available (%s)", result.Tag, result.Filename)
 			}
 		} else {
 			result.Message = fmt.Sprintf("GitHub release %s is current", result.Tag)
 			if fallback {
-				result.Message = fmt.Sprintf("No matching stable release is available; GitHub prerelease %s is current", result.Tag)
+				result.Message = fmt.Sprintf("GitHub prerelease %s is current", result.Tag)
 			}
 		}
 		return result, nil

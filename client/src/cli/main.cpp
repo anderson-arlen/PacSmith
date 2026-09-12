@@ -398,7 +398,22 @@ int main(int argc, char *argv[]) {
         if (!QFileInfo::exists(program)) program = QStringLiteral("pacsmith-gui");
         return QProcess::startDetached(program, {}) ? 0 : 1;
     }
-    pacsmith::LibraryClient library;
+    auto connection = pacsmith::ConnectionConfig::load();
+    if (command == QStringLiteral("mcp") && qEnvironmentVariableIsSet("PACSMITH_MCP_MODE")) {
+        const auto mode = qEnvironmentVariable("PACSMITH_MCP_MODE");
+        if (mode != QStringLiteral("local") && mode != QStringLiteral("remote")) {
+            errorStream << "error: invalid session MCP connection mode\n";
+            return 1;
+        }
+        connection.mode = mode == QStringLiteral("local") ? pacsmith::ConnectionConfig::Mode::Local
+                                                          : pacsmith::ConnectionConfig::Mode::Remote;
+        connection.socketPath = qEnvironmentVariable("PACSMITH_MCP_SOCKET");
+        connection.remoteUrl = QUrl(qEnvironmentVariable("PACSMITH_MCP_URL"));
+        connection.serverCaPath = qEnvironmentVariable("PACSMITH_MCP_CA");
+        connection.clientCertPath = qEnvironmentVariable("PACSMITH_MCP_CERT");
+        connection.clientKeyPath = qEnvironmentVariable("PACSMITH_MCP_KEY");
+    }
+    pacsmith::LibraryClient library(connection);
     QString runtimeError;
     if (!pacsmith::applyLibraryRuntime(library.config(), &runtimeError)) {
         errorStream << "error: " << runtimeError << '\n';
@@ -848,8 +863,9 @@ int main(int argc, char *argv[]) {
         }
         QString error;
         QString packagePath;
-        if (!release->builtArtifactIds.isEmpty()) {
-            packagePath = library.cacheArtifact(release->builtArtifactIds.first(),
+        const auto artifactId = release->preferredBuiltArtifactId();
+        if (!artifactId.isEmpty()) {
+            packagePath = library.cacheArtifact(artifactId,
                                                 QStringLiteral("package.pkg.tar.zst"), &error);
         } else if (!release->producedPackages.isEmpty()) packagePath = release->producedPackages.first();
         if (packagePath.isEmpty()) {

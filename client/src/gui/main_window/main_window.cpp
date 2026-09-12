@@ -1,13 +1,56 @@
 #include "gui/main_window/common.hpp"
 #include "core/daemon_control.hpp"
 #include "gui/connection_dialog.hpp"
+#include "gui/appearance.hpp"
 
 #include <QFontMetrics>
 #include <QFileSystemWatcher>
+#include <QIconEngine>
+#include <QDockWidget>
 #include <QProgressBar>
 
 namespace pacsmith::gui {
 namespace {
+
+class AiSparklesIcon final : public QIconEngine {
+public:
+    QIconEngine *clone() const override { return new AiSparklesIcon; }
+
+    void paint(QPainter *painter, const QRect &rect, QIcon::Mode mode, QIcon::State) override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->translate(rect.topLeft());
+        painter->scale(rect.width() / 24.0, rect.height() / 24.0);
+        const bool dark = QApplication::palette().color(QPalette::Button).lightness() < 128;
+        const QList<QPair<QRectF, QColor>> sparkles{
+            {QRectF(1, 7, 14, 16), QColor(dark ? "#A78BFA" : "#7C3AED")},
+            {QRectF(16, 1, 7, 8), QColor(dark ? "#60A5FA" : "#2563EB")},
+            {QRectF(18, 15, 5, 6), QColor(dark ? "#2DD4BF" : "#0D9488")}};
+        painter->setPen(Qt::NoPen);
+        for (const auto &[spark, color] : sparkles) {
+            painter->setBrush(mode == QIcon::Disabled
+                ? QApplication::palette().color(QPalette::Disabled, QPalette::ButtonText)
+                : color);
+            const auto center = spark.center();
+            const auto dx = spark.width() * 0.15;
+            const auto dy = spark.height() * 0.15;
+            painter->drawPolygon(QPolygonF{
+                {center.x(), spark.top()}, {center.x() + dx, center.y() - dy},
+                {spark.right(), center.y()}, {center.x() + dx, center.y() + dy},
+                {center.x(), spark.bottom()}, {center.x() - dx, center.y() + dy},
+                {spark.left(), center.y()}, {center.x() - dx, center.y() - dy}});
+        }
+        painter->restore();
+    }
+
+    QPixmap pixmap(const QSize &size, QIcon::Mode mode, QIcon::State state) override {
+        QPixmap result(size);
+        result.fill(Qt::transparent);
+        QPainter painter(&result);
+        paint(&painter, QRect(QPoint(), size), mode, state);
+        return result;
+    }
+};
 
 struct LibrarySettingsLoadResult {
     std::optional<LibrarySettings> settings;
@@ -29,21 +72,19 @@ bool sameBackgroundSettings(const BackgroundUpdateSettings &left,
            left.retentionVersions == right.retentionVersions;
 }
 
-bool sameHarnessProfiles(const QList<HarnessProfile> &left,
-                         const QList<HarnessProfile> &right) {
-    if (left.size() != right.size()) return false;
-    for (qsizetype index = 0; index < left.size(); ++index) {
-        const auto &a = left.at(index);
-        const auto &b = right.at(index);
-        if (a.name != b.name || a.executable != b.executable ||
-            a.arguments != b.arguments || a.isDefault != b.isDefault) return false;
-    }
-    return true;
+bool sameHarness(const std::optional<HarnessProfile> &left, const std::optional<HarnessProfile> &right) {
+    if (left.has_value() != right.has_value()) return false;
+    if (!left) return true;
+    const auto &a = *left;
+    const auto &b = *right;
+    return a.name == b.name && a.executable == b.executable && a.arguments == b.arguments &&
+        a.registryId == b.registryId && a.registryVersion == b.registryVersion &&
+        a.environment == b.environment && a.configDefaults == b.configDefaults;
 }
 
 bool sameAppSettings(const AppSettings &left, const AppSettings &right) {
     return sameBackgroundSettings(left.updates, right.updates) &&
-           sameHarnessProfiles(left.harnessProfiles, right.harnessProfiles) &&
+           sameHarness(left.harness, right.harness) &&
            left.githubTokenConfigured == right.githubTokenConfigured &&
            left.debAssociationPrompted == right.debAssociationPrompted &&
            left.selfTrackingPrompted == right.selfTrackingPrompted;
@@ -78,6 +119,7 @@ QWidget *scrollablePage(QWidget *content, QWidget *parent) {
 MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     : QMainWindow(parent), settingsStore_(settingsStore), appSettings_(settingsStore_.load()),
       buildService_(this), installService_(this), signingKeyDownloadService_(this) {
+    installPaneResizeStyle();
     setWindowTitle(QStringLiteral("PacSmith"));
     setAcceptDrops(true);
     clientSettingsWatcher_ = new QFileSystemWatcher(this);
@@ -187,7 +229,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     newButton->setMenu(sidebarNewMenu);
     newButton->setToolTip(QStringLiteral("Create a project from a repository, GitHub release, package file, or direct download URL"));
     auto *settingsButton = new QPushButton(QStringLiteral("Settings"), leftPanel);
-    settingsButton->setToolTip(QStringLiteral("Configure external AI harnesses, update checks, remote listening, and credentials"));
+    settingsButton->setToolTip(QStringLiteral("Configure ACP agents, update checks, remote listening, and credentials"));
     leftLayout->addLayout(packagesHeader);
     leftLayout->addWidget(projectList_, 1);
     auto *projectButtons = new QHBoxLayout;
@@ -323,9 +365,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     reanalyzeButton_->setToolTip(QStringLiteral(
         "Discard this release's package-setup decisions and rebuild them from the stored artifact"));
     workbenchHeader->addWidget(reanalyzeButton_, 0, Qt::AlignTop);
-    askAiButton_ = new QPushButton(QStringLiteral("Ask AI…"), workbench);
-    askAiButton_->setToolTip(QStringLiteral("Launch your configured external AI harness with this PacSmith context"));
-    workbenchHeader->addWidget(askAiButton_, 0, Qt::AlignTop);
     stageTabs_ = new QTabWidget(workbench);
     auto *sourceHost = createStageHost(&sourceNav_, &sourceStack_);
     auto *modeSwitch = new QWidget(workbench);
@@ -423,7 +462,6 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     workbenchLayout->addWidget(stageTabs_, 1);
     connect(backButton, &QPushButton::clicked, this, &MainWindow::showProjectDashboard);
     connect(reanalyzeButton_, &QPushButton::clicked, this, &MainWindow::startReanalysis);
-    connect(askAiButton_, &QPushButton::clicked, this, &MainWindow::askExternalHarness);
     connect(stageTabs_, &QTabWidget::currentChanged, this, [this] {
         updateWorkbenchStageChrome();
         if (rightStack_ != nullptr && rightStack_->currentIndex() == 1) {
@@ -774,8 +812,9 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     auto *connectionSlotLayout = new QHBoxLayout(connectionSlot);
     constexpr int kConnectionPad = 8;
     connectionSlotLayout->setContentsMargins(0, kConnectionPad, kConnectionPad, kConnectionPad);
-    connectionSlotLayout->setSpacing(0);
+    connectionSlotLayout->setSpacing(6);
     connectionButton_ = new QPushButton(connectionSlot);
+    connectionButton_->setObjectName(QStringLiteral("libraryConnection"));
     connectionButton_->setCursor(Qt::PointingHandCursor);
     connectionButton_->setFocusPolicy(Qt::TabFocus);
     connectionButton_->setAutoDefault(false);
@@ -785,6 +824,22 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     connectionButton_->setToolTip(
         QStringLiteral("Library connection. Click to switch between this computer and a remote host."));
     connectionSlotLayout->addWidget(connectionButton_);
+    askAiButton_ = new QPushButton(QStringLiteral("Ask AI"), connectionSlot);
+    askAiButton_->setObjectName(QStringLiteral("globalAskAi"));
+    askAiButton_->setAccessibleName(QStringLiteral("Ask AI"));
+    askAiButton_->setIcon(QIcon(new AiSparklesIcon));
+    askAiButton_->setIconSize(QSize(18, 18));
+    askAiButton_->setCursor(Qt::PointingHandCursor);
+    askAiButton_->setAutoDefault(false);
+    askAiButton_->setCheckable(true);
+    askAiButton_->setToolTip(QStringLiteral("Show or hide AI chat (Ctrl+Shift+Space)"));
+    askAiButton_->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+Space")));
+    connectionSlotLayout->addWidget(askAiButton_);
+    connect(askAiButton_, &QPushButton::clicked, this, [this](bool checked) {
+        if (checked) askExternalHarness();
+        else if (aiDock_ != nullptr) aiDock_->hide();
+        askAiButton_->setChecked(aiDock_ != nullptr && aiDock_->isVisible());
+    });
     statusBar()->addPermanentWidget(connectionSlot);
     connect(connectionButton_, &QPushButton::clicked, this, &MainWindow::showConnectionDialog);
     connectionStatusTimer_ = new QTimer(this);

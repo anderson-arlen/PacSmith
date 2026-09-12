@@ -3,6 +3,7 @@
 #include "core/managed_package.hpp"
 #include "core/path_safety.hpp"
 #include "core/payload_review.hpp"
+#include "core/project_store/internal.hpp"
 
 #include <algorithm>
 #include <QDir>
@@ -232,6 +233,21 @@ std::optional<Project> LibraryClient::load(const QString &idOrName, QString *err
     auto project = projectFromObject(*this, *object, true);
     static_cast<void>(reconcileInstalled(project, nullptr));
     return project;
+}
+
+std::optional<PackageRelease> LibraryClient::setAutomaticUpdateStatus(
+    const PackageRelease &release, const QString &status, const QString &message,
+    QString *error) const {
+    auto update = release.toJson().value(QStringLiteral("update")).toObject();
+    update.insert(QStringLiteral("lastAutomaticStatus"), status);
+    update.insert(QStringLiteral("lastAutomaticMessage"), message);
+    const auto saved = sendJson(QStringLiteral("PATCH"),
+        QStringLiteral("/api/v1/releases/") + release.id + QStringLiteral("/configuration"),
+        {{QStringLiteral("revision"), release.revision},
+         {QStringLiteral("configuration"), QJsonObject{{QStringLiteral("update"), update}}}},
+        error, 200);
+    if (!saved) return std::nullopt;
+    return PackageRelease::fromJson(*saved);
 }
 
 bool LibraryClient::save(Project &project, QString *error) const {
@@ -610,6 +626,8 @@ std::optional<JobStatus> LibraryClient::getJob(const QString &jobId, QString *er
     job.failedItems = object->value(QStringLiteral("failed_items")).toInteger();
     job.pausedItems = object->value(QStringLiteral("paused_items")).toInteger();
     job.result = object->value(QStringLiteral("result")).toObject();
+    job.startedAt = QDateTime::fromString(object->value(QStringLiteral("started_at")).toString(), Qt::ISODateWithMs);
+    job.finishedAt = QDateTime::fromString(object->value(QStringLiteral("finished_at")).toString(), Qt::ISODateWithMs);
     return job;
 }
 
@@ -635,6 +653,8 @@ QList<JobStatus> LibraryClient::activeJobs(const QString &kind, QString *error) 
         job.failedItems = value.value(QStringLiteral("failed_items")).toInteger();
         job.pausedItems = value.value(QStringLiteral("paused_items")).toInteger();
         job.result = value.value(QStringLiteral("result")).toObject();
+        job.startedAt = QDateTime::fromString(value.value(QStringLiteral("started_at")).toString(), Qt::ISODateWithMs);
+        job.finishedAt = QDateTime::fromString(value.value(QStringLiteral("finished_at")).toString(), Qt::ISODateWithMs);
         result.append(std::move(job));
     }
     return result;
@@ -1040,6 +1060,10 @@ bool LibraryClient::reconcileInstalled(
     if (project.installedVersion.isEmpty()) return true;
     if (installed->projectId() == project.id) {
         project.installedReleaseId = installed->releaseId();
+    } else if (installed->projectId().isEmpty()) {
+        project.installedReleaseId = project_store_internal::installedReleaseIdForVersion(
+            project, project.installedVersion);
+        project.externallyInstalled = project.installedReleaseId.isEmpty();
     } else {
         project.externallyInstalled = true;
     }

@@ -17,6 +17,20 @@ import (
 	"github.com/anderson-arlen/pacsmith/server/internal/updatecheck"
 )
 
+func TestAIReviewIsReportedWithoutPausingAutomaticHandling(t *testing.T) {
+	result := updatecheck.BatchResult{Checks: []updatecheck.Result{
+		{Status: "no-update", AutomaticStatus: "ai-pending"},
+		{Status: "no-update", AutomaticStatus: "ai-reviewing"},
+	}}
+	if updatePausedCount(result) != 0 {
+		t.Fatal("AI handoff counted as paused")
+	}
+	summary := updateBatchSummary(result)
+	if !strings.Contains(summary, "2 awaiting or undergoing AI review") || strings.Contains(summary, "paused") {
+		t.Fatalf("summary = %q", summary)
+	}
+}
+
 func TestScheduledUpdateCheckRunsCleanup(t *testing.T) {
 	for _, test := range []struct {
 		name      string

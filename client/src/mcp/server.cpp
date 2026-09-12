@@ -1,4 +1,5 @@
 #include "mcp/server.hpp"
+#include "core/acp_conversations.hpp"
 
 #include "core/background_updates.hpp"
 #include "core/domain_validation.hpp"
@@ -133,6 +134,9 @@ QJsonArray tools() {
     const auto sensitive = annotations(false, true, false, false);
     const auto sensitiveWrite = annotations(false, true, true, false);
     QJsonArray catalog{
+        tool(QStringLiteral("set_session_description"),
+             QStringLiteral("Name the current AI session as one of your first actions, using a short description of the initiating request and package context. Only affects the session assigned by PacSmith."),
+             objectSchema({{QStringLiteral("description"), stringProperty(QStringLiteral("A specific title of 1–120 characters."))}}, {QStringLiteral("description")}), write),
         tool(QStringLiteral("list_projects"),
              QStringLiteral("List or search PacSmith projects with release summaries. Uses the configured PacSmith server connection."),
              objectSchema({{QStringLiteral("query"), stringProperty(QStringLiteral("Optional case-insensitive name or identity filter."))}}), read),
@@ -254,24 +258,14 @@ QJsonArray tools() {
         tool(QStringLiteral("set_github_credential"), QStringLiteral("Store or replace pacsmithd's GitHub token. Marked destructive for MCP host approval; PacSmith never echoes the secret."),
              objectSchema({{QStringLiteral("token"), stringProperty(QStringLiteral("GitHub access token."))}}, {QStringLiteral("token")}), sensitiveWrite),
         tool(QStringLiteral("delete_github_credential"), QStringLiteral("Delete pacsmithd's stored GitHub token. Marked destructive for MCP host approval."), objectSchema(), sensitiveWrite),
-        tool(QStringLiteral("list_harness_profiles"),
-             QStringLiteral("List the generic external AI harness launch profiles configured for this PacSmith client."),
-             objectSchema(), read),
-        tool(QStringLiteral("upsert_harness_profile"),
-             QStringLiteral("Create or replace a generic external AI harness launch profile using a structured executable and argument array. A terminal or TUI harness must use a visible terminal emulator as the executable, with the emulator's execute arguments and harness command as separate argv entries. Use {prompt} inside an argument to pass PacSmith's contextual prompt without a shell."),
-             objectSchema({{QStringLiteral("name"), stringProperty(QStringLiteral("User-visible profile name."))},
-                           {QStringLiteral("executable"), stringProperty(QStringLiteral("Executable name or absolute path; use the terminal emulator for a terminal/TUI harness, never a shell command string."))},
-                           {QStringLiteral("arguments"), stringArrayProperty(QStringLiteral("Exact argv entries. For a terminal/TUI harness these include the emulator's execute arguments followed by the harness command and its arguments. An entry may contain {prompt}."))},
-                           {QStringLiteral("default"), booleanProperty(QStringLiteral("Make this the default launch profile."))}},
+        tool(QStringLiteral("get_ai_harness"), QStringLiteral("Read the single AI harness configured for this PacSmith client."), objectSchema(), read),
+        tool(QStringLiteral("set_ai_harness"), QStringLiteral("Configure or replace the single ACP stdio executable used for chats and automatic reviews."),
+             objectSchema({{QStringLiteral("name"), stringProperty(QStringLiteral("Agent name."))},
+                           {QStringLiteral("executable"), stringProperty(QStringLiteral("ACP executable, not a shell command."))},
+                           {QStringLiteral("arguments"), stringArrayProperty(QStringLiteral("Separate executable arguments."))}},
                           {QStringLiteral("name"), QStringLiteral("executable"), QStringLiteral("arguments")}), write),
-        tool(QStringLiteral("remove_harness_profile"),
-             QStringLiteral("Remove a generic external AI harness launch profile from the same client settings edited by PacSmith's GUI."),
-             objectSchema({{QStringLiteral("name"), stringProperty(QStringLiteral("Exact profile name."))}},
-                          {QStringLiteral("name")}), annotations(false, true, true, false)),
-        tool(QStringLiteral("set_default_harness_profile"),
-             QStringLiteral("Select which configured generic external AI harness profile PacSmith launches by default."),
-             objectSchema({{QStringLiteral("name"), stringProperty(QStringLiteral("Exact profile name."))}},
-                          {QStringLiteral("name")}), write),
+        tool(QStringLiteral("clear_ai_harness"), QStringLiteral("Remove the configured AI harness from this client's settings."),
+             objectSchema(), annotations(false, true, true, false)),
         tool(QStringLiteral("import_artifact"), QStringLiteral("Create or update a project by uploading and inspecting a local first-party vendor artifact through the normal PacSmith HTTP API. For a manual update, select the existing project and supply a version when the artifact does not identify itself."),
              objectSchema({{QStringLiteral("path"), stringProperty(QStringLiteral("Absolute local path to a vendor artifact."))},
                            {QStringLiteral("existing_project"), project},
@@ -788,6 +782,14 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     QString error;
     const auto fail = [&](const QString &message) { return toolError(id, message); };
 
+    if (name == QStringLiteral("set_session_description")) {
+        const auto directory = qEnvironmentVariable("PACSMITH_CONVERSATION_DIRECTORY");
+        const auto key = qEnvironmentVariable("PACSMITH_CONVERSATION_KEY");
+        if (directory.isEmpty() || key.isEmpty()) return fail(QStringLiteral("No PacSmith chat session is attached to this MCP connection."));
+        const AcpConversations conversations(directory);
+        if (!conversations.describe(key, args.value(QStringLiteral("description")).toString(), &error)) return fail(error);
+        return toolResult(id, QJsonObject{{QStringLiteral("description"), conversations.description(key)}});
+    }
     if (name == QStringLiteral("list_projects")) {
         const auto query = argumentString(args, QStringLiteral("query"));
         QJsonArray result;
@@ -1031,49 +1033,31 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         return library_.deleteCredential(QStringLiteral("github.token"), &error)
             ? toolResult(id, QJsonObject{{QStringLiteral("configured"), false}}) : fail(error);
     }
-    if (name == QStringLiteral("list_harness_profiles")) {
-        const AppSettingsStore store;
-        const auto settings = store.load(&error);
+    if (name == QStringLiteral("get_ai_harness")) {
+        const auto settings = AppSettingsStore{}.load(&error);
         if (!error.isEmpty()) return fail(error);
-        QJsonArray result;
-        for (const auto &profile : settings.harnessProfiles) {
-            QJsonArray arguments;
-            for (const auto &argument : profile.arguments) arguments.append(argument);
-            result.append(QJsonObject{{QStringLiteral("name"), profile.name},
-                                      {QStringLiteral("executable"), profile.executable},
-                                      {QStringLiteral("arguments"), arguments},
-                                      {QStringLiteral("default"), profile.isDefault}});
-        }
-        return toolResult(id, result);
+        if (!settings.harness) return toolResult(id, QJsonObject{{QStringLiteral("configured"), false}});
+        const auto &harness = *settings.harness;
+        QJsonArray arguments;
+        for (const auto &argument : harness.arguments) arguments.append(argument);
+        return toolResult(id, QJsonObject{{QStringLiteral("configured"), true}, {QStringLiteral("name"), harness.name},
+            {QStringLiteral("executable"), harness.executable}, {QStringLiteral("arguments"), arguments},
+            {QStringLiteral("protocol"), QStringLiteral("acp")}});
     }
-    if (name == QStringLiteral("upsert_harness_profile")) {
-        HarnessProfile profile;
-        profile.name = argumentString(args, QStringLiteral("name"));
-        profile.executable = argumentString(args, QStringLiteral("executable"));
+    if (name == QStringLiteral("set_ai_harness")) {
+        HarnessProfile harness;
+        harness.name = argumentString(args, QStringLiteral("name"));
+        harness.executable = argumentString(args, QStringLiteral("executable"));
         for (const auto &argument : args.value(QStringLiteral("arguments")).toArray()) {
             if (!argument.isString()) return fail(QStringLiteral("Every harness argument must be a string"));
-            profile.arguments.append(argument.toString());
+            harness.arguments.append(argument.toString());
         }
-        profile.isDefault = args.value(QStringLiteral("default")).toBool(false);
-        const AppSettingsStore store;
-        if (!store.upsertHarnessProfile(profile, &error)) return fail(error);
-        return toolResult(id, QJsonObject{{QStringLiteral("name"), profile.name},
-                                          {QStringLiteral("configured"), true},
-                                          {QStringLiteral("default"), profile.isDefault}});
+        if (!AppSettingsStore{}.setHarness(harness, &error)) return fail(error);
+        return toolResult(id, QJsonObject{{QStringLiteral("name"), harness.name}, {QStringLiteral("configured"), true}});
     }
-    if (name == QStringLiteral("remove_harness_profile")) {
-        const auto profileName = argumentString(args, QStringLiteral("name"));
-        const AppSettingsStore store;
-        if (!store.removeHarnessProfile(profileName, &error)) return fail(error);
-        return toolResult(id, QJsonObject{{QStringLiteral("name"), profileName},
-                                          {QStringLiteral("removed"), true}});
-    }
-    if (name == QStringLiteral("set_default_harness_profile")) {
-        const auto profileName = argumentString(args, QStringLiteral("name"));
-        const AppSettingsStore store;
-        if (!store.setDefaultHarnessProfile(profileName, &error)) return fail(error);
-        return toolResult(id, QJsonObject{{QStringLiteral("name"), profileName},
-                                          {QStringLiteral("default"), true}});
+    if (name == QStringLiteral("clear_ai_harness")) {
+        if (!AppSettingsStore{}.clearHarness(&error)) return fail(error);
+        return toolResult(id, QJsonObject{{QStringLiteral("configured"), false}});
     }
     if (name == QStringLiteral("get_build_job")) {
         const auto job = library_.getJob(argumentString(args, QStringLiteral("job_id")), &error);

@@ -1,17 +1,13 @@
 #include "gui/main_window/common.hpp"
+#include "gui/auto_save.hpp"
 #include "gui/future_button_guard.hpp"
 #include "gui/appearance.hpp"
+#include "gui/acp_registry_dialog.hpp"
+#include "gui/agent_settings_dialog.hpp"
+#include "gui/chat_icons.hpp"
 
 namespace pacsmith::gui {
 namespace {
-
-QString secretBackendLabel(const QString &backend) {
-    if (backend == QStringLiteral("secret-service")) return QStringLiteral("Desktop Secret Service");
-    if (backend == QStringLiteral("file")) return QStringLiteral("Protected file on the library host");
-    if (backend == QStringLiteral("env")) return QStringLiteral("Process environment on the library host");
-    if (backend.isEmpty()) return QStringLiteral("Not initialized");
-    return backend;
-}
 
 void setLinkedLabel(QLabel *label, const QString &html) {
     label->setTextFormat(Qt::RichText);
@@ -246,19 +242,6 @@ void MainWindow::showSettings() {
     const bool localAdmin = currentConnection.mode == ConnectionConfig::Mode::Local;
     std::optional<ServerInfo> info;
     QString infoError;
-    auto *secretsGroup = new QGroupBox(QStringLiteral("Library secrets"), generalPage);
-    auto *secretsForm = new QFormLayout(secretsGroup);
-    secretsForm->addRow(settingsSectionHelp(secretsGroup,
-                                            QStringLiteral("GitHub tokens are stored by pacsmithd."),
-                                            QStringLiteral("The daemon chose its secret backend on first start. This "
-                                                           "client never reads stored secret values back.")));
-    auto *backendLabel = new QLabel(localAdmin ? secretBackendLabel(info ? info->secretBackend : QString{})
-                                               : QStringLiteral("Stored on the remote library host"),
-                                    secretsGroup);
-    backendLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    secretsForm->addRow(QStringLiteral("Backend"), backendLabel);
-    generalLayout->addWidget(secretsGroup);
-
     auto *githubGroup = new QGroupBox(QStringLiteral("GitHub"), generalPage);
     auto *githubForm = new QFormLayout(githubGroup);
     auto *githubToken = new QLineEdit(githubGroup);
@@ -278,150 +261,108 @@ void MainWindow::showSettings() {
     settingsTabs->addTab(generalPage, QStringLiteral("General"));
 
     auto *harnessPage = new QWidget(settingsTabs);
+    harnessPage->setObjectName(QStringLiteral("aiHarnessPage"));
     auto *harnessLayout = new QVBoxLayout(harnessPage);
-    auto *harnessGroup = new QGroupBox(QStringLiteral("External AI harnesses"), harnessPage);
+    auto *harnessGroup = new QWidget(harnessPage);
     auto *harnessGroupLayout = new QVBoxLayout(harnessGroup);
+    harnessGroupLayout->setContentsMargins(0, 0, 0, 0);
     harnessGroupLayout->addWidget(settingsSectionHelp(
-        harnessGroup, QStringLiteral("PacSmith launches your AI harness; it does not provide an AI model or chat."),
-        QStringLiteral("`pacsmith plugin path` reports the portable Agent Plugin containing both "
-                       "the Skill and MCP declaration. Install and approve it through the harness's "
-                       "own plugin controls. `pacsmith skill install` remains available for harnesses "
-                       "that only discover shared Agent Skills. Arguments are passed directly "
-                       "without a shell. Put {prompt} in an argument to receive PacSmith context. "
-                       "For a terminal harness, use a terminal emulator as the executable and put "
-                       "its execute arguments followed by the harness command in Arguments.")));
+        harnessGroup, QStringLiteral("Choose the AI harness used for chats and automatic reviews."),
+        QStringLiteral("Choose an agent from the official ACP registry, or enter an installed ACP executable. Registry agents use their declared npm or uvx package version. PacSmith supplies its MCP connection automatically. "
+                       "Arguments are passed directly, one per line, without a shell or {prompt}. Codex uses separate "
+                       "PacSmith storage for sessions, history, and its SQLite index; only your login credential file is shared.")));
     auto *harnessForm = new QFormLayout;
-    auto *harnessSelector = new QComboBox(harnessGroup);
-    auto *harnessName = new QLineEdit(harnessGroup);
+    auto *registrySource = new QLabel(harnessGroup);
+    registrySource->setTextFormat(Qt::PlainText);
+    registrySource->setWordWrap(true);
+    auto *sourceRow = new QWidget(harnessGroup);
+    auto *sourceLayout = new QHBoxLayout(sourceRow);
+    sourceLayout->setContentsMargins(0, 0, 0, 0);
+    sourceLayout->addWidget(registrySource, 1);
+    auto *browseRegistry = new QPushButton(QStringLiteral("Browse ACP registry"), sourceRow);
+    browseRegistry->setObjectName(QStringLiteral("browseAcpRegistry"));
+    sourceLayout->addWidget(browseRegistry);
+    auto *agentRow = new QWidget(harnessGroup);
+    auto *agentLayout = new QHBoxLayout(agentRow);
+    agentLayout->setContentsMargins(0, 0, 0, 0);
+    auto *harnessName = new QLineEdit(agentRow);
+    harnessName->setObjectName(QStringLiteral("harnessName"));
+    harnessName->setPlaceholderText(QStringLiteral("Agent name"));
+    agentLayout->addWidget(harnessName, 1);
+    auto *agentSettings = new QPushButton(agentRow);
+    agentSettings->setObjectName(QStringLiteral("harnessAgentSettings"));
+    agentSettings->setIcon(chatIcon(ChatIcon::Settings));
+    agentSettings->setIconSize(QSize(22, 22));
+    agentSettings->setFixedSize(32, 32);
+    agentSettings->setFlat(true);
+    agentSettings->setAccessibleName(QStringLiteral("Agent settings"));
+    agentSettings->setToolTip(QStringLiteral("Agent settings"));
+    agentLayout->addWidget(agentSettings);
     auto *harnessExecutable = new QLineEdit(harnessGroup);
+    harnessExecutable->setObjectName(QStringLiteral("harnessExecutable"));
     harnessExecutable->setPlaceholderText(QStringLiteral("Executable name or absolute path"));
     auto *harnessArguments = new QPlainTextEdit(harnessGroup);
-    harnessArguments->setPlaceholderText(QStringLiteral("One argument per line, for example:\n--prompt\n{prompt}"));
+    harnessArguments->setObjectName(QStringLiteral("harnessArguments"));
+    harnessArguments->setPlaceholderText(QStringLiteral("One argument per line (optional)"));
     harnessArguments->setMaximumHeight(150);
-    auto *defaultHarness = new QCheckBox(QStringLiteral("Use this profile by default"), harnessGroup);
-    auto *profileButtons = new QWidget(harnessGroup);
-    auto *profileButtonsLayout = new QHBoxLayout(profileButtons);
-    profileButtonsLayout->setContentsMargins(0, 0, 0, 0);
-    auto *addHarness = new QPushButton(QStringLiteral("Add profile"), profileButtons);
-    auto *removeHarness = new QPushButton(QStringLiteral("Remove profile"), profileButtons);
-    profileButtonsLayout->addWidget(addHarness);
-    profileButtonsLayout->addWidget(removeHarness);
-    profileButtonsLayout->addStretch();
-    harnessForm->addRow(QStringLiteral("Profile"), harnessSelector);
-    harnessForm->addRow(QStringLiteral("Name"), harnessName);
+    harnessForm->addRow(QStringLiteral("Source"), sourceRow);
+    harnessForm->addRow(QStringLiteral("Agent"), agentRow);
     harnessForm->addRow(QStringLiteral("Executable"), harnessExecutable);
     harnessForm->addRow(QStringLiteral("Arguments"), harnessArguments);
-    harnessForm->addRow(QString{}, defaultHarness);
-    harnessForm->addRow(QString{}, profileButtons);
     harnessGroupLayout->addLayout(harnessForm);
     harnessLayout->addWidget(harnessGroup);
-    auto *harnessNotice = new QLabel(
-        QStringLiteral("If {prompt} is omitted, PacSmith copies the contextual prompt to the clipboard before launching."),
-        harnessPage);
-    harnessNotice->setWordWrap(true);
-    harnessLayout->addWidget(harnessNotice);
     auto *externalHarnessNotice = new QLabel(harnessPage);
     externalHarnessNotice->setWordWrap(true);
     externalHarnessNotice->setVisible(false);
-    auto *reloadExternalHarnesses = new QPushButton(QStringLiteral("Reload external changes"), harnessPage);
-    reloadExternalHarnesses->setVisible(false);
+    auto *reloadExternalHarness = new QPushButton(QStringLiteral("Reload external changes"), harnessPage);
+    reloadExternalHarness->setVisible(false);
     harnessLayout->addWidget(externalHarnessNotice);
-    harnessLayout->addWidget(reloadExternalHarnesses, 0, Qt::AlignLeft);
+    harnessLayout->addWidget(reloadExternalHarness, 0, Qt::AlignLeft);
     harnessLayout->addStretch();
-    settingsTabs->addTab(harnessPage, QStringLiteral("AI Harnesses"));
+    settingsTabs->addTab(harnessPage, QStringLiteral("AI Harness"));
 
-    QList<HarnessProfile> harnessProfiles = appSettings_.harnessProfiles;
-    for (const auto &profile : harnessProfiles) harnessSelector->addItem(profile.name);
-    int activeHarness = harnessProfiles.isEmpty() ? -1 : 0;
+    HarnessProfile harness = appSettings_.harness.value_or(HarnessProfile{});
     bool applyingHarnessFields = false;
     bool harnessDirty = false;
-    auto setHarnessFieldsEnabled = [&] {
-        const bool enabled = activeHarness >= 0 && activeHarness < harnessProfiles.size();
-        harnessName->setEnabled(enabled);
-        harnessExecutable->setEnabled(enabled);
-        harnessArguments->setEnabled(enabled);
-        defaultHarness->setEnabled(enabled);
-        removeHarness->setEnabled(enabled);
-    };
     auto loadHarness = [&] {
         const QScopedValueRollback applying(applyingHarnessFields, true);
-        if (activeHarness < 0 || activeHarness >= harnessProfiles.size()) {
-            harnessName->clear();
-            harnessExecutable->clear();
-            harnessArguments->clear();
-            defaultHarness->setChecked(false);
-            setHarnessFieldsEnabled();
-            return;
-        }
-        const auto &profile = harnessProfiles.at(activeHarness);
-        harnessName->setText(profile.name);
-        harnessExecutable->setText(profile.executable);
-        harnessArguments->setPlainText(profile.arguments.join(QLatin1Char('\n')));
-        defaultHarness->setChecked(profile.isDefault);
-        setHarnessFieldsEnabled();
+        registrySource->setText(harness.executable.isEmpty() ? QStringLiteral("No agent configured") : harness.registryId.isEmpty()
+            ? QStringLiteral("Custom agent") : QStringLiteral("ACP registry · %1 · %2").arg(harness.registryId, harness.registryVersion));
+        harnessName->setText(harness.name);
+        harnessExecutable->setText(harness.executable);
+        harnessArguments->setPlainText(harness.arguments.join(QLatin1Char('\n')));
+        agentSettings->setEnabled(!harness.executable.isEmpty());
     };
     auto commitHarness = [&] {
-        if (activeHarness < 0 || activeHarness >= harnessProfiles.size()) return;
-        auto &profile = harnessProfiles[activeHarness];
-        profile.name = harnessName->text().trimmed();
-        profile.executable = harnessExecutable->text().trimmed();
-        profile.arguments = harnessArguments->toPlainText().isEmpty()
-                                ? QStringList{}
-                                : harnessArguments->toPlainText().split(QLatin1Char('\n'));
-        profile.isDefault = defaultHarness->isChecked();
-        harnessSelector->setItemText(activeHarness,
-                                     profile.name.isEmpty() ? QStringLiteral("Unnamed profile") : profile.name);
-    };
-    auto replaceHarnessProfiles = [&] {
-        const auto selectedName = activeHarness >= 0 && activeHarness < harnessProfiles.size()
-            ? harnessProfiles.at(activeHarness).name : QString{};
-        const QScopedValueRollback applying(applyingHarnessFields, true);
-        harnessProfiles = appSettings_.harnessProfiles;
-        harnessSelector->clear();
-        int selected = -1;
-        for (qsizetype index = 0; index < harnessProfiles.size(); ++index) {
-            const auto &profile = harnessProfiles.at(index);
-            harnessSelector->addItem(profile.name);
-            if (profile.name.compare(selectedName, Qt::CaseInsensitive) == 0) {
-                selected = static_cast<int>(index);
-            }
-            if (selected < 0 && profile.isDefault) selected = static_cast<int>(index);
+        const auto executable = harnessExecutable->text().trimmed();
+        const auto arguments = harnessArguments->toPlainText().isEmpty() ? QStringList{}
+            : harnessArguments->toPlainText().split(QLatin1Char('\n'));
+        if (executable != harness.executable || arguments != harness.arguments) {
+            harness.registryId.clear();
+            harness.registryVersion.clear();
+            harness.environment.clear();
+            harness.configDefaults = {};
         }
-        activeHarness = selected >= 0 ? selected : harnessProfiles.isEmpty() ? -1 : 0;
-        harnessSelector->setCurrentIndex(activeHarness);
+        harness.name = harnessName->text().trimmed();
+        harness.executable = executable;
+        harness.arguments = arguments;
+        agentSettings->setEnabled(!executable.isEmpty());
+    };
+    auto replaceHarness = [&] {
+        harness = appSettings_.harness.value_or(HarnessProfile{});
         loadHarness();
         harnessDirty = false;
-        reloadExternalHarnesses->setVisible(false);
+        reloadExternalHarness->setVisible(false);
     };
-    QObject::connect(harnessSelector, &QComboBox::currentIndexChanged, &dialog, [&](const int index) {
-        if (applyingHarnessFields) return;
-        commitHarness();
-        activeHarness = index;
-        loadHarness();
-    });
-    QObject::connect(addHarness, &QPushButton::clicked, &dialog, [&] {
+    QObject::connect(browseRegistry, &QPushButton::clicked, &dialog, [&] {
+        const auto selected = chooseRegistryAgent(&dialog);
+        if (!selected) return;
+        auto replacement = *selected;
+        if (!replacement.registryId.isEmpty() && replacement.registryId == harness.registryId)
+            replacement.configDefaults = harness.configDefaults;
+        harness = replacement;
         harnessDirty = true;
-        commitHarness();
-        HarnessProfile profile;
-        profile.name = QStringLiteral("New harness");
-        profile.isDefault = harnessProfiles.isEmpty();
-        harnessProfiles.append(profile);
-        harnessSelector->addItem(profile.name);
-        harnessSelector->setCurrentIndex(static_cast<int>(harnessProfiles.size()) - 1);
-    });
-    QObject::connect(removeHarness, &QPushButton::clicked, &dialog, [&] {
-        harnessDirty = true;
-        if (activeHarness < 0 || activeHarness >= harnessProfiles.size()) return;
-        harnessProfiles.removeAt(activeHarness);
-        harnessSelector->removeItem(activeHarness);
-        activeHarness = harnessSelector->currentIndex();
         loadHarness();
-    });
-    QObject::connect(defaultHarness, &QCheckBox::toggled, &dialog, [&](const bool checked) {
-        if (!applyingHarnessFields) harnessDirty = true;
-        if (!checked || activeHarness < 0 || activeHarness >= harnessProfiles.size()) return;
-        for (auto &profile : harnessProfiles) profile.isDefault = false;
-        harnessProfiles[activeHarness].isDefault = true;
     });
     QObject::connect(harnessName, &QLineEdit::textEdited, &dialog,
                      [&](const QString &) { if (!applyingHarnessFields) harnessDirty = true; });
@@ -429,12 +370,11 @@ void MainWindow::showSettings() {
                      [&](const QString &) { if (!applyingHarnessFields) harnessDirty = true; });
     QObject::connect(harnessArguments, &QPlainTextEdit::textChanged, &dialog,
                      [&] { if (!applyingHarnessFields) harnessDirty = true; });
-    QObject::connect(reloadExternalHarnesses, &QPushButton::clicked, &dialog, [&] {
-        replaceHarnessProfiles();
-        externalHarnessNotice->setText(QStringLiteral("✓ External harness profiles loaded."));
+    QObject::connect(reloadExternalHarness, &QPushButton::clicked, &dialog, [&] {
+        replaceHarness();
+        externalHarnessNotice->setText(QStringLiteral("✓ External harness configuration loaded."));
         externalHarnessNotice->setVisible(true);
     });
-    if (activeHarness >= 0) harnessSelector->setCurrentIndex(activeHarness);
     loadHarness();
 
     auto *updatesPage = new QWidget(settingsTabs);
@@ -614,12 +554,10 @@ void MainWindow::showSettings() {
     repoBound->setObjectName(QStringLiteral("repositoryBoundStatus"));
     repoBound->setWordWrap(true);
     repoBound->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto *applyRepoListen = new QPushButton(QStringLiteral("Apply network changes"), repoListenGroup);
     repoListenForm->addRow(QString{}, repoEnabled);
     repoListenForm->addRow(QStringLiteral("Port"), repoListenPort);
     repoListenForm->addRow(QStringLiteral("Interfaces"), repoListenInterfaces);
     repoListenForm->addRow(QStringLiteral("Status"), repoBound);
-    repoListenForm->addRow(QString{}, applyRepoListen);
     repoLayout->addWidget(repoListenGroup);
 
     auto *repoPolicyGroup = new QGroupBox(QStringLiteral("Publication"), repoPage);
@@ -976,8 +914,6 @@ void MainWindow::showSettings() {
         return QString::fromUtf8(file.readAll());
     };
 
-    QObject::connect(applyRepoListen, &QPushButton::clicked, &dialog,
-                     [&, saveCollectedRepo] { static_cast<void>(saveCollectedRepo(collectRepoSettings())); });
     QObject::connect(repoInitSigning, &QPushButton::clicked, &dialog, [&, applyRepoUi] {
         QString error;
         auto saved = library_.initRepoSigning(&error);
@@ -1041,6 +977,7 @@ void MainWindow::showSettings() {
         QApplication::clipboard()->setText(*script);
     });
 
+    bool applyingListenFields = false;
     std::function<bool()> applyListenSettings = [] { return true; };
     std::function<void()> refreshClientsTables;
     std::function<void(const QList<Registration> &, const QList<RemoteClient> &, const QString &)>
@@ -1081,12 +1018,10 @@ void MainWindow::showSettings() {
         listenBound->setObjectName(QStringLiteral("libraryListeningStatus"));
         listenBound->setWordWrap(true);
         listenBound->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        auto *applyListen = new QPushButton(QStringLiteral("Apply listen settings"), listenGroup);
         listenForm->addRow(QString{}, listenEnabled);
         listenForm->addRow(QStringLiteral("Port"), listenPort);
         listenForm->addRow(QStringLiteral("Interfaces"), listenInterfaces);
         listenForm->addRow(QStringLiteral("Status"), listenBound);
-        listenForm->addRow(QString{}, applyListen);
         clientsLayout->addWidget(listenGroup);
 
         fingerprint = new QLabel(clientsPage);
@@ -1175,8 +1110,6 @@ void MainWindow::showSettings() {
             return true;
         };
         wireExclusiveListenHosts(listenInterfaces);
-        QObject::connect(applyListen, &QPushButton::clicked, &dialog,
-                         [&] { static_cast<void>(applyListenSettings()); });
         applyClientsTables = [&](const QList<Registration> &pending,
                                  const QList<RemoteClient> &enrolled,
                                  const QString &error) {
@@ -1316,7 +1249,7 @@ void MainWindow::showSettings() {
     aboutLayout->addWidget(licenseView, 1);
     settingsTabs->addTab(aboutPage, QStringLiteral("About"));
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     rootLayout->addWidget(settingsTabs, 1);
     rootLayout->addWidget(buttons);
 
@@ -1366,16 +1299,16 @@ void MainWindow::showSettings() {
             refreshSessionControls();
         }
         if (!harnessDirty) {
-            replaceHarnessProfiles();
+            replaceHarness();
             externalHarnessNotice->setText(
-                QStringLiteral("✓ Harness profiles updated by another PacSmith client."));
+                QStringLiteral("✓ AI harness updated by another PacSmith client."));
             externalHarnessNotice->setVisible(true);
             return;
         }
         externalHarnessNotice->setText(
-            QStringLiteral("⚠ Harness profiles changed externally. Reload them or save your current edits."));
+            QStringLiteral("⚠ AI harness changed externally. Reload it or finish editing to save your changes."));
         externalHarnessNotice->setVisible(true);
-        reloadExternalHarnesses->setVisible(true);
+        reloadExternalHarness->setVisible(true);
     });
 
     auto refreshScheduleControls = [&] {
@@ -1439,7 +1372,7 @@ void MainWindow::showSettings() {
         bool updated = false;
         bool conflicted = false;
         if (latest.library &&
-            (settingsInitialLoad || latest.library->revision != librarySettingsRevision_)) {
+            (settingsInitialLoad || latest.library->revision > librarySettingsRevision_)) {
             if (libraryFieldsDirty) {
                 conflicted = true;
             } else {
@@ -1463,7 +1396,7 @@ void MainWindow::showSettings() {
                 updated = true;
             }
         }
-        if (latest.repo && (!repo || latest.repo->revision != repo->revision)) {
+        if (latest.repo && (!repo || latest.repo->revision > repo->revision)) {
             if (repoFieldsDirty) {
                 conflicted = true;
             } else {
@@ -1491,6 +1424,7 @@ void MainWindow::showSettings() {
             if (!sameListenTarget(edited, lastAppliedListen)) {
                 conflicted = true;
             } else {
+                const QScopedValueRollback applying(applyingListenFields, true);
                 lastAppliedListen = latest.server->listen;
                 listenEnabled->setChecked(lastAppliedListen.enabled);
                 listenPort->setValue(lastAppliedListen.port);
@@ -1499,22 +1433,11 @@ void MainWindow::showSettings() {
                 updated = true;
             }
         }
-        if (latest.server && backendLabel != nullptr) {
-            backendLabel->setText(secretBackendLabel(latest.server->secretBackend));
-        }
         if (applyClientsTables && latest.server) {
             applyClientsTables(latest.registrations, latest.clients,
                                latest.administrationError);
         }
-        if (conflicted) {
-            settingsSyncNotice->setText(
-                QStringLiteral("⚠ Library settings changed through another client while this dialog has unsaved edits. Cancel and reopen before making further changes here."));
-            settingsSyncNotice->setVisible(true);
-        } else if (updated) {
-            settingsSyncNotice->setText(
-                QStringLiteral("✓ Settings updated by another PacSmith client."));
-            settingsSyncNotice->setVisible(true);
-        } else if (settingsInitialLoad) {
+        if (settingsInitialLoad) {
             const auto loadError = !latest.libraryError.isEmpty()
                 ? latest.libraryError
                 : !latest.repositoryError.isEmpty() ? latest.repositoryError
@@ -1524,6 +1447,14 @@ void MainWindow::showSettings() {
                                             : QStringLiteral("Could not load all library settings: %1")
                                                   .arg(loadError));
             settingsSyncNotice->setVisible(!loadError.isEmpty());
+        } else if (conflicted) {
+            settingsSyncNotice->setText(
+                QStringLiteral("⚠ Library settings changed through another client while this dialog has unsaved edits. Reopen Settings to load the latest values before retrying."));
+            settingsSyncNotice->setVisible(true);
+        } else if (updated) {
+            settingsSyncNotice->setText(
+                QStringLiteral("✓ Settings updated by another PacSmith client."));
+            settingsSyncNotice->setVisible(true);
         }
         if (settingsInitialLoad) settingsTabs->setEnabled(true);
         settingsInitialLoad = false;
@@ -1555,32 +1486,8 @@ void MainWindow::showSettings() {
     serverSettingsRefresh->start();
 
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&, this] {
-        if (!applyListenSettings()) return;
-        commitHarness();
-        for (const auto &profile : harnessProfiles) {
-            if (profile.name.isEmpty() || profile.executable.isEmpty()) {
-                QMessageBox::warning(&dialog, QStringLiteral("Incomplete harness profile"),
-                                     QStringLiteral("Every external harness profile needs a name and executable."));
-                return;
-            }
-        }
-        bool foundDefault = false;
-        for (auto &profile : harnessProfiles) {
-            if (!profile.isDefault) continue;
-            if (foundDefault) profile.isDefault = false;
-            else foundDefault = true;
-        }
-        if (!foundDefault && !harnessProfiles.isEmpty()) harnessProfiles.first().isDefault = true;
-        if (!githubToken->text().isEmpty()) {
-            QString error;
-            if (!library_.setCredential(QStringLiteral("github.token"), githubToken->text(), &error)) {
-                QMessageBox::critical(&dialog, QStringLiteral("Could not store GitHub token"), error);
-                return;
-            }
-            appSettings_.githubTokenConfigured = true;
-        }
-
+    auto *librarySave = new AutoSave(&dialog, [&] {
+        if (applyingLibraryFields || settingsInitialLoad || !libraryFieldsDirty) return;
         LibrarySettings next;
         next.revision = librarySettingsRevision_;
         next.updatesEnabled = backgroundEnabled->isChecked();
@@ -1591,35 +1498,143 @@ void MainWindow::showSettings() {
         next.retentionVersions = retentionVersions->value();
         next.buildParallelism = buildParallelism->value();
         QString error;
-        auto saved = library_.saveLibrarySettings(next, &error);
+        const auto saved = library_.saveLibrarySettings(next, &error);
         if (!saved) {
-            QMessageBox::critical(&dialog, QStringLiteral("Could not save library settings"), error);
+            settingsSyncNotice->setText(QStringLiteral("⚠ Changes could not be saved: %1").arg(error));
+            settingsSyncNotice->setVisible(true);
             return;
         }
+        library = saved;
         applyLibrarySettings(*saved);
+        libraryFieldsDirty = false;
+        settingsSyncNotice->setText(QStringLiteral("✓ Changes saved"));
+        settingsSyncNotice->setVisible(true);
+    });
+    librarySave->watch(backgroundEnabled);
+    librarySave->watch(schedule);
+    librarySave->watch(weekday);
+    librarySave->watch(checkTime);
+    librarySave->watch(automaticPrepare);
+    librarySave->watch(retentionVersions);
+    librarySave->watch(buildParallelism);
 
-        if (!saveCollectedRepo(collectRepoSettings())) return;
+    auto *repositorySave = new AutoSave(&dialog, [&] {
+        if (!applyingRepoFields && !settingsInitialLoad && repoFieldsDirty) {
+            static_cast<void>(saveCollectedRepo(collectRepoSettings()));
+        }
+    });
+    repositorySave->watch(repoEnabled);
+    repositorySave->watch(repoListenPort);
+    repositorySave->watch(repoAdvertisedUrl);
+    repositorySave->watch(repoStableEnabled);
+    repositorySave->watch(repoSoakDays);
+    repositorySave->watch(repoPrefixEnabled);
+    repositorySave->watch(repoPrefixEdit);
+    repositorySave->watch(repoTrustMode);
+    QObject::connect(repoListenInterfaces, &QListWidget::itemChanged, &dialog, [&] {
+        if (!applyingRepoFields) repositorySave->schedule();
+    });
 
-        appSettings_.updates.startAtLogin = startAtLogin->isChecked();
-        appSettings_.updates.startMinimized = startMinimized->isChecked();
-        appSettings_.updates.keepInTray = keepInTray->isChecked();
-        appSettings_.appearance.interfaceTheme = selectedAppearanceMode(interfaceTheme);
-        appSettings_.appearance.trayTheme = selectedAppearanceMode(trayTheme);
-        appSettings_.harnessProfiles = harnessProfiles;
-        if (!settingsStore_.save(appSettings_, &error) ||
-            !BackgroundUpdateManager::apply(appSettings_.updates, QCoreApplication::applicationFilePath(), &error)) {
-            QMessageBox::critical(&dialog, QStringLiteral("Could not save this machine's session settings"), error);
+    auto *sessionSave = new AutoSave(&dialog, [&] {
+        if (applyingClientFields || !sessionDirty) return;
+        auto next = settingsStore_.load();
+        next.updates.startAtLogin = startAtLogin->isChecked();
+        next.updates.startMinimized = startMinimized->isChecked();
+        next.updates.keepInTray = keepInTray->isChecked();
+        next.appearance.interfaceTheme = selectedAppearanceMode(interfaceTheme);
+        next.appearance.trayTheme = selectedAppearanceMode(trayTheme);
+        QString error;
+        if (!settingsStore_.save(next, &error) ||
+            !BackgroundUpdateManager::apply(next.updates, QCoreApplication::applicationFilePath(), &error)) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not save session settings"), error);
             return;
         }
+        appSettings_ = next;
+        sessionDirty = false;
         const bool runInTray = appSettings_.updates.keepInTray && QSystemTrayIcon::isSystemTrayAvailable();
         applyInterfaceTheme(appSettings_.appearance.interfaceTheme);
         setKeepRunningInTray(runInTray);
         QApplication::setQuitOnLastWindowClosed(!runInTray);
         static_cast<void>(GuiInstanceServer::requestTray());
-        dialog.accept();
     });
+    sessionSave->watch(keepInTray);
+    sessionSave->watch(startAtLogin);
+    sessionSave->watch(startMinimized);
+    sessionSave->watch(interfaceTheme);
+    sessionSave->watch(trayTheme);
+
+    auto *harnessSave = new AutoSave(&dialog, [&] {
+        if (applyingHarnessFields || !harnessDirty) return;
+        commitHarness();
+        const bool cleared = harness.name.isEmpty() && harness.executable.isEmpty() && harness.arguments.isEmpty();
+        if (!cleared && (harness.name.isEmpty() || harness.executable.isEmpty())) {
+            externalHarnessNotice->setText(QStringLiteral("Enter an agent name and executable to save the AI harness automatically."));
+            externalHarnessNotice->setVisible(true);
+            return;
+        }
+        QString error;
+        if (!(cleared ? settingsStore_.clearHarness(&error) : settingsStore_.setHarness(harness, &error))) {
+            externalHarnessNotice->setText(QStringLiteral("⚠ Could not save AI harness: %1").arg(error));
+            externalHarnessNotice->setVisible(true);
+            return;
+        }
+        appSettings_.harness = cleared ? std::nullopt : std::optional<HarnessProfile>(harness);
+        harnessDirty = false;
+        externalHarnessNotice->setText(QStringLiteral("✓ AI harness saved"));
+        externalHarnessNotice->setVisible(true);
+        reloadExternalHarness->setVisible(false);
+    });
+    QObject::connect(agentSettings, &QPushButton::clicked, &dialog, [&] {
+        commitHarness();
+        harnessSave->flush();
+        if (harnessDirty || harness.executable.isEmpty()) return;
+        const auto openedHarness = harness;
+        AgentSettingsDialog settings(harness, library_.config(),
+            [&](const QJsonObject &values, QString *error) {
+                if (harness.executable != openedHarness.executable || harness.arguments != openedHarness.arguments) {
+                    *error = QStringLiteral("The configured harness changed while its settings were open.");
+                    return false;
+                }
+                harness.configDefaults = values;
+                harnessDirty = true;
+                harnessSave->schedule();
+                harnessSave->flush();
+                if (harnessDirty) *error = externalHarnessNotice->text();
+                return !harnessDirty;
+            }, &dialog);
+        settings.exec();
+    });
+    harnessSave->watch(harnessName);
+    harnessSave->watch(harnessExecutable);
+    harnessSave->watch(harnessArguments);
+    QObject::connect(browseRegistry, &QPushButton::clicked, &dialog, [=] { harnessSave->schedule(); });
+
+    auto *credentialSave = new AutoSave(&dialog, [&] {
+        if (githubToken->text().isEmpty()) return;
+        QString error;
+        if (!library_.setCredential(QStringLiteral("github.token"), githubToken->text(), &error)) {
+            QMessageBox::critical(&dialog, QStringLiteral("Could not store GitHub token"), error);
+            return;
+        }
+        appSettings_.githubTokenConfigured = true;
+        githubToken->clear();
+        githubToken->setPlaceholderText(QStringLiteral("Configured on the library daemon"));
+    });
+    credentialSave->watch(githubToken);
+
+    if (listenEnabled != nullptr) {
+        auto *listenSave = new AutoSave(&dialog, [&] {
+            if (!settingsInitialLoad && !applyingListenFields) static_cast<void>(applyListenSettings());
+        });
+        listenSave->watch(listenEnabled);
+        listenSave->watch(listenPort);
+        QObject::connect(listenInterfaces, &QListWidget::itemChanged, &dialog, [&, listenSave] {
+            if (!applyingListenFields) listenSave->schedule();
+        });
+    }
     reloadClientSettings();
-    if (!harnessDirty) replaceHarnessProfiles();
+    if (!harnessDirty) replaceHarness();
+    QObject::connect(&dialog, &QDialog::finished, &dialog, [&] { AutoSave::flushAll(&dialog); });
     dialog.exec();
 }
 

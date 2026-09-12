@@ -94,6 +94,17 @@ func TestRepositoryDistributionJobsAreDeduplicatedByProject(t *testing.T) {
 	if second.ID != first.ID {
 		t.Fatalf("duplicate repository job ID = %q, want %q", second.ID, first.ID)
 	}
+	global, err := manager.Enqueue(ctx, KindRepositoryDistribution, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateGlobal, err := manager.Enqueue(ctx, KindRepositoryDistribution, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicateGlobal.ID != global.ID {
+		t.Fatalf("duplicate global repository job ID = %q, want %q", duplicateGlobal.ID, global.ID)
+	}
 	close(release)
 }
 

@@ -121,6 +121,14 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := lib.RecoverInterruptedBuilds(ctx, func(id string) (string, error) {
+		text, _, err := manager.Log(id, 0)
+		return text, err
+	}); err != nil {
+		manager.Stop()
+		_ = db.Close()
+		return nil, err
+	}
 	if err := lib.RecoverInterruptedPendingImports(ctx); err != nil {
 		manager.Stop()
 		_ = db.Close()
@@ -416,7 +424,12 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 			return raw, marshalErr
 		case jobs.KindRepositoryDistribution:
 			log("Reconciling repository distribution…\n")
-			if err := lib.Repo.ReconcileProjectDistribution(ctx, job.ProjectID); err != nil {
+			if job.ProjectID == "" {
+				progress(jobs.Progress{Message: "Updating repository channels"})
+				if err := lib.Repo.ReconcileAllDistribution(ctx); err != nil {
+					return nil, err
+				}
+			} else if err := lib.Repo.ReconcileProjectDistribution(ctx, job.ProjectID); err != nil {
 				return nil, err
 			}
 			log("Repository distribution is up to date\n")
@@ -430,9 +443,13 @@ func JobHandler(lib *library.Service, githubSvc *githubapi.Service,
 func updateBatchSummary(result updatecheck.BatchResult) string {
 	available := 0
 	built := 0
+	aiReviews := 0
 	failures := make([]string, 0, result.Failed)
 	paused := make([]string, 0)
 	for _, check := range result.Checks {
+		if check.AutomaticStatus == "ai-pending" || check.AutomaticStatus == "ai-reviewing" {
+			aiReviews++
+		}
 		if check.UpdateAvailable {
 			available++
 		}
@@ -484,7 +501,14 @@ func updateBatchSummary(result updatecheck.BatchResult) string {
 			summary += fmt.Sprintf("\nAutomatic handling paused:\n• %s",
 				strings.Join(paused, "\n• "))
 		}
+		if aiReviews > 0 {
+			summary += fmt.Sprintf("\n%d update(s) awaiting or undergoing AI review.", aiReviews)
+		}
 		return summary
+	}
+	if aiReviews > 0 {
+		return fmt.Sprintf("Update check finished: %d update(s) found; %d built automatically; %d awaiting or undergoing AI review",
+			available, built, aiReviews)
 	}
 	if available > 0 {
 		return fmt.Sprintf("Update check finished: %d update(s) found; %d built automatically",

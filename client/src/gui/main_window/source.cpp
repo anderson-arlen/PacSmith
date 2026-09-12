@@ -369,7 +369,7 @@ void MainWindow::populateScripts() {
     if (scriptsActionNotice_ != nullptr) {
         if (lifecycleEditing_) {
             scriptsActionNotice_->setText(
-                QStringLiteral("Editing the Arch lifecycle script. Save validates it; a valid saved script still needs approval before installation."));
+                QStringLiteral("Changes save and validate automatically. A valid script still needs approval before installation."));
             scriptsActionNotice_->setStyleSheet(QStringLiteral(
                 "background: rgba(52,152,219,24); border: 1px solid #347fa8; border-radius: 5px;"));
         } else if (!lifecycle.contents.isEmpty() && lifecycle.validationPassed &&
@@ -470,13 +470,11 @@ void MainWindow::populateScripts() {
     if (lifecycleEditing_) {
         lifecycleView_->setReadOnly(false);
         lifecycleStatus_->setText(
-            QStringLiteral("Editing draft · Allowed functions: pre_install, post_install, pre_upgrade, post_upgrade, pre_remove, and post_remove. Network access, package-manager recursion, privilege elevation, dynamic evaluation, and command substitution are blocked."));
+            QStringLiteral("Changes save automatically · Allowed functions: pre_install, post_install, pre_upgrade, post_upgrade, pre_remove, and post_remove. Network access, package-manager recursion, privilege elevation, dynamic evaluation, and command substitution are blocked."));
         editLifecycleButton_->setEnabled(false);
-        saveLifecycleButton_->setVisible(true);
-        saveLifecycleButton_->setEnabled(true);
         cancelLifecycleButton_->setVisible(true);
         cancelLifecycleButton_->setEnabled(true);
-        acknowledgeLifecycleButton_->setEnabled(false);
+        acknowledgeLifecycleButton_->setEnabled(lifecycle.validationPassed && !lifecycleView_->document()->isModified());
         discardLifecycleButton_->setEnabled(false);
         return;
     }
@@ -486,7 +484,6 @@ void MainWindow::populateScripts() {
     editLifecycleButton_->setText(lifecycle.contents.isEmpty()
                                       ? QStringLiteral("Create Lifecycle Script")
                                       : QStringLiteral("Edit Lifecycle Script"));
-    saveLifecycleButton_->setVisible(false);
     cancelLifecycleButton_->setVisible(false);
     const auto lifecycleOrigin = lifecycle.provenance.origin == ValueOrigin::Ai
                                      ? QStringLiteral("<span style='color:#55cc77'>Legacy AI provenance</span>")
@@ -611,9 +608,8 @@ void MainWindow::saveLifecycleEdit() {
     if (!project_ || !lifecycleEditing_ || !ensureCurrentProjectWritable()) return;
     const auto contents = lifecycleView_->toPlainText();
     if (contents.trimmed().isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Lifecycle script is empty"),
-                             QStringLiteral("Enter at least one Arch lifecycle function, or cancel editing. "
-                                            "Use Discard Generated Script to remove an existing script."));
+        lifecycleStatus_->setText(QStringLiteral(
+            "⚠ Enter an Arch lifecycle function to save. Use Discard Generated Script to remove the script."));
         return;
     }
 
@@ -643,43 +639,31 @@ void MainWindow::saveLifecycleEdit() {
         QMessageBox::critical(this, QStringLiteral("Could not save lifecycle script"), error);
         return;
     }
-    const auto lifecycleFileName = lifecycle.fileName;
-    lifecycleEditing_ = false;
     lifecycleView_->document()->setModified(false);
     refreshGeneratedPkgbuildAfterModelChange();
     persistCurrent();
-    populateScripts();
     populateOverview();
     populateBuild();
     populateHistory();
-
-    if (!validation.passed) {
-        showDetailedMessageDialog(
-            this, QStringLiteral("Lifecycle script saved but blocked"),
-            QStringLiteral("The draft was saved for further editing, but PacSmith will not add it to the generated PKGBUILD or permit installation until validation passes."),
-            validation.message(), QStyle::SP_MessageBoxWarning, true);
-    } else if (currentRelease()->pkgbuildManuallyModified) {
-        QMessageBox::warning(
-            this, QStringLiteral("Lifecycle script saved; PKGBUILD needs attention"),
-            QStringLiteral("The script validated, but Configuration is in Custom mode. Add install='%1' or install=\"${_PACSMITH_INSTALL}\" to the PKGBUILD or switch back to Guided. Then review and approve the exact script before installation.")
-                .arg(lifecycleFileName));
-    } else {
-        statusBar()->showMessage(
-            QStringLiteral("Lifecycle script saved and referenced by the generated PKGBUILD; exact-content approval is still required"),
-            10000);
-    }
-    refreshProjectList(project_->id);
+    acknowledgeLifecycleButton_->setEnabled(validation.passed);
+    lifecycleStatus_->setText(validation.passed
+        ? QStringLiteral("✓ Saved and validated. Review and approve the exact script before installation.")
+        : QStringLiteral("⚠ Draft saved; validation must pass before building: %1").arg(validation.message()));
 }
 
-void MainWindow::cancelLifecycleEdit() {
+void MainWindow::finishLifecycleEdit() {
     if (!lifecycleEditing_) return;
+    if (lifecycleView_->document()->isModified()) {
+        saveLifecycleEdit();
+        if (lifecycleView_->document()->isModified()) return;
+    }
     lifecycleEditing_ = false;
     lifecycleView_->document()->setModified(false);
     populateScripts();
 }
 
 void MainWindow::acknowledgeLifecycleScript() {
-    if (!project_ || lifecycleEditing_ || currentRelease()->lifecycleScript.contents.isEmpty() ||
+    if (!project_ || lifecycleView_->document()->isModified() || currentRelease()->lifecycleScript.contents.isEmpty() ||
         !currentRelease()->lifecycleScript.validationPassed) return;
     const auto answer = QMessageBox::warning(
         this, QStringLiteral("Approve generated privileged script"),
@@ -687,6 +671,7 @@ void MainWindow::acknowledgeLifecycleScript() {
                        "Approve it only after reviewing the complete content. Any change will reset this approval."),
         QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
     if (answer != QMessageBox::Yes) return;
+    lifecycleEditing_ = false;
     currentRelease()->lifecycleScript.acknowledge();
     if (!persistCurrent()) return;
     populateScripts();

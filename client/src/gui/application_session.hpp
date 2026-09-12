@@ -62,6 +62,7 @@ private:
     QHash<QString, QString> activeUpdateJobs_;
     QHash<QString, QString> activePreparationJobs_;
     LibraryEventStream *libraryEventStream_{nullptr};
+    bool updateReviewRecoveryAttempted_{false};
     bool updateCensusInFlight_{false};
     bool startHidden_{false};
     bool onboardingStarted_{false};

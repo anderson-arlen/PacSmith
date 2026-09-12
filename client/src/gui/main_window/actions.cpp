@@ -1,5 +1,6 @@
 #include "gui/main_window/common.hpp"
 #include "core/harness_launcher.hpp"
+#include "gui/build_output_dialog.hpp"
 
 #include <QClipboard>
 #include <QGuiApplication>
@@ -9,9 +10,7 @@ namespace {
 
 struct BuildPollResult {
     std::optional<JobStatus> job;
-    QString logChunk;
     QString error;
-    qint64 nextOffset{0};
 };
 
 struct BuildFinishResult {
@@ -90,7 +89,6 @@ void MainWindow::startReanalysis() {
         library_.projectsRoot(), projectId, releaseId);
     importThread_ = thread;
     projectList_->setEnabled(false);
-    askAiButton_->setEnabled(false);
     reanalyzeButton_->setEnabled(false);
     updateDeleteButton();
     worker->moveToThread(thread);
@@ -154,56 +152,13 @@ void MainWindow::startReanalysis() {
         }
         if (importThread_ == thread) importThread_ = nullptr;
         projectList_->setEnabled(!projectListRefreshInFlight_ && !projectDeleteInFlight_);
-        askAiButton_->setEnabled(currentRelease() != nullptr &&
-                                 currentRelease()->state != ReleaseState::Discovered);
         updateDeleteButton();
         thread->deleteLater();
     });
     thread->start();
 }
 
-void MainWindow::askExternalHarness() {
-    if (!project_ || currentRelease() == nullptr) return;
-    const auto *profile = appSettings_.defaultHarness();
-    if (profile == nullptr) {
-        QMessageBox::information(
-            this, QStringLiteral("Configure an AI harness"),
-            QStringLiteral("Add a generic external harness launch profile in Settings → AI Harnesses first."));
-        return;
-    }
-    const auto projectId = project_->id;
-    const auto releaseId = currentRelease()->id;
-    QString prompt;
-    if (currentSection() == EditorSection::ConfigDependencies && dependenciesTable_ != nullptr &&
-        dependenciesTable_->currentRow() >= 0 &&
-        dependenciesTable_->currentRow() < currentRelease()->dependencies.size()) {
-        prompt = HarnessLauncher::dependencyPrompt(
-            projectId, releaseId,
-            currentRelease()->dependencies.at(dependenciesTable_->currentRow()).rawExpression);
-    } else if (currentSection() == EditorSection::ConfigAppRun) {
-        prompt = HarnessLauncher::appImagePrompt(projectId, releaseId);
-    } else if (currentRelease()->pkgbuildManuallyModified &&
-               (currentSection() == EditorSection::ConfigPkgbuild ||
-                currentSection() == EditorSection::ResultPkgbuild)) {
-        prompt = HarnessLauncher::customPkgbuildPrompt(projectId, releaseId);
-    } else if (currentSection() == EditorSection::ResultBuild &&
-               currentRelease()->buildStatus == BuildStatus::Failed) {
-        prompt = HarnessLauncher::buildFailurePrompt(projectId, releaseId);
-    } else {
-        prompt = HarnessLauncher::projectPrompt(projectId, releaseId);
-    }
-    const auto launched = HarnessLauncher::launch(*profile, prompt);
-    if (!launched.started) {
-        QMessageBox::critical(this, QStringLiteral("Could not launch AI harness"), launched.error);
-        return;
-    }
-    if (launched.promptNeedsClipboard) {
-        QGuiApplication::clipboard()->setText(prompt);
-        QMessageBox::information(
-            this, QStringLiteral("AI harness launched"),
-            QStringLiteral("The profile has no {prompt} placeholder, so the PacSmith context prompt was copied to the clipboard."));
-    }
-}
+void MainWindow::askExternalHarness() { openScreenChat(); }
 
 void MainWindow::startUpdateCheck() {
     if (!project_ || updateCheckRunning_ || updateConfigurationSaveInFlight_ ||
@@ -446,13 +401,11 @@ void MainWindow::startBuild(const bool installWhenSuccessful, const bool automat
         selectSection(EditorSection::ResultBuild);
     }
     installAfterSuccessfulBuild_ = installWhenSuccessful;
-    showCommandProgress(QStringLiteral("Building %1").arg(project_->displayName),
-                        QStringLiteral("Running makepkg…"), true);
     QString error;
     const auto job = library_.startBuild(currentRelease()->id, &error, automatic);
     if (!job || job->id.isEmpty()) {
         currentRelease()->buildStatus = BuildStatus::Failed;
-        finishCommandProgress(false, QStringLiteral("Build could not start: %1").arg(error));
+        QMessageBox::critical(this, QStringLiteral("Build could not start"), error);
         populateBuild();
         updateDashboardActions();
         updateDeleteButton();
@@ -463,13 +416,12 @@ void MainWindow::startBuild(const bool installWhenSuccessful, const bool automat
     buildReleaseId_ = currentRelease()->id;
     buildProjectName_ = project_->displayName.isEmpty() ? project_->archPackageName
                                                        : project_->displayName;
-    buildLogContents_.clear();
-    buildLogAfter_ = 0;
     if (buildPollTimer_ == nullptr) {
         buildPollTimer_ = new QTimer(this);
         connect(buildPollTimer_, &QTimer::timeout, this, &MainWindow::pollBuildJob);
     }
     buildPollTimer_->start(100);
+    showBuildOutput();
     updatePreparationIndicators();
     syncActivityTimer();
     populateBuild();
@@ -497,18 +449,32 @@ QString MainWindow::buildActivityForProject(const QString &projectId) const {
 }
 
 void MainWindow::showBuildOutput() {
-    if (!buildInProgress()) return;
-    if (commandProgress_ == nullptr) {
-        showCommandProgress(QStringLiteral("Building %1").arg(buildProjectName_),
-                            QStringLiteral("Running makepkg..."), true);
-        if (commandProgress_ != nullptr && !buildLogContents_.isEmpty()) {
-            commandProgress_->appendOutput(buildLogContents_);
+    QString jobId;
+    QString projectName;
+    if (buildInProgress() && (!project_ || buildProjectId_ == project_->id)) {
+        jobId = buildJobId_;
+        projectName = buildProjectName_;
+    } else if (project_) {
+        for (const auto &event : activeBuildJobs_) {
+            if (event.projectId != project_->id) continue;
+            jobId = event.jobId;
+            projectName = event.projectName.isEmpty() ? event.packageName : event.projectName;
+            break;
         }
-    } else {
-        commandProgress_->show();
-        commandProgress_->raise();
-        commandProgress_->activateWindow();
     }
+    if (jobId.isEmpty()) return;
+    const auto name = QStringLiteral("buildOutput:%1:%2").arg(library_.config().origin(), jobId);
+    auto *dialog = findChild<BuildOutputDialog *>(name);
+    if (dialog == nullptr) {
+        dialog = new BuildOutputDialog(library_.config(), jobId, this);
+        dialog->setObjectName(name);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("Build Output — %1").arg(projectName));
+        connect(dialog, &QDialog::finished, dialog, [dialog] { dialog->setObjectName({}); });
+    }
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::cancelRemoteBuild() {
@@ -532,7 +498,6 @@ void MainWindow::pollBuildJob() {
     buildPollInFlight_ = true;
     const auto config = library_.config();
     const auto jobId = buildJobId_;
-    const auto after = buildLogAfter_;
     auto *watcher = new QFutureWatcher<BuildPollResult>(this);
     connect(watcher, &QFutureWatcher<BuildPollResult>::finished, this,
             [this, watcher, jobId] {
@@ -540,11 +505,6 @@ void MainWindow::pollBuildJob() {
         watcher->deleteLater();
         buildPollInFlight_ = false;
         if (jobId != buildJobId_ || !result.job) return;
-        if (!result.logChunk.isEmpty()) {
-            buildLogContents_.append(result.logChunk);
-            if (commandProgress_ != nullptr) commandProgress_->appendOutput(result.logChunk);
-        }
-        buildLogAfter_ = result.nextOffset;
         if (result.job->status == QStringLiteral("succeeded") ||
             result.job->status == QStringLiteral("failed") ||
             result.job->status == QStringLiteral("interrupted")) {
@@ -552,14 +512,10 @@ void MainWindow::pollBuildJob() {
             finishBuildJob();
         }
     });
-    watcher->setFuture(QtConcurrent::run([config, jobId, after] {
+    watcher->setFuture(QtConcurrent::run([config, jobId] {
         LibraryClient client(config);
         BuildPollResult result;
         result.job = client.getJob(jobId, &result.error);
-        result.nextOffset = after;
-        if (result.job) {
-            result.logChunk = client.jobLog(jobId, after, &result.nextOffset, nullptr);
-        }
         return result;
     }));
 }
@@ -597,10 +553,6 @@ void MainWindow::finishBuildJob() {
         updateDashboardActions();
         const auto shouldInstall = succeeded && !canceled && installAfterSuccessfulBuild_;
         installAfterSuccessfulBuild_ = false;
-        finishCommandProgress(succeeded && !canceled,
-                              canceled ? QStringLiteral("Build canceled.")
-                              : succeeded ? QStringLiteral("Build succeeded.")
-                                          : QStringLiteral("Build failed."));
         statusBar()->showMessage(canceled ? QStringLiteral("Build canceled")
                                  : succeeded ? QStringLiteral("Build succeeded")
                                              : QStringLiteral("Build failed"), 8000);

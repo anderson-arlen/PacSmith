@@ -15,7 +15,28 @@ import (
 	"unicode/utf8"
 )
 
-const maxInspectedPayloadBytes = 256 << 20
+// Ordinary members stay in memory to avoid needless temporary writes. Larger members
+// spill to bounded temporary storage, while debug/elf gets a separate read budget so
+// crafted section metadata cannot turn the disk-backed path into a large heap allocation.
+const (
+	maxInMemoryPayloadBytes   int64 = 256 << 20
+	maxInspectedPayloadBytes  int64 = 2 << 30
+	maxPayloadTextBytes             = 256 << 10
+	maxELFInspectionReadBytes int64 = 64 << 20
+)
+
+var errELFInspectionReadLimit = errors.New("ELF inspection read limit exceeded")
+
+type payloadInspectionOptions struct {
+	maxInMemoryBytes int64
+	maxTotalBytes    int64
+	tempDir          string
+}
+
+var defaultPayloadInspectionOptions = payloadInspectionOptions{
+	maxInMemoryBytes: maxInMemoryPayloadBytes,
+	maxTotalBytes:    maxInspectedPayloadBytes,
+}
 
 type ELFInspection struct {
 	Class                   string                       `json:"class"`
@@ -83,11 +104,23 @@ type PayloadFileInspection struct {
 // InspectPayloadFile statically examines one already-inspected payload member.
 // Package content is never executed or exposed as a temporary client-side artifact.
 func InspectPayloadFile(artifactPath, originalFilename, member string) (PayloadFileInspection, error) {
-	return inspectPayloadFile(artifactPath, originalFilename, member, map[string]struct{}{})
+	return inspectPayloadFileWithOptions(
+		artifactPath, originalFilename, member, defaultPayloadInspectionOptions,
+	)
+}
+
+func inspectPayloadFileWithOptions(
+	artifactPath, originalFilename, member string,
+	options payloadInspectionOptions,
+) (PayloadFileInspection, error) {
+	return inspectPayloadFile(
+		artifactPath, originalFilename, member, options, map[string]struct{}{},
+	)
 }
 
 func inspectPayloadFile(
 	artifactPath, originalFilename, member string,
+	options payloadInspectionOptions,
 	visited map[string]struct{},
 ) (PayloadFileInspection, error) {
 	want, ok := NormalizedArchivePath(member)
@@ -111,19 +144,37 @@ func inspectPayloadFile(
 		if err != nil {
 			return PayloadFileInspection{}, err
 		}
-		if info.Size() > maxInspectedPayloadBytes {
-			return PayloadFileInspection{}, fmt.Errorf("payload file exceeds the inspection safety limit")
+		result := PayloadFileInspection{
+			Path: want, Type: "file", Mode: "0755", Size: info.Size(), Executable: true,
+		}
+		if info.Size() > options.maxTotalBytes {
+			result.InspectionNotice = payloadInspectionLimitNotice(options.maxTotalBytes)
+			return result, nil
+		}
+		if info.Size() > options.maxInMemoryBytes {
+			file, err := openRegular(artifactPath)
+			if err != nil {
+				return PayloadFileInspection{}, err
+			}
+			defer file.Close()
+			prefix, sum, _, err := inspectBody(
+				io.NewSectionReader(file, 0, info.Size()), maxPayloadTextBytes, options.maxTotalBytes,
+			)
+			if err != nil {
+				return PayloadFileInspection{}, err
+			}
+			result.SHA256 = sum
+			return inspectPayloadReaderAt(result, file, prefix), nil
 		}
 		data, err := os.ReadFile(artifactPath)
 		if err != nil {
 			return PayloadFileInspection{}, err
 		}
-		return inspectPayloadBytes(PayloadFileInspection{
-			Path: want, Type: "file", Mode: "0755", Size: info.Size(), Executable: true,
-		}, data), nil
+		return inspectPayloadBytes(result, data), nil
 	}
 
-	collector := payloadInspectionCollector{want: want}
+	collector := payloadInspectionCollector{want: want, options: options}
+	defer collector.close()
 	switch sourceType {
 	case SourceDebian:
 		err = walkDebData(artifactPath, collector.walk)
@@ -150,7 +201,9 @@ func inspectPayloadFile(
 		if !ok || target == "" {
 			return PayloadFileInspection{}, fmt.Errorf("invalid hardlink target for %s", want)
 		}
-		targetResult, err := inspectPayloadFile(artifactPath, originalFilename, target, visited)
+		targetResult, err := inspectPayloadFile(
+			artifactPath, originalFilename, target, options, visited,
+		)
 		if err != nil {
 			return PayloadFileInspection{}, err
 		}
@@ -164,14 +217,29 @@ func inspectPayloadFile(
 		collector.result.InspectionNotice = targetResult.InspectionNotice
 		return collector.result, nil
 	}
+	if collector.result.InspectionNotice != "" {
+		return collector.result, nil
+	}
+	if collector.file != nil {
+		return inspectPayloadReaderAt(collector.result, collector.file, collector.prefix), nil
+	}
 	return inspectPayloadBytes(collector.result, collector.data), nil
 }
 
 type payloadInspectionCollector struct {
-	want   string
-	found  bool
-	result PayloadFileInspection
-	data   []byte
+	want    string
+	found   bool
+	result  PayloadFileInspection
+	data    []byte
+	file    *os.File
+	prefix  []byte
+	options payloadInspectionOptions
+}
+
+func (c *payloadInspectionCollector) close() {
+	if c.file != nil {
+		_ = c.file.Close()
+	}
 }
 
 func (c *payloadInspectionCollector) walk(entry walkedEntry, body io.Reader) error {
@@ -194,12 +262,33 @@ func (c *payloadInspectionCollector) walk(entry walkedEntry, body io.Reader) err
 		_, _ = io.Copy(io.Discard, body)
 		return errStopWalk
 	}
-	if entry.Size > maxInspectedPayloadBytes {
-		c.result.InspectionNotice = "File exceeds the 256 MiB static-inspection limit"
-		_, _ = io.Copy(io.Discard, body)
+	if entry.Size > c.options.maxTotalBytes {
+		c.result.InspectionNotice = payloadInspectionLimitNotice(c.options.maxTotalBytes)
 		return errStopWalk
 	}
-	data, err := readLimited(body, maxInspectedPayloadBytes)
+	if entry.Size > c.options.maxInMemoryBytes {
+		file, err := os.CreateTemp(c.options.tempDir, "pacsmith-payload-inspection-*")
+		if err != nil {
+			return err
+		}
+		name := file.Name()
+		if err := os.Remove(name); err != nil {
+			_ = file.Close()
+			_ = os.Remove(name)
+			return fmt.Errorf("remove payload inspection temporary file: %w", err)
+		}
+		c.file = file
+		prefix, sum, _, err := inspectBody(
+			io.TeeReader(body, file), maxPayloadTextBytes, c.options.maxTotalBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.prefix = prefix
+		c.result.SHA256 = sum
+		return errStopWalk
+	}
+	data, err := readLimited(body, int(c.options.maxInMemoryBytes))
 	if err != nil {
 		return err
 	}
@@ -210,26 +299,63 @@ func (c *payloadInspectionCollector) walk(entry walkedEntry, body io.Reader) err
 func inspectPayloadBytes(result PayloadFileInspection, data []byte) PayloadFileInspection {
 	sum := sha256.Sum256(data)
 	result.SHA256 = hex.EncodeToString(sum[:])
-	if len(data) > 0 {
-		magicSize := min(len(data), 32)
-		result.MagicHex = hex.EncodeToString(data[:magicSize])
-		result.MIME = http.DetectContentType(data[:min(len(data), 512)])
+	return inspectPayloadReaderAt(result, bytes.NewReader(data), data)
+}
+
+func inspectPayloadReaderAt(
+	result PayloadFileInspection,
+	reader io.ReaderAt,
+	prefix []byte,
+) PayloadFileInspection {
+	if len(prefix) > 0 {
+		magicSize := min(len(prefix), 32)
+		result.MagicHex = hex.EncodeToString(prefix[:magicSize])
+		result.MIME = http.DetectContentType(prefix[:min(len(prefix), 512)])
 	}
-	if elfFile, err := elf.NewFile(bytes.NewReader(data)); err == nil {
+	boundedReader := &boundedReaderAt{reader: reader, remaining: maxELFInspectionReadBytes}
+	if elfFile, err := elf.NewFile(boundedReader); err == nil {
 		result.Executable = true
 		result.ELF = inspectELF(elfFile)
+		if boundedReader.exceeded {
+			result.InspectionNotice = "ELF metadata exceeds the 64 MiB inspection memory budget"
+		}
 		return result
 	}
-	if utf8.Valid(data) && !bytes.ContainsRune(data, '\x00') {
-		const textLimit = 256 << 10
-		preview := data
-		if len(preview) > textLimit {
-			preview = preview[:textLimit]
-			result.TextTruncated = true
-		}
+	if boundedReader.exceeded {
+		result.InspectionNotice = "ELF metadata exceeds the 64 MiB inspection memory budget"
+		return result
+	}
+	preview := prefix
+	if len(preview) > maxPayloadTextBytes {
+		preview = preview[:maxPayloadTextBytes]
+	}
+	if utf8.Valid(preview) && !bytes.ContainsRune(preview, '\x00') {
 		result.Text = string(preview)
+		result.TextTruncated = result.Size > int64(len(preview))
 	}
 	return result
+}
+
+type boundedReaderAt struct {
+	reader    io.ReaderAt
+	remaining int64
+	exceeded  bool
+}
+
+func (r *boundedReaderAt) ReadAt(data []byte, offset int64) (int, error) {
+	if int64(len(data)) > r.remaining {
+		r.exceeded = true
+		return 0, errELFInspectionReadLimit
+	}
+	r.remaining -= int64(len(data))
+	return r.reader.ReadAt(data, offset)
+}
+
+func payloadInspectionLimitNotice(limit int64) string {
+	if limit == 2<<30 {
+		return "File exceeds the 2 GiB static-inspection limit"
+	}
+	return fmt.Sprintf("File exceeds the %d-byte static-inspection limit", limit)
 }
 
 func inspectELF(file *elf.File) *ELFInspection {

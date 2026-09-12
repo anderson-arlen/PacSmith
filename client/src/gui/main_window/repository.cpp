@@ -134,7 +134,6 @@ void MainWindow::applyProjectRepository(const ProjectRepository &status) {
     }
     repoPromoteButton_->setVisible(status.stableChannelEnabled);
     repoPromoteButton_->setEnabled(status.publish && status.stableChannelEnabled && status.hasUnstable);
-    repoSaveButton_->setEnabled(editable);
     repoStatusLabel_->clear();
     populating_ = false;
 }
@@ -146,11 +145,9 @@ void MainWindow::populateRepository() {
         if (repoStatusLabel_ != nullptr) {
             repoStatusLabel_->setText(QStringLiteral("Open a project to configure repository publication."));
         }
-        if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
         if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
         return;
     }
-    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(!repositoryOperationInFlight_);
     if (applyingServerRefresh_) {
         applyProjectRepository(project_->repository);
         return;
@@ -164,7 +161,6 @@ void MainWindow::populateRepository() {
     repoSoakOverrideCheck_->setEnabled(false);
     repoSoakDays_->setEnabled(false);
     repoOverrideEdit_->setEnabled(false);
-    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
     if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
     const auto config = library_.config();
     auto *watcher = new QFutureWatcher<RepositoryTaskResult>(this);
@@ -228,7 +224,6 @@ bool MainWindow::saveProjectRepository() {
     repoSoakOverrideCheck_->setEnabled(false);
     repoSoakDays_->setEnabled(false);
     repoOverrideEdit_->setEnabled(false);
-    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
     if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
     if (repoStatusLabel_ != nullptr) repoStatusLabel_->setText(QStringLiteral("Saving repository settings…"));
     const auto config = library_.config();
@@ -240,7 +235,6 @@ bool MainWindow::saveProjectRepository() {
         repositoryOperationInFlight_ = false;
         if (!project_ || project_->id != projectId) return;
         if (!result.status) {
-            if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(true);
             repoPublishCheck_->setEnabled(true);
             repoAutomaticSoakCheck_->setEnabled(repoPublishCheck_->isChecked() &&
                                                 project_->repository.stableChannelEnabled);
@@ -275,7 +269,6 @@ void MainWindow::promoteProjectRepository() {
     }
     const auto projectId = project_->id;
     repositoryOperationInFlight_ = true;
-    if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(false);
     if (repoPromoteButton_ != nullptr) repoPromoteButton_->setEnabled(false);
     if (repoStatusLabel_ != nullptr) repoStatusLabel_->setText(QStringLiteral("Promoting package to stable…"));
     const auto config = library_.config();
@@ -287,7 +280,6 @@ void MainWindow::promoteProjectRepository() {
         repositoryOperationInFlight_ = false;
         if (!project_ || project_->id != projectId) return;
         if (!result.status) {
-            if (repoSaveButton_ != nullptr) repoSaveButton_->setEnabled(true);
             QMessageBox::critical(this, QStringLiteral("Could not promote to stable"), result.error);
             return;
         }

@@ -15,6 +15,8 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
+#include <QSplitter>
+#include <QSplitterHandle>
 #include <QTest>
 #include <QWheelEvent>
 
@@ -34,8 +36,39 @@ class WheelScrollGuardTest final : public QObject {
 
 private slots:
     void initTestCase() {
+        installPaneResizeStyle();
         guard_ = new WheelScrollGuard(this);
         qApp->installEventFilter(guard_);
+    }
+
+    void resizeGrips_data() {
+        QTest::addColumn<Qt::Orientation>("orientation");
+        QTest::newRow("side-by-side") << Qt::Horizontal;
+        QTest::newRow("stacked") << Qt::Vertical;
+    }
+
+    void resizeGrips() {
+        QFETCH(Qt::Orientation, orientation);
+        QSplitter splitter(orientation);
+        splitter.resize(600, 400);
+        splitter.addWidget(new QWidget);
+        splitter.addWidget(new QWidget);
+        splitter.setSizes({250, 250});
+        splitter.show();
+        auto *handle = splitter.handle(1);
+        QTRY_VERIFY(handle->isVisible());
+        QCOMPARE(splitter.handleWidth(), 12);
+        QCOMPARE(orientation == Qt::Horizontal ? handle->width() : handle->height(), 12);
+        const auto before = splitter.sizes().first();
+        const auto grip = handle->rect().center();
+        QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, grip);
+        QTest::mouseMove(handle, grip + (orientation == Qt::Horizontal ? QPoint(60, 0) : QPoint(0, 60)));
+        QTRY_VERIFY(splitter.sizes().first() > before + 40);
+        QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+        if (qEnvironmentVariableIsSet("PACSMITH_TEST_PANE_SCREENSHOTS")) {
+            splitter.grab().save(qEnvironmentVariable("PACSMITH_TEST_PANE_SCREENSHOTS") +
+                (orientation == Qt::Horizontal ? QStringLiteral("-horizontal.png") : QStringLiteral("-vertical.png")));
+        }
     }
 
     void wheelOverValueControlsScrollsThePage() {

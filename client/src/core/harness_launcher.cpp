@@ -1,6 +1,5 @@
 #include "core/harness_launcher.hpp"
 
-#include <QProcess>
 
 namespace pacsmith {
 namespace {
@@ -24,36 +23,6 @@ QString basePrompt(const QString &projectId, const QString &releaseId) {
     return prompt;
 }
 
-}
-
-HarnessLaunchResult HarnessLauncher::launch(const HarnessProfile &profile, const QString &prompt) {
-    HarnessLaunchResult result;
-    if (profile.executable.trimmed().isEmpty()) {
-        result.error = QStringLiteral("The harness executable is empty");
-        return result;
-    }
-    bool insertedPrompt = false;
-    const auto arguments = expandedArguments(profile, prompt, &insertedPrompt);
-    result.promptNeedsClipboard = !insertedPrompt;
-    result.started = QProcess::startDetached(profile.executable, arguments);
-    if (!result.started) result.error = QStringLiteral("Could not start %1").arg(profile.executable);
-    return result;
-}
-
-QStringList HarnessLauncher::expandedArguments(const HarnessProfile &profile,
-                                               const QString &prompt,
-                                               bool *promptInserted) {
-    QStringList arguments;
-    bool inserted = false;
-    for (auto argument : profile.arguments) {
-        if (argument.contains(QStringLiteral("{prompt}"))) {
-            argument.replace(QStringLiteral("{prompt}"), prompt);
-            inserted = true;
-        }
-        arguments.append(argument);
-    }
-    if (promptInserted != nullptr) *promptInserted = inserted;
-    return arguments;
 }
 
 QString HarnessLauncher::projectPrompt(const QString &projectId, const QString &releaseId) {

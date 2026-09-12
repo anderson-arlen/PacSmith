@@ -148,7 +148,7 @@ void MainWindow::populatePkgbuild() {
     const bool keepDraft = pkgbuildEditor_ != nullptr &&
                            pkgbuildEditor_->document()->isModified() &&
                            isSectionActive(EditorSection::ConfigPkgbuild);
-    if (pkgbuildEditor_ != nullptr && !keepDraft) {
+    if (pkgbuildEditor_ != nullptr && !keepDraft && pkgbuildEditor_->toPlainText() != *contents) {
         pkgbuildEditor_->setPlainText(*contents);
         pkgbuildEditor_->document()->setModified(false);
     }
@@ -198,7 +198,7 @@ void MainWindow::populateUpdates() {
         rpmArchitecture_, rpmPackageName_,
         aptSigningKeyUrl_, aptSigningKeyDownloadButton_, aptSigningKeyring_, aptSigningKey_,
         githubOwner_, githubRepository_, githubAssetRegex_,
-        githubPrereleases_, updateCandidates_, updateSaveButton_};
+        githubPrereleases_, updateCandidates_};
     if (tracker == nullptr) {
         updateOwnerLabel_->setText(
             QStringLiteral("No analyzed release currently owns the project update view. Prepare an artifact first."));
@@ -441,6 +441,10 @@ void MainWindow::populateUpdates() {
         if (!tracker->update.lastAutomaticStatus.isEmpty()) {
             const auto automaticLabel = trackerAutomaticPaused
                 ? QStringLiteral("⚠ Automatic handling paused")
+                : tracker->update.lastAutomaticStatus == QStringLiteral("ai-pending")
+                    ? QStringLiteral("Waiting for AI review")
+                : tracker->update.lastAutomaticStatus == QStringLiteral("ai-reviewing")
+                    ? QStringLiteral("AI review running")
                 : QStringLiteral("Automatic handling: %1")
                       .arg(tracker->update.lastAutomaticStatus);
             statusLines.append(automaticLabel +
@@ -636,7 +640,6 @@ bool MainWindow::savePkgbuild() {
     projectCache_.insert(project_->id, *project_);
     pkgbuildEditor_->document()->setModified(false);
     configureEditorProfile();
-    populatePkgbuild();
     populateBuild();
     populateHistory();
     statusBar()->showMessage(QStringLiteral("PKGBUILD saved"), 4000);
@@ -742,6 +745,8 @@ void MainWindow::saveUpdateConfigurationThen(std::function<void(bool)> completed
                         : updateStrategy_->currentIndex() == 2 ? UpdateStrategy::AptRepository
                         : updateStrategy_->currentIndex() == 3 ? UpdateStrategy::RpmRepository
                                                                : UpdateStrategy::GitHubRelease;
+    const auto previousUpdate = tracker->update;
+    const auto previousPolicy = project_->autoBuildPolicy;
     const auto previousStrategy = tracker->update.strategy;
     const auto previousUrl = tracker->update.url;
     project_->autoBuildPolicy = autoBuildPolicyFromName(
@@ -776,7 +781,9 @@ void MainWindow::saveUpdateConfigurationThen(std::function<void(bool)> completed
     }
     const auto validationError = DomainValidation::updateConfiguration(tracker->update);
     if (!validationError.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Invalid update source"), validationError);
+        tracker->update = previousUpdate;
+        project_->autoBuildPolicy = previousPolicy;
+        setUpdateCheckStatus(QStringLiteral("Changes not saved: %1").arg(validationError), true);
         if (completed) completed(false);
         return;
     }
@@ -807,7 +814,6 @@ void MainWindow::saveUpdateConfigurationThen(std::function<void(bool)> completed
     updateConfigurationSaveProjectId_ = projectId;
     updateConfigurationSaveReleaseId_ = releaseId;
     if (updatesEditor_ != nullptr) updatesEditor_->setEnabled(false);
-    if (updateSaveButton_ != nullptr) updateSaveButton_->setEnabled(false);
     syncUpdateCheckButtons();
     setUpdateCheckStatus(QStringLiteral("Saving update configuration…"));
     updateUpdateCheckIndicators();

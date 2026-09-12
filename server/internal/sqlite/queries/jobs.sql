@@ -29,12 +29,15 @@ WHERE id = ?
 RETURNING id, kind, status, project_id, release_id, payload_json, error, log_offset,
           message, current, total, failed_items, paused_items, created_at, started_at, finished_at;
 
--- name: InterruptRunningJobs :exec
-UPDATE jobs
-SET status = 'interrupted',
-    error = 'interrupted by daemon restart',
-    finished_at = ?
-WHERE status = 'running';
+-- name: ListQueuedJobs :many
+SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at, id;
+
+-- name: ListRunningJobs :many
+SELECT * FROM jobs WHERE status = 'running' ORDER BY created_at, id;
+
+-- name: GetLatestBuildJobForRelease :one
+SELECT * FROM jobs WHERE kind = 'build' AND release_id = ?
+ORDER BY created_at DESC, id DESC LIMIT 1;
 
 -- name: ListActiveJobsByKind :many
 SELECT id, kind, status, project_id, release_id, payload_json, error, log_offset,

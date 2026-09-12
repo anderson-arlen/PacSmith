@@ -61,6 +61,46 @@ func TestBuildParallelismArguments(t *testing.T) {
 	}
 }
 
+func TestBuiltPackagePathsExcludeImportedArchSource(t *testing.T) {
+	work := t.TempDir()
+	sourceContents := []byte("upstream package")
+	sourceDirectory := filepath.Join(work, "sources")
+	if err := os.MkdirAll(sourceDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourceStored := filepath.Join(sourceDirectory, "vendor-1-1-x86_64.pkg.tar.zst")
+	if err := os.WriteFile(sourceStored, sourceContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceLink := filepath.Join(work, filepath.Base(sourceStored))
+	if err := os.Symlink(filepath.Join("sources", filepath.Base(sourceStored)), sourceLink); err != nil {
+		t.Fatal(err)
+	}
+	built := filepath.Join(work, "vendor-bin-1-1-x86_64.pkg.tar.zst")
+	if err := os.WriteFile(built, []byte("pacsmith package"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(built+".sig", []byte("signature"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := builtPackagePaths(work, sourceLink, sha256Hex(sourceContents))
+	if len(paths) != 1 || paths[0] != built {
+		t.Fatalf("built package paths = %#v, want only %q", paths, built)
+	}
+
+	if err := os.Remove(sourceLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourceLink, []byte("rebuilt at source filename"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths = builtPackagePaths(work, sourceLink, sha256Hex(sourceContents))
+	if len(paths) != 2 || paths[0] != sourceLink || paths[1] != built {
+		t.Fatalf("overwritten source path was not retained as a build output: %#v", paths)
+	}
+}
+
 func TestPodmanBuildArgumentsConfineCustomBuild(t *testing.T) {
 	execution := buildExecution{
 		ReleaseID: "release-1", ProjectID: "project-1",

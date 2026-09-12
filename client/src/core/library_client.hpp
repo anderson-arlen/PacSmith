@@ -35,6 +35,8 @@ struct JobStatus {
     qint64 failedItems{0};
     qint64 pausedItems{0};
     QJsonObject result;
+    QDateTime startedAt;
+    QDateTime finishedAt;
 };
 
 struct CredentialStatus {
@@ -122,6 +124,9 @@ public:
     explicit LibraryClient(ConnectionConfig config = ConnectionConfig::load());
 
     [[nodiscard]] QList<Project> list(QString *error = nullptr) const;
+    [[nodiscard]] std::optional<PackageRelease> setAutomaticUpdateStatus(
+        const PackageRelease &release, const QString &status, const QString &message,
+        QString *error = nullptr) const;
     [[nodiscard]] std::optional<Project> load(const QString &idOrName, QString *error = nullptr) const;
     [[nodiscard]] bool save(Project &project, QString *error = nullptr) const;
     [[nodiscard]] bool deleteProject(const QString &id, QString *error = nullptr) const;

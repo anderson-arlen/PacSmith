@@ -1,6 +1,12 @@
+#include "core/acp_conversations.hpp"
+#include "core/acp_environment.hpp"
+#include <QDir>
+#include <QFileInfo>
+#include "gui/acp_chat_widget.hpp"
 #include "gui/application_session.hpp"
 
 #include "core/app_settings.hpp"
+#include "core/automatic_update_review.hpp"
 #include "core/background_updates.hpp"
 #include "core/library_client.hpp"
 #include "core/library_events.hpp"
@@ -45,6 +51,7 @@ QIcon trayStatusIcon(const int availableUpdates, const QColor &foreground,
 
 struct UpdateCensusResult {
     QList<Project> projects;
+    QList<AutomaticReviewRequest> reviews;
     QString error;
 };
 
@@ -57,10 +64,13 @@ QString updateCompletionMessage(const JobStatus &job) {
     const auto checks = job.result.value(QStringLiteral("checks")).toArray();
     int available = 0;
     int built = 0;
+    int aiReviews = 0;
     QStringList failures;
     QStringList paused;
     for (const auto &value : checks) {
         const auto check = value.toObject();
+        const auto automaticStatus = check.value(QStringLiteral("automatic_status")).toString();
+        if (automaticStatus == QStringLiteral("ai-pending") || automaticStatus == QStringLiteral("ai-reviewing")) ++aiReviews;
         if (check.value(QStringLiteral("update_available")).toBool()) ++available;
         if (check.value(QStringLiteral("built")).toBool()) ++built;
         auto name = check.value(QStringLiteral("project_name")).toString();
@@ -99,7 +109,12 @@ QString updateCompletionMessage(const JobStatus &job) {
             summary += QStringLiteral("\nAutomatic handling paused:\n%1")
                            .arg(paused.join(QLatin1Char('\n')));
         }
+        if (aiReviews > 0) summary += QStringLiteral("\n%1 update(s) awaiting or undergoing AI review.").arg(aiReviews);
         return summary;
+    }
+    if (aiReviews > 0) {
+        return QStringLiteral("Update check finished: %1 update(s) found; %2 built automatically; %3 awaiting or undergoing AI review.")
+            .arg(available).arg(built).arg(aiReviews);
     }
     if (available > 0) {
         return QStringLiteral("Update check finished: %1 update(s) found; %2 built automatically.")
@@ -143,8 +158,27 @@ bool ApplicationSession::trayWanted() const {
 }
 
 void ApplicationSession::start(const bool startHidden, const QString &importPath) {
+    const AcpConversations conversations(QDir(acpDataDirectory()).filePath(QStringLiteral("conversations")));
+    conversations.cleanup();
+    auto *conversationCleanup = new QTimer(this);
+    conversationCleanup->setInterval(60 * 60 * 1000);
+    connect(conversationCleanup, &QTimer::timeout, this, [this, conversations] {
+        const auto now = QDateTime::currentDateTimeUtc();
+        if (window_) for (auto *chat : window_->findChildren<AcpChatWidget *>()) {
+            if (chat->isVisible() || chat->isBusy()) continue;
+            const QFileInfo record(QDir(acpDataDirectory()).filePath(QStringLiteral("conversations/%1.json").arg(chat->objectName())));
+            if (record.exists() && record.lastModified() < now.addDays(-10)) delete chat;
+        }
+        conversations.cleanup(now);
+    });
+    conversationCleanup->start();
     startHidden_ = startHidden;
     trayRefresh_.start();
+    auto *reviewRefresh = new QTimer(this);
+    reviewRefresh->setInterval(30000);
+    connect(reviewRefresh, &QTimer::timeout, this, &ApplicationSession::refreshUpdateCensus);
+    reviewRefresh->start();
+    refreshUpdateCensus();
     if (trayWanted()) ensureTray();
     libraryEventStream_ = new LibraryEventStream(ConnectionConfig::load(), this);
     connect(libraryEventStream_, &LibraryEventStream::eventReceived,
@@ -336,13 +370,22 @@ void ApplicationSession::refreshUpdateCensus() {
         watcher->deleteLater();
         updateCensusInFlight_ = false;
         if (!result.error.isEmpty()) return;
+        updateReviewRecoveryAttempted_ = true;
         static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(result.projects));
         refreshTray();
+        if (!result.reviews.isEmpty()) {
+            showWorkbench();
+            for (const auto &review : result.reviews) window_->openAiConversation(review, true);
+        }
     });
     const auto connection = ConnectionConfig::load();
-    watcher->setFuture(QtConcurrent::run([connection] {
+    const auto settings = settingsStore_.load();
+    const bool recoverInterrupted = !updateReviewRecoveryAttempted_;
+    watcher->setFuture(QtConcurrent::run([connection, settings, recoverInterrupted] {
         UpdateCensusResult result;
-        result.projects = LibraryClient(connection).list(&result.error);
+        const LibraryClient client(connection);
+        result.projects = client.list(&result.error);
+        if (result.error.isEmpty()) result.reviews = claimPendingUpdateReviews(client, result.projects, settings, {}, recoverInterrupted);
         return result;
     }));
 }

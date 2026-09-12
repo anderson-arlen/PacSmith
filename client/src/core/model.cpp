@@ -915,7 +915,8 @@ QJsonObject PackageArtifact::toJson() const {
             {QStringLiteral("packageVersion"), packageVersion},
             {QStringLiteral("architecture"), architecture},
             {QStringLiteral("size"), size},
-            {QStringLiteral("createdAt"), dateToString(createdAt)}};
+            {QStringLiteral("createdAt"), dateToString(createdAt)},
+            {QStringLiteral("id"), artifactId}};
 }
 
 PackageArtifact PackageArtifact::fromJson(const QJsonObject &object) {
@@ -925,7 +926,8 @@ PackageArtifact PackageArtifact::fromJson(const QJsonObject &object) {
             object.value(QStringLiteral("packageVersion")).toString(),
             object.value(QStringLiteral("architecture")).toString(),
             object.value(QStringLiteral("size")).toInteger(),
-            dateFromString(object.value(QStringLiteral("createdAt")))};
+            dateFromString(object.value(QStringLiteral("createdAt"))),
+            object.value(QStringLiteral("id")).toString()};
 }
 
 QJsonObject BuildRecord::toJson() const {
@@ -1073,6 +1075,20 @@ PackageRelease PackageRelease::fromJson(const QJsonObject &object) {
     result.createdAt = dateFromString(object.value(QStringLiteral("createdAt")));
     result.modifiedAt = dateFromString(object.value(QStringLiteral("modifiedAt")));
     return result;
+}
+
+QString PackageRelease::preferredBuiltArtifactId() const {
+    for (auto build = builds.crbegin(); build != builds.crend(); ++build) {
+        if (build->status != BuildStatus::Succeeded) continue;
+        for (auto artifact = build->artifacts.crbegin(); artifact != build->artifacts.crend();
+             ++artifact) {
+            if (!artifact->artifactId.isEmpty() && artifact->packageName == archPackageName &&
+                artifact->sha256 != sourceSha256) {
+                return artifact->artifactId;
+            }
+        }
+    }
+    return builtArtifactIds.isEmpty() ? QString{} : builtArtifactIds.last();
 }
 
 PackageRelease *Project::release(const QString &releaseId) {

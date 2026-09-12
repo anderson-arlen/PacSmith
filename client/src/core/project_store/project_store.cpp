@@ -516,21 +516,7 @@ bool ProjectStore::reconcileInstalled(Project &project, QString *error) const {
                 }
             }
         } else {
-            for (const auto &release : project.releases) {
-                if (!project.installedReleaseId.isEmpty()) break;
-                bool matches = expectedArchVersion(release) == *installed;
-                for (const auto &build : release.builds) {
-                    matches = matches || std::any_of(build.artifacts.cbegin(), build.artifacts.cend(),
-                                                      [&](const auto &artifact) {
-                                                          return artifact.packageName == project.archPackageName &&
-                                                                 artifact.packageVersion == *installed;
-                                                      });
-                }
-                if (matches) {
-                    project.installedReleaseId = release.id;
-                    break;
-                }
-            }
+            project.installedReleaseId = installedReleaseIdForVersion(project, *installed);
         }
         project.externallyInstalled = project.installedReleaseId.isEmpty() && !xdataOwned;
     }

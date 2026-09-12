@@ -55,10 +55,10 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
     QVERIFY(names.contains(QStringLiteral("import_github_release")));
     QVERIFY(names.contains(QStringLiteral("import_direct_url")));
     QVERIFY(names.contains(QStringLiteral("import_repository_signing_key")));
-    QVERIFY(names.contains(QStringLiteral("list_harness_profiles")));
-    QVERIFY(names.contains(QStringLiteral("upsert_harness_profile")));
-    QVERIFY(names.contains(QStringLiteral("remove_harness_profile")));
-    QVERIFY(names.contains(QStringLiteral("set_default_harness_profile")));
+    QVERIFY(names.contains(QStringLiteral("get_ai_harness")));
+    QVERIFY(names.contains(QStringLiteral("set_ai_harness")));
+    QVERIFY(names.contains(QStringLiteral("clear_ai_harness")));
+    QVERIFY(!names.contains(QStringLiteral("set_default_harness_profile")));
     for (const auto &name : {QStringLiteral("get_library_settings"),
                              QStringLiteral("set_library_settings"),
                              QStringLiteral("get_client_preferences"),
@@ -178,14 +178,14 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                 .value(QStringLiteral("inputSchema")).toObject()
                 .value(QStringLiteral("properties")).toObject()
                 .contains(QStringLiteral("asset_regex")));
-    const auto harnessProfile = findTool(QStringLiteral("upsert_harness_profile"));
+    const auto harnessProfile = findTool(QStringLiteral("set_ai_harness"));
     QVERIFY(harnessProfile.value(QStringLiteral("description")).toString()
-                .contains(QStringLiteral("visible terminal emulator")));
+                .contains(QStringLiteral("ACP stdio executable")));
     const auto profileAnnotations = harnessProfile.value(QStringLiteral("annotations")).toObject();
     QCOMPARE(profileAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), false);
     QCOMPARE(profileAnnotations.value(QStringLiteral("idempotentHint")).toBool(), true);
     const auto removeAnnotations =
-        findTool(QStringLiteral("remove_harness_profile")).value(QStringLiteral("annotations")).toObject();
+        findTool(QStringLiteral("clear_ai_harness")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(removeAnnotations.value(QStringLiteral("destructiveHint")).toBool(), true);
     const auto repositorySchema = findTool(QStringLiteral("configure_project_repository"))
                                       .value(QStringLiteral("inputSchema")).toObject();
@@ -386,17 +386,6 @@ void CoreTests::preservesConfiguredRemoteConnectionForMcp() {
 }
 
 void CoreTests::buildsHarnessPromptsAndArgumentsSafely() {
-    const auto hostilePrompt = QStringLiteral("review; $(touch /tmp/must-not-run) `false`");
-    pacsmith::HarnessProfile profile{
-        QStringLiteral("Harness"), QStringLiteral("harness"),
-        {QStringLiteral("--new"), QStringLiteral("--prompt={prompt}"), QStringLiteral("literal argument")}, true};
-    bool inserted = false;
-    const auto arguments = pacsmith::HarnessLauncher::expandedArguments(profile, hostilePrompt, &inserted);
-    QVERIFY(inserted);
-    QCOMPARE(arguments.size(), 3);
-    QCOMPARE(arguments.at(1), QStringLiteral("--prompt=") + hostilePrompt);
-    QCOMPARE(arguments.at(2), QStringLiteral("literal argument"));
-
     const auto prompt = pacsmith::HarnessLauncher::dependencyPrompt(
         QStringLiteral("project-id"), QStringLiteral("release-id"), QStringLiteral("libfoo >= 2"));
     QVERIFY(prompt.contains(QStringLiteral("project-id")));
@@ -457,9 +446,9 @@ void CoreTests::validatesPortableAgentPluginBundle() {
     QVERIFY(instructions.contains(QStringLiteral("Unix-socket access")));
     QVERIFY(instructions.contains(QStringLiteral("remote HTTPS/mTLS")));
     QVERIFY(instructions.contains(QStringLiteral("check_updates")));
-    QVERIFY(instructions.contains(QStringLiteral("upsert_harness_profile")));
+    QVERIFY(instructions.contains(QStringLiteral("set_ai_harness")));
     QVERIFY(instructions.contains(QStringLiteral(
-        "A terminal or TUI harness must open in a visible terminal emulator")));
+        "Use an ACP stdio executable")));
     QVERIFY(instructions.contains(QStringLiteral("`pacsmith check --all`")));
     QVERIFY(instructions.contains(QStringLiteral(
         "Prefer a first-party signed APT or RPM repository")));

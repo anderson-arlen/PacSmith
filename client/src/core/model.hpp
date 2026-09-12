@@ -408,6 +408,7 @@ struct PackageArtifact {
     QString architecture;
     qint64 size{0};
     QDateTime createdAt;
+    QString artifactId;
 
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static PackageArtifact fromJson(const QJsonObject &object);
@@ -476,6 +477,7 @@ struct PackageRelease {
 
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static PackageRelease fromJson(const QJsonObject &object);
+    [[nodiscard]] QString preferredBuiltArtifactId() const;
 };
 
 struct RepoPackageRef {

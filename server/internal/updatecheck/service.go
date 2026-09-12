@@ -188,15 +188,18 @@ func (s *Service) reconcilePreparedBuild(ctx context.Context, projectID string, 
 	} else if project.AutoBuildPolicy == "never" {
 		result.AutomaticStatus = "build-disabled"
 		result.AutomaticMessage = "this project's auto-build policy is Never"
-	} else if previous == nil {
+	} else if previous == nil && project.AutoBuildPolicy != "ai" {
 		result.AutomaticStatus = "paused"
 		result.AutomaticMessage = "previous package configuration has no successful build"
 	} else {
-		target := checkTargetFrom(project, *previous)
+		baseline := prepared
+		if previous != nil {
+			baseline = previous
+		}
+		target := checkTargetFrom(project, *baseline)
 		if built, buildErr := s.buildIfReviewFree(ctx, target, prepared.ID, log); buildErr != nil {
-			result.AutomaticStatus = "paused"
-			result.AutomaticMessage = buildErr.Error()
-			log("Automatic build paused: " + buildErr.Error() + "\n")
+			setAutomaticBuildError(&result, buildErr)
+			log("Automatic handling: " + buildErr.Error() + "\n")
 		} else {
 			result.Built = built
 			setAutomaticBuildOutcome(&result, built)
@@ -360,9 +363,8 @@ func (s *Service) check(ctx context.Context, target checkTarget, force bool, log
 		checked.AutomaticStatus = "build-disabled"
 		checked.AutomaticMessage = "this project's auto-build policy is Never"
 	} else if built, buildErr := s.buildIfReviewFree(ctx, target, imported.ReleaseID, log); buildErr != nil {
-		checked.AutomaticStatus = "paused"
-		checked.AutomaticMessage = buildErr.Error()
-		log("Automatic build paused: " + buildErr.Error() + "\n")
+		setAutomaticBuildError(&checked, buildErr)
+		log("Automatic handling: " + buildErr.Error() + "\n")
 	} else {
 		checked.Built = built
 		setAutomaticBuildOutcome(&checked, built)
@@ -402,6 +404,11 @@ func (s *Service) persistAutomaticOutcome(ctx context.Context, releaseID string,
 		update := cloneObject(object(release.Document["update"]))
 		if update == nil {
 			update = map[string]any{"strategy": StrategyManual}
+		}
+		// A desktop session may have claimed the pending review while this check
+		// was finishing. Never replace that claim with a fresh launch request.
+		if result.AutomaticStatus == "ai-pending" && stringValue(update, "lastAutomaticStatus") == "ai-reviewing" {
+			return nil
 		}
 		update["lastAutomaticStatus"] = result.AutomaticStatus
 		update["lastAutomaticMessage"] = result.AutomaticMessage
@@ -653,9 +660,6 @@ func (s *Service) prepare(ctx context.Context, target checkTarget, result Result
 
 func (s *Service) buildIfReviewFree(ctx context.Context, target checkTarget, releaseID string,
 	log func(string)) (bool, error) {
-	if !target.Project.RepoPublish {
-		return false, fmt.Errorf("repository publishing is not enabled for this project")
-	}
 	release, err := s.Library.GetRelease(ctx, releaseID)
 	if err != nil {
 		return false, err
@@ -664,15 +668,19 @@ func (s *Service) buildIfReviewFree(ctx context.Context, target checkTarget, rel
 		log("Automatic build skipped: release already has a successful package.\n")
 		return false, nil
 	}
+	if target.Project.AutoBuildPolicy == "ai" &&
+		stringValue(object(release.Document["update"]), "lastAutomaticStatus") == "ai-reviewing" {
+		return false, &automaticReviewPending{status: "ai-reviewing", message: "external AI harness is reviewing this release"}
+	}
 	if boolValue(release.Document, "pkgbuildManuallyModified") {
 		if target.Project.AutoBuildPolicy == "ai" {
-			return false, fmt.Errorf("AI review is required for the Custom PKGBUILD")
+			return false, &automaticReviewPending{status: "ai-pending", message: "waiting for the PacSmith desktop session to launch AI review of the Custom PKGBUILD"}
 		}
 		return false, fmt.Errorf("Custom PKGBUILDs require external review")
 	}
 	if blockers := automaticReviewBlockers(target.Release.Document, release.Document); len(blockers) > 0 {
 		if target.Project.AutoBuildPolicy == "ai" {
-			return false, fmt.Errorf("AI review is required: %s", strings.Join(blockers, "; "))
+			return false, &automaticReviewPending{status: "ai-pending", message: "waiting for the PacSmith desktop session to launch AI review: " + strings.Join(blockers, "; ")}
 		}
 		return false, fmt.Errorf("%s", strings.Join(blockers, "; "))
 	}

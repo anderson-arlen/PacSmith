@@ -37,25 +37,35 @@ func (s *Server) patchRepo(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
+	enablingRepository := patch.Enabled != nil && *patch.Enabled && !before.Enabled
+	enablingStable := patch.StableEnabled != nil && *patch.StableEnabled && !before.StableEnabled
 	var projectIDs []string
-	if patch.Enabled != nil && *patch.Enabled && !before.Enabled {
+	if enablingRepository || enablingStable {
 		if s.Jobs == nil {
 			writeError(w, http.StatusServiceUnavailable, "unavailable", "job queue is not configured")
 			return
 		}
+	}
+	if enablingRepository {
 		projectIDs, err = s.Repo.PublishedProjectIDs(r.Context())
 		if err != nil {
 			writeRequestError(w, err)
 			return
 		}
 	}
-	settings, err := s.Repo.PatchSettings(r.Context(), patch)
+	settings, err := s.Repo.PatchSettingsDeferred(r.Context(), patch)
 	if err != nil {
 		writeRequestError(w, err)
 		return
 	}
 	if s.ApplyRepo != nil {
 		if err := s.ApplyRepo(settings.ListenConfig()); err != nil {
+			writeRequestError(w, err)
+			return
+		}
+	}
+	if enablingStable {
+		if _, err := s.Jobs.Enqueue(r.Context(), jobs.KindRepositoryDistribution, nil, "", ""); err != nil {
 			writeRequestError(w, err)
 			return
 		}

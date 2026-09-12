@@ -420,7 +420,6 @@ void MainWindow::populateAppRunEditor() {
     const auto &appRun = currentRelease()->installMapping.appRun;
     const auto disableEditor = [this] {
         appRunEditor_->setEnabled(false);
-        saveAppRunButton_->setEnabled(false);
         if (keepOriginalAppRunButton_ != nullptr) keepOriginalAppRunButton_->setEnabled(false);
         if (restoreAppRunButton_ != nullptr) restoreAppRunButton_->setVisible(false);
     };
@@ -445,7 +444,6 @@ void MainWindow::populateAppRunEditor() {
         return;
     }
     appRunEditor_->setEnabled(true);
-    saveAppRunButton_->setEnabled(true);
     if (appRunEditor_->toPlainText() != appRun.contents) {
         appRunEditor_->setPlainText(appRun.contents);
         appRunEditor_->document()->setModified(false);
@@ -490,6 +488,7 @@ void MainWindow::saveAppRun() {
     appRun.provenance.userApproved = true;
     appRun.provenance.timestamp = QDateTime::currentDateTimeUtc();
     refreshGeneratedPkgbuildAfterModelChange();
+    appRunEditor_->document()->setModified(false);
     populateAppRunEditor();
     appRunStatus_->setText(appRun.userModified ? QStringLiteral("✓ Saved")
                                                : QStringLiteral("✓ Original kept"));
@@ -709,7 +708,6 @@ void MainWindow::populateDesktopEntries() {
         desktopEntryEditor_->setEnabled(false);
         desktopEntryEnabled_->setEnabled(false);
         desktopEntryDestination_->setEnabled(false);
-        saveDesktopEntryButton_->setEnabled(false);
         deleteDesktopEntryButton_->setEnabled(false);
         desktopEntryStatus_->setText(
             QStringLiteral("No desktop entry was detected. Choose New to create one."));
@@ -727,11 +725,12 @@ void MainWindow::updateSelectedDesktopEntry() {
     desktopEntryEditor_->setEnabled(true);
     desktopEntryEnabled_->setEnabled(true);
     desktopEntryDestination_->setEnabled(true);
-    saveDesktopEntryButton_->setEnabled(true);
     deleteDesktopEntryButton_->setEnabled(true);
     desktopEntryEnabled_->setChecked(desktop.enabled);
     desktopEntryDestination_->setText(desktop.destination);
-    desktopEntryEditor_->setPlainText(desktop.contents);
+    if (desktopEntryEditor_->toPlainText() != desktop.contents) {
+        desktopEntryEditor_->setPlainText(desktop.contents);
+    }
     desktopEntryEditor_->document()->setModified(false);
     desktopEntryStatus_->setText(
         desktop.missing
@@ -763,6 +762,7 @@ void MainWindow::saveSelectedDesktopEntry() {
     desktop.provenance.userApproved = true;
     desktop.provenance.timestamp = QDateTime::currentDateTimeUtc();
     refreshGeneratedPkgbuildAfterModelChange();
+    desktopEntryEditor_->document()->setModified(false);
     populateDesktopEntries();
     desktopEntriesList_->setCurrentRow(row);
     desktopEntryStatus_->setText(QStringLiteral("✓ Desktop entry validated and saved"));

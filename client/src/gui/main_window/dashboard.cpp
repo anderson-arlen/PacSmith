@@ -308,7 +308,6 @@ void MainWindow::showProjectDashboard() {
     rightStack_->setCurrentIndex(0);
     placeUpdatesEditor();
     placeRepositoryEditor();
-    if (projectTabs_ != nullptr) projectTabs_->setCurrentIndex(0);
     if (project_) refreshCurrentProject();
 }
 
@@ -772,6 +771,10 @@ void MainWindow::updateProjectListItem(const Project &project,
     const bool automaticHandlingPaused = healthRelease != nullptr &&
         healthRelease->state != ReleaseState::Built &&
         healthRelease->update.lastAutomaticStatus == QStringLiteral("paused");
+    const auto aiStatus = healthRelease != nullptr && healthRelease->state != ReleaseState::Built
+        ? healthRelease->update.lastAutomaticStatus : QString{};
+    const bool aiPending = aiStatus == QStringLiteral("ai-pending");
+    const bool aiReviewing = aiStatus == QStringLiteral("ai-reviewing");
     auto *item = projectListItem(project.id);
     if (item == nullptr) {
         item = new QListWidgetItem;
@@ -793,6 +796,8 @@ void MainWindow::updateProjectListItem(const Project &project,
                   updateCheckFailed ? QStringLiteral("Update check failed · %1").arg(repositoryName)
                   : automaticHandlingPaused
                       ? QStringLiteral("Automatic handling paused · %1").arg(repositoryName)
+                      : aiPending ? QStringLiteral("Waiting for AI review · %1").arg(repositoryName)
+                      : aiReviewing ? QStringLiteral("AI review running · %1").arg(repositoryName)
                       : repositoryName);
     item->setData(projectVisualStateRole, static_cast<int>(visualState));
     const bool savingUpdateConfiguration = updateConfigurationSaveInFlight_ &&
@@ -818,6 +823,9 @@ void MainWindow::updateProjectListItem(const Project &project,
     if (updateCheckFailed) {
         tooltip.append(QStringLiteral("Last update check failed: %1")
                            .arg(healthRelease->update.lastCheckMessage));
+    }
+    if (aiPending || aiReviewing) {
+        tooltip.append(healthRelease->update.lastAutomaticMessage);
     }
     if (automaticHandlingPaused) {
         tooltip.append(QStringLiteral("Automatic handling paused: %1")
@@ -857,7 +865,9 @@ void MainWindow::applyProjectList(QList<Project> projects, const QString &select
     }
     const auto updateState = BackgroundUpdateStateStore::load();
     for (const auto &project : projects) {
-        updateProjectListItem(project, updateState);
+        const auto cached = projectCache_.constFind(project.id);
+        updateProjectListItem(cached == projectCache_.cend() ? project : cached.value(),
+                              updateState);
         auto *item = projectListItem(project.id);
         if (project.id == previous) projectList_->setCurrentItem(item);
     }
@@ -953,6 +963,7 @@ void MainWindow::applyLoadedProject(Project project, const bool freshlyLoaded) {
     lifecycleEditing_ = false;
     projectCache_.insert(project.id, project);
     project_ = std::move(project);
+    updateProjectListItem(*project_, BackgroundUpdateStateStore::load());
     if (freshlyLoaded) projectHydration_.markLoaded(project_->id);
     const auto *initialRelease = project_->activeTrackingRelease();
     if (initialRelease == nullptr) initialRelease = project_->newestRelease();
@@ -1461,26 +1472,37 @@ void MainWindow::populateOverview() {
         if (release.id == selectedBefore) selectedRow = row;
     }
     if (selectedRow < 0 && !ordered.isEmpty()) selectedRow = 0;
-    if (selectedRow >= 0) releaseTable_->selectRow(selectedRow);
+    if (selectedRow >= 0) {
+        currentReleaseId_ = ordered.at(selectedRow)->id;
+        releaseTable_->selectRow(selectedRow);
+    }
 
-    const auto unresolved = std::count_if(currentRelease()->dependencies.cbegin(), currentRelease()->dependencies.cend(),
+    const auto *selectedRelease = currentRelease();
+    if (selectedRelease == nullptr) {
+        overviewChecklist_->setText(QStringLiteral("No retained release is available."));
+        updateDashboardActions();
+        tableBlocker.unblock();
+        return;
+    }
+
+    const auto unresolved = std::count_if(selectedRelease->dependencies.cbegin(), selectedRelease->dependencies.cend(),
                                           [this](const auto &dependency) {
                                               return dependency.status == MappingStatus::Unresolved ||
                                                      repositoryPackageUnavailable(
                                                          dependency,
                                                          repositoryDependencyAvailability_);
                                           });
-    const auto scriptReviews = pendingScriptFindings(*currentRelease());
-    const auto payloadReviews = pendingPayloadReviews(*currentRelease());
+    const auto scriptReviews = pendingScriptFindings(*selectedRelease);
+    const auto payloadReviews = pendingPayloadReviews(*selectedRelease);
     QStringList lines{QStringLiteral("✓ Source analyzed and SHA256 recorded"),
-                      currentRelease()->sourceType == SourcePackageType::Debian
+                      selectedRelease->sourceType == SourcePackageType::Debian
                           ? QStringLiteral("✓ Debian metadata imported")
-                      : currentRelease()->sourceType == SourcePackageType::Rpm
+                      : selectedRelease->sourceType == SourcePackageType::Rpm
                           ? QStringLiteral("✓ RPM metadata imported")
                           : QStringLiteral("✓ Artifact metadata imported"),
                       unresolved == 0 ? QStringLiteral("✓ Dependencies resolved, available, or explicitly treated")
                                       : QStringLiteral("⚠ %1 dependency group(s) need attention").arg(unresolved),
-                      currentRelease()->maintainerScripts.isEmpty()
+                      selectedRelease->maintainerScripts.isEmpty()
                           ? QStringLiteral("✓ No maintainer scripts detected")
                           : scriptReviews == 0
                                 ? QStringLiteral("✓ Maintainer-script responsibilities resolved")
@@ -1488,45 +1510,48 @@ void MainWindow::populateOverview() {
                       payloadReviews == 0
                           ? QStringLiteral("✓ Flagged payload files have explicit decisions")
                           : QStringLiteral("⚠ %1 payload file(s) need a keep/exclude decision").arg(payloadReviews),
-                      currentRelease()->lifecycleScript.contents.isEmpty()
+                      selectedRelease->lifecycleScript.contents.isEmpty()
                           ? QStringLiteral("✓ No generated privileged lifecycle script")
-                      : !currentRelease()->lifecycleScript.validationPassed
+                      : !selectedRelease->lifecycleScript.validationPassed
                           ? QStringLiteral("⚠ Generated lifecycle script failed validation")
-                      : currentRelease()->lifecycleScript.requiresAcknowledgement()
+                      : selectedRelease->lifecycleScript.requiresAcknowledgement()
                           ? QStringLiteral("⚠ Lifecycle script requires exact-content acknowledgement")
                           : QStringLiteral("✓ Generated lifecycle script acknowledged"),
                       QStringLiteral("✓ PKGBUILD present"),
-                      currentRelease()->update.strategy == UpdateStrategy::Manual
+                      selectedRelease->update.strategy == UpdateStrategy::Manual
                           ? QStringLiteral("○ Automatic update source not configured")
-                      : currentRelease()->state != ReleaseState::Built &&
-                                currentRelease()->update.lastAutomaticStatus == QStringLiteral("paused")
+                      : selectedRelease->state != ReleaseState::Built &&
+                                selectedRelease->update.lastAutomaticStatus == QStringLiteral("paused")
                           ? QStringLiteral("⚠ Automatic handling paused: %1")
-                                .arg(currentRelease()->update.lastAutomaticMessage)
-                      : currentRelease()->update.strategy == UpdateStrategy::DirectUrl
-                          ? currentRelease()->update.lastChecked.isValid()
+                                .arg(selectedRelease->update.lastAutomaticMessage)
+                      : selectedRelease->state != ReleaseState::Built &&
+                                (selectedRelease->update.lastAutomaticStatus == QStringLiteral("ai-pending") ||
+                                 selectedRelease->update.lastAutomaticStatus == QStringLiteral("ai-reviewing"))
+                          ? QStringLiteral("○ %1").arg(selectedRelease->update.lastAutomaticMessage)
+                      : selectedRelease->update.strategy == UpdateStrategy::DirectUrl
+                          ? selectedRelease->update.lastChecked.isValid()
                               ? QStringLiteral("✓ Direct URL checked: %1")
-                                    .arg(currentRelease()->update.lastCheckMessage)
+                                    .arg(selectedRelease->update.lastCheckMessage)
                               : QStringLiteral("○ Direct URL tracking configured; not checked yet")
-                      : currentRelease()->update.strategy == UpdateStrategy::GitHubRelease
-                          ? currentRelease()->update.lastChecked.isValid()
+                      : selectedRelease->update.strategy == UpdateStrategy::GitHubRelease
+                          ? selectedRelease->update.lastChecked.isValid()
                               ? QStringLiteral("✓ GitHub releases checked: %1")
-                                .arg(currentRelease()->update.detectedVersion.isEmpty()
+                                .arg(selectedRelease->update.detectedVersion.isEmpty()
                                          ? QStringLiteral("no version recorded")
-                                         : currentRelease()->update.detectedVersion)
+                                         : selectedRelease->update.detectedVersion)
                               : QStringLiteral("○ GitHub release tracking configured; not checked yet")
-                      : currentRelease()->update.lastChecked.isValid()
+                      : selectedRelease->update.lastChecked.isValid()
                           ? QStringLiteral("✓ APT repository checked: %1")
-                                .arg(currentRelease()->update.detectedVersion.isEmpty()
+                                .arg(selectedRelease->update.detectedVersion.isEmpty()
                                          ? QStringLiteral("no version recorded")
-                                         : currentRelease()->update.detectedVersion)
-                          : currentRelease()->update.aptSigningKeyring.isEmpty() ||
-                                    currentRelease()->update.trustedSigningFingerprint.isEmpty()
+                                         : selectedRelease->update.detectedVersion)
+                          : selectedRelease->update.aptSigningKeyring.isEmpty() ||
+                                    selectedRelease->update.trustedSigningFingerprint.isEmpty()
                               ? QStringLiteral("⚠ APT repository needs a trusted signing key")
                               : QStringLiteral("○ APT repository configured with pinned key; not checked yet")};
     overviewChecklist_->setText(QStringLiteral("<b>Selected release %1</b><br>%2")
-                                    .arg(currentRelease()->debian.version.toHtmlEscaped(),
+                                    .arg(selectedRelease->debian.version.toHtmlEscaped(),
                                          lines.join(QStringLiteral("<br>"))));
-    askAiButton_->setEnabled(currentRelease()->state != ReleaseState::Discovered);
     updateDashboardActions();
     tableBlocker.unblock();
     if (selectedRow >= 0) emit releaseTable_->itemSelectionChanged();

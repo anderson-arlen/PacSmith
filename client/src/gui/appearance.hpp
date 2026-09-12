@@ -8,6 +8,7 @@
 
 namespace pacsmith::gui {
 
+void installPaneResizeStyle();
 void applyInterfaceTheme(AppearanceMode mode);
 [[nodiscard]] QColor trayIconColor(AppearanceMode mode);
 [[nodiscard]] QIcon renderTrayStatusIcon(const QPixmap &mask, int availableUpdates,

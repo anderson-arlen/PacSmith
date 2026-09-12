@@ -730,8 +730,9 @@ QIcon projectIcon(const LibraryClient &library, const Project &project) {
 }
 
 QString retainedPackagePath(const LibraryClient &library, const PackageRelease &release) {
-    if (!release.builtArtifactIds.isEmpty()) {
-        const auto cached = library.cachedArtifactPath(release.builtArtifactIds.last(),
+    const auto artifactId = release.preferredBuiltArtifactId();
+    if (!artifactId.isEmpty()) {
+        const auto cached = library.cachedArtifactPath(artifactId,
                                                        QStringLiteral("package.pkg.tar.zst"));
         if (!cached.isEmpty() && QFileInfo::exists(cached)) return cached;
     }
@@ -751,8 +752,9 @@ QString retainedPackagePath(const LibraryClient &library, const PackageRelease &
 
 QString acquireRetainedPackagePath(const LibraryClient &library,
                                    const PackageRelease &release, QString *error) {
-    if (!release.builtArtifactIds.isEmpty()) {
-        const auto cached = library.cacheArtifact(release.builtArtifactIds.last(),
+    const auto artifactId = release.preferredBuiltArtifactId();
+    if (!artifactId.isEmpty()) {
+        const auto cached = library.cacheArtifact(artifactId,
                                                   QStringLiteral("package.pkg.tar.zst"), error);
         if (!cached.isEmpty() && QFileInfo::exists(cached)) return cached;
     }

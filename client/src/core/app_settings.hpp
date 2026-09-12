@@ -1,6 +1,8 @@
 #pragma once
 
-#include <QList>
+#include <optional>
+#include <QJsonObject>
+#include <QMap>
 #include <QString>
 #include <QStringList>
 #include <QTime>
@@ -30,18 +32,21 @@ struct HarnessProfile {
     QString name;
     QString executable;
     QStringList arguments;
-    bool isDefault{false};
+    QString registryId{};
+    QString registryVersion{};
+    QMap<QString, QString> environment{};
+    QJsonObject configDefaults{};
 };
 
 struct AppSettings {
     AppearanceSettings appearance;
     BackgroundUpdateSettings updates;
-    QList<HarnessProfile> harnessProfiles;
+    std::optional<HarnessProfile> harness;
     bool githubTokenConfigured{false};
     bool debAssociationPrompted{false};
     bool selfTrackingPrompted{false};
 
-    [[nodiscard]] const HarnessProfile *defaultHarness() const;
+    [[nodiscard]] const HarnessProfile *configuredHarness() const;
 };
 
 class AppSettingsStore final {
@@ -52,12 +57,8 @@ public:
     [[nodiscard]] static QString defaultConfigDirectory();
     [[nodiscard]] AppSettings load(QString *error = nullptr) const;
     [[nodiscard]] bool save(const AppSettings &settings, QString *error = nullptr) const;
-    [[nodiscard]] bool upsertHarnessProfile(const HarnessProfile &profile,
-                                            QString *error = nullptr) const;
-    [[nodiscard]] bool removeHarnessProfile(const QString &name,
-                                            QString *error = nullptr) const;
-    [[nodiscard]] bool setDefaultHarnessProfile(const QString &name,
-                                                QString *error = nullptr) const;
+    [[nodiscard]] bool setHarness(const HarnessProfile &harness, QString *error = nullptr) const;
+    [[nodiscard]] bool clearHarness(QString *error = nullptr) const;
     [[nodiscard]] QString settingsPath() const;
 
 private:

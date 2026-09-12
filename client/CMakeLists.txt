@@ -28,8 +28,14 @@ function(pacsmith_target_defaults target)
 endfunction()
 
 add_library(pacsmith_core STATIC
+    src/core/acp_registry.cpp
+    src/core/acp_client.cpp
+    src/core/acp_tool_permissions.cpp
+    src/core/acp_conversations.cpp
+    src/core/acp_environment.cpp
     src/core/agent_skill.cpp
     src/core/app_settings.cpp
+    src/core/automatic_update_review.cpp
     src/core/harness_launcher.cpp
     src/core/background_updates.cpp
     src/core/model.cpp
@@ -78,8 +84,13 @@ pacsmith_target_defaults(pacsmith_core)
 
 set(PACSMITH_BUILT_PLUGIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/agent-plugin")
 file(MAKE_DIRECTORY "${PACSMITH_BUILT_PLUGIN_DIR}/skills/pacsmith")
-configure_file(${CMAKE_SOURCE_DIR}/agent-plugin/plugin.json.in
-               ${PACSMITH_BUILT_PLUGIN_DIR}/plugin.json @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_SOURCE_DIR}/agent-plugin/plugin.json")
+file(READ "${CMAKE_SOURCE_DIR}/agent-plugin/plugin.json" PACSMITH_PLUGIN_MANIFEST)
+string(JSON PACSMITH_PLUGIN_MANIFEST SET "${PACSMITH_PLUGIN_MANIFEST}"
+       version "\"${PACSMITH_VERSION}\"")
+file(GENERATE OUTPUT "${PACSMITH_BUILT_PLUGIN_DIR}/plugin.json"
+     CONTENT "${PACSMITH_PLUGIN_MANIFEST}\n")
 configure_file(${CMAKE_SOURCE_DIR}/agent-plugin/mcp.json
                ${PACSMITH_BUILT_PLUGIN_DIR}/mcp.json COPYONLY)
 configure_file(${CMAKE_SOURCE_DIR}/agent-plugin/skills/pacsmith/SKILL.md
@@ -97,11 +108,17 @@ target_compile_definitions(pacsmith PRIVATE
     PACSMITH_SOURCE_PLUGIN_DIR="${PACSMITH_BUILT_PLUGIN_DIR}")
 pacsmith_target_defaults(pacsmith)
 
-add_executable(pacsmith-gui
-    src/gui/main.cpp
+add_library(pacsmith_gui STATIC
+    src/gui/acp_registry_dialog.cpp
+    src/gui/chat_image_input.cpp
+    src/gui/chat_icons.cpp src/gui/acp_chat_widget.cpp
+    src/gui/chat_transcript.cpp
+    src/gui/agent_settings_dialog.cpp
+    src/gui/main_window/ai.cpp
     src/gui/appearance.cpp
     src/gui/application_session.cpp
     src/gui/command_progress_dialog.cpp
+    src/gui/build_output_dialog.cpp
     src/gui/connection_dialog.cpp
     src/gui/desktop_entry_highlighter.cpp
     src/gui/gui_instance.cpp
@@ -125,18 +142,21 @@ add_executable(pacsmith-gui
     src/gui/pkgbuild_highlighter.cpp
     src/gui/project_history_view.cpp
     src/gui/shell_highlighter.cpp)
-target_link_libraries(pacsmith-gui PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent)
-qt_add_resources(pacsmith-gui gui_resources
+target_link_libraries(pacsmith_gui PUBLIC pacsmith_core Qt6::Widgets Qt6::Concurrent)
+qt_add_resources(pacsmith_gui gui_resources
     PREFIX "/pacsmith"
     BASE resources
     FILES
         resources/icons/pacsmith.png
         resources/icons/pacsmith-hero.png
         resources/icons/pacsmith-tray.png)
-qt_add_resources(pacsmith-gui license_resources
+qt_add_resources(pacsmith_gui license_resources
     PREFIX "/pacsmith"
     BASE ${CMAKE_SOURCE_DIR}
     FILES ${CMAKE_SOURCE_DIR}/LICENSE)
+pacsmith_target_defaults(pacsmith_gui)
+add_executable(pacsmith-gui src/gui/main.cpp)
+target_link_libraries(pacsmith-gui PRIVATE pacsmith_gui)
 pacsmith_target_defaults(pacsmith-gui)
 
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/packaging)
@@ -171,6 +191,26 @@ if(BUILD_TESTING)
         PACSMITH_SOURCE_PLUGIN_DIR="${PACSMITH_BUILT_PLUGIN_DIR}")
     pacsmith_target_defaults(pacsmith-tests)
     add_test(NAME pacsmith-core-tests COMMAND pacsmith-tests)
+    add_executable(pacsmith-screen-chat-tests tests/gui_tests/screen_chat_test.cpp)
+    target_link_libraries(pacsmith-screen-chat-tests PRIVATE pacsmith_gui Qt6::Test)
+    pacsmith_target_defaults(pacsmith-screen-chat-tests)
+    add_test(NAME pacsmith-screen-chat-tests COMMAND pacsmith-screen-chat-tests)
+    set_tests_properties(pacsmith-screen-chat-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(pacsmith-build-output-tests tests/gui_tests/build_output_test.cpp)
+    target_link_libraries(pacsmith-build-output-tests PRIVATE pacsmith_gui Qt6::Test)
+    pacsmith_target_defaults(pacsmith-build-output-tests)
+    add_test(NAME pacsmith-build-output-tests COMMAND pacsmith-build-output-tests)
+    set_tests_properties(pacsmith-build-output-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(pacsmith-acp-tests tests/core_tests/acp_test.cpp src/gui/chat_icons.cpp src/gui/acp_chat_widget.cpp src/gui/chat_image_input.cpp src/gui/chat_transcript.cpp src/gui/agent_settings_dialog.cpp)
+    target_link_libraries(pacsmith-acp-tests PRIVATE pacsmith_core Qt6::Test Qt6::Widgets)
+    add_dependencies(pacsmith-acp-tests pacsmith)
+    pacsmith_target_defaults(pacsmith-acp-tests)
+    add_test(NAME pacsmith-acp-tests COMMAND pacsmith-acp-tests)
+    set_tests_properties(pacsmith-acp-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(pacsmith-automatic-review-tests tests/core_tests/automatic_update_review_test.cpp)
+    target_link_libraries(pacsmith-automatic-review-tests PRIVATE pacsmith_core Qt6::Concurrent Qt6::Test)
+    pacsmith_target_defaults(pacsmith-automatic-review-tests)
+    add_test(NAME pacsmith-automatic-review-tests COMMAND pacsmith-automatic-review-tests)
     add_executable(pacsmith-gui-tests
         tests/gui_tests/wheel_scroll_guard_test.cpp
         src/gui/appearance.cpp
@@ -179,6 +219,12 @@ if(BUILD_TESTING)
     target_include_directories(pacsmith-gui-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(pacsmith-gui-tests PRIVATE pacsmith_core Qt6::Widgets Qt6::Concurrent Qt6::Test)
     pacsmith_target_defaults(pacsmith-gui-tests)
+    add_executable(pacsmith-auto-save-tests tests/gui_tests/auto_save_test.cpp)
+    target_include_directories(pacsmith-auto-save-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(pacsmith-auto-save-tests PRIVATE Qt6::Widgets Qt6::Test)
+    pacsmith_target_defaults(pacsmith-auto-save-tests)
+    add_test(NAME pacsmith-auto-save-tests COMMAND pacsmith-auto-save-tests)
+    set_tests_properties(pacsmith-auto-save-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME pacsmith-gui-tests COMMAND pacsmith-gui-tests)
     set_tests_properties(pacsmith-gui-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME pacsmith-import-test

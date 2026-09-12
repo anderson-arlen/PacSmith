@@ -106,7 +106,8 @@ func TestSelectRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !preview.Success || !preview.Prerelease || !strings.Contains(preview.Message, "No matching stable") {
+	if !preview.Success || !preview.Prerelease ||
+		preview.Message != "GitHub prerelease v3.0.0-rc1 is available (tool-3.0.0-rc1-linux-x86_64.tar.gz)" {
 		t.Fatalf("preview %+v", preview)
 	}
 }

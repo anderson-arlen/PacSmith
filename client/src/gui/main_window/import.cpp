@@ -4,11 +4,6 @@
 namespace pacsmith::gui {
 namespace {
 
-struct AutomaticBuildRepositoryReadiness {
-    bool ready{false};
-    QString message;
-};
-
 struct GitHubResolveTask {
     UpdateCheckResult result;
     QString error;
@@ -576,54 +571,10 @@ void MainWindow::importPackage(const QString &path) {
                 } else {
                     blockers = automaticUpdateBuildBlockers(*previous, *prepared);
                 }
-                if (!project_->repository.publish) {
-                    blockers.append(QStringLiteral(
-                        "Repository publishing is not enabled for this project."));
-                }
                 if (blockers.isEmpty()) {
-                    statusBar()->showMessage(QStringLiteral(
-                        "Update prepared with no review changes; checking repository readiness…"));
-                    const auto config = library_.config();
-                    auto *watcher = new QFutureWatcher<AutomaticBuildRepositoryReadiness>(this);
-                    connect(watcher, &QFutureWatcher<AutomaticBuildRepositoryReadiness>::finished,
-                            this, [this, watcher, projectId, releaseId] {
-                        const auto readiness = watcher->result();
-                        watcher->deleteLater();
-                        if (!project_ || project_->id != projectId ||
-                            project_->release(releaseId) == nullptr) return;
-                        currentReleaseId_ = releaseId;
-                        if (!readiness.ready) {
-                            showReleaseWorkbenchAtFirstAttention(releaseId);
-                            statusBar()->showMessage(
-                                QStringLiteral("Update prepared but automatic build paused: %1")
-                                    .arg(readiness.message),
-                                12000);
-                            return;
-                        }
-                        statusBar()->showMessage(
-                            QStringLiteral("Building package %1…").arg(project_->displayName));
-                        startBuild(false, true);
-                    });
-                    watcher->setFuture(QtConcurrent::run([config] {
-                        LibraryClient client(config);
-                        QString repoError;
-                        const auto repo = client.repoSettings(&repoError);
-                        if (!repo) {
-                            return AutomaticBuildRepositoryReadiness{
-                                false, repoError.isEmpty()
-                                           ? QStringLiteral("repository settings are unavailable")
-                                           : repoError};
-                        }
-                        if (!repo->enabled) {
-                            return AutomaticBuildRepositoryReadiness{
-                                false, QStringLiteral("the PacSmith package repository is not enabled")};
-                        }
-                        if (!repo->signingInitialized) {
-                            return AutomaticBuildRepositoryReadiness{
-                                false, QStringLiteral("repository signing is not initialized")};
-                        }
-                        return AutomaticBuildRepositoryReadiness{true, {}};
-                    }));
+                    statusBar()->showMessage(
+                        QStringLiteral("Building package %1…").arg(project_->displayName));
+                    startBuild(false, true);
                     return;
                 }
                 automaticBuildPauseMessage = QStringLiteral(
@@ -664,7 +615,7 @@ void MainWindow::importPackage(const QString &path) {
                     this, QStringLiteral("Package needs review"),
                     QStringLiteral("PacSmith found items that need an Arch-specific decision and opened the first section "
                                    "that needs your attention. Resolve the highlighted items, then continue to PKGBUILD and Build.\n\n"
-                                   "Use Ask AI to launch your configured external harness with this project and release context."));
+                                   "Use Ask AI to open an in-app conversation with this project and release context."));
             });
         });
     });

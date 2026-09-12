@@ -100,14 +100,42 @@ func New(db *sqlite.DB, logDir string, handle Handler) (*Manager, error) {
 }
 
 func (m *Manager) Start(ctx context.Context) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := m.DB.Queries.InterruptRunningJobs(ctx, sql.NullString{String: now, Valid: true}); err != nil {
+	running, err := m.DB.Queries.ListRunningJobs(ctx)
+	if err != nil {
 		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, row := range running {
+		const message = "interrupted by daemon restart"
+		if err := m.appendLog(row.ID, "\n[PacSmith] "+message+". Start a new job to retry.\n"); err != nil {
+			return err
+		}
+		_, err := m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
+			ID: row.ID, Status: "interrupted", Error: message, Message: message,
+			LogOffset: m.logSize(row.ID), StartedAt: row.StartedAt,
+			FinishedAt: sql.NullString{String: now, Valid: true},
+			ProjectID:  row.ProjectID, ReleaseID: row.ReleaseID,
+			Current: row.Current, Total: row.Total, FailedItems: row.FailedItems, PausedItems: row.PausedItems,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	queued, err := m.DB.Queries.ListQueuedJobs(ctx)
+	if err != nil {
+		return err
+	}
+	backlog := make([]string, 0, len(queued))
+	for _, row := range queued {
+		if err := m.appendLog(row.ID, "[PacSmith] Queued job restored after daemon restart; waiting for a worker.\n"); err != nil {
+			return err
+		}
+		backlog = append(backlog, row.ID)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	m.wg.Add(1)
-	go m.loop(runCtx)
+	go m.loop(runCtx, backlog)
 	return nil
 }
 
@@ -131,7 +159,8 @@ func (m *Manager) Enqueue(ctx context.Context, kind string, payload any, project
 			if kind == KindUpdatePrepare && existing.ReleaseID.String == releaseID {
 				return jobFromRow(existing), nil
 			}
-			if kind == KindRepositoryDistribution && existing.ProjectID.String == projectID && projectID != "" {
+			if kind == KindRepositoryDistribution && existing.ProjectID.String == projectID &&
+				existing.ProjectID.Valid == (projectID != "") {
 				return jobFromRow(existing), nil
 			}
 		}
@@ -239,8 +268,15 @@ func (m *Manager) Log(id string, after int64) (string, int64, error) {
 	return string(body[after:]), int64(len(body)), nil
 }
 
-func (m *Manager) loop(ctx context.Context) {
+func (m *Manager) loop(ctx context.Context, backlog []string) {
 	defer m.wg.Done()
+	// Drain persisted work directly so recovery is not limited by the live channel's capacity.
+	for _, id := range backlog {
+		if ctx.Err() != nil {
+			return
+		}
+		m.run(ctx, id)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -253,7 +289,7 @@ func (m *Manager) loop(ctx context.Context) {
 
 func (m *Manager) run(ctx context.Context, id string) {
 	row, err := m.DB.Queries.GetJob(ctx, id)
-	if err != nil {
+	if err != nil || row.Status != "queued" || ctx.Err() != nil {
 		return
 	}
 	m.mu.Lock()
@@ -279,7 +315,7 @@ func (m *Manager) run(ctx context.Context, id string) {
 	row, err = m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
 		Status:     "running",
 		Error:      "",
-		LogOffset:  0,
+		LogOffset:  m.logSize(id),
 		StartedAt:  sql.NullString{String: started, Valid: true},
 		FinishedAt: sql.NullString{},
 		ProjectID:  row.ProjectID,
@@ -362,7 +398,7 @@ func (m *Manager) run(ctx context.Context, id string) {
 		logFn(errText + "\n")
 	}
 	offset := m.logSize(id)
-	updated, updateErr := m.DB.Queries.UpdateJob(ctx, sqlcdb.UpdateJobParams{
+	updated, updateErr := m.DB.Queries.UpdateJob(context.WithoutCancel(ctx), sqlcdb.UpdateJobParams{
 		Status:      status,
 		Error:       errText,
 		LogOffset:   offset,

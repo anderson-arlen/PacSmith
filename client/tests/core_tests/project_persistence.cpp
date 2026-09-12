@@ -14,6 +14,7 @@
 #include "core/pkgbuild_generator.hpp"
 #include "core/pkgbuild_install_plan.hpp"
 #include "core/project_store/project_store.hpp"
+#include "core/project_store/internal.hpp"
 #include "core/repository_trust.hpp"
 #include "core/repository_key_download_service.hpp"
 #include "core/rpm_analyzer.hpp"
@@ -312,18 +313,16 @@ void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
     pacsmith::AppSettingsStore store(temporary.path() + QStringLiteral("/pacsmith-config"));
     pacsmith::AppSettings settings;
     settings.githubTokenConfigured = true;
-    settings.harnessProfiles = {
-        {QStringLiteral("Terminal harness"), QStringLiteral("/usr/bin/harness"),
-         {QStringLiteral("--prompt"), QStringLiteral("{prompt}")}, true},
-        {QStringLiteral("Clipboard harness"), QStringLiteral("second-harness"), {}, false}};
+    settings.harness = pacsmith::HarnessProfile{QStringLiteral("Primary ACP agent"), QStringLiteral("/usr/bin/harness"),
+        {QStringLiteral("--mode"), QStringLiteral("read-only")}};
     QString error;
     QVERIFY2(store.save(settings, &error), qPrintable(error));
     const auto restored = store.load(&error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(restored.harnessProfiles.size(), 2);
-    QCOMPARE(restored.defaultHarness()->name, QStringLiteral("Terminal harness"));
-    QCOMPARE(restored.defaultHarness()->arguments,
-             QStringList({QStringLiteral("--prompt"), QStringLiteral("{prompt}")}));
+    QVERIFY(restored.harness.has_value());
+    QCOMPARE(restored.configuredHarness()->name, QStringLiteral("Primary ACP agent"));
+    QCOMPARE(restored.configuredHarness()->arguments,
+             QStringList({QStringLiteral("--mode"), QStringLiteral("read-only")}));
     QVERIFY(restored.githubTokenConfigured);
 
     QTemporaryDir legacyDir;
@@ -336,7 +335,7 @@ void CoreTests::persistsHarnessProfilesAndIgnoresLegacyAiSettings() {
     pacsmith::AppSettingsStore legacyStore(legacyDir.path());
     const auto migrated = legacyStore.load();
     QVERIFY(!migrated.githubTokenConfigured);
-    QVERIFY(migrated.harnessProfiles.isEmpty());
+    QVERIFY(!migrated.harness);
 }
 
 void CoreTests::managesHarnessProfilesThroughSharedSettingsOperations() {
@@ -346,38 +345,21 @@ void CoreTests::managesHarnessProfilesThroughSharedSettingsOperations() {
     QString error;
     QCOMPARE(store.settingsPath(), QDir(temporary.path()).filePath(QStringLiteral("settings.json")));
 
-    const pacsmith::HarnessProfile first{
-        QStringLiteral("Terminal agent"), QStringLiteral("agent-cli"),
-        {QStringLiteral("--prompt"), QStringLiteral("{prompt}"),
-         QStringLiteral("literal;$(not-a-shell)")}, true};
-    QVERIFY2(store.upsertHarnessProfile(first, &error), qPrintable(error));
-    auto settings = store.load(&error);
-    QCOMPARE(settings.harnessProfiles.size(), 1);
-    QCOMPARE(settings.harnessProfiles.first().arguments, first.arguments);
-    QVERIFY(settings.harnessProfiles.first().isDefault);
-
-    const pacsmith::HarnessProfile second{
-        QStringLiteral("Desktop agent"), QStringLiteral("desktop-agent"), {}, false};
-    QVERIFY2(store.upsertHarnessProfile(second, &error), qPrintable(error));
-    QVERIFY2(store.setDefaultHarnessProfile(QStringLiteral("Desktop agent"), &error),
-             qPrintable(error));
-    settings = store.load(&error);
-    QCOMPARE(settings.harnessProfiles.size(), 2);
-    QCOMPARE(settings.defaultHarness()->name, QStringLiteral("Desktop agent"));
-
-    const pacsmith::HarnessProfile revised{
-        QStringLiteral("Terminal agent"), QStringLiteral("new-agent-cli"),
-        {QStringLiteral("--new")}, false};
-    QVERIFY2(store.upsertHarnessProfile(revised, &error), qPrintable(error));
-    settings = store.load(&error);
-    QCOMPARE(settings.harnessProfiles.first().executable, QStringLiteral("new-agent-cli"));
-    QCOMPARE(settings.defaultHarness()->name, QStringLiteral("Desktop agent"));
-
-    QVERIFY2(store.removeHarnessProfile(QStringLiteral("Desktop agent"), &error), qPrintable(error));
-    settings = store.load(&error);
-    QCOMPARE(settings.harnessProfiles.size(), 1);
-    QVERIFY(settings.harnessProfiles.first().isDefault);
-    QVERIFY(!store.upsertHarnessProfile({}, &error));
+    const pacsmith::HarnessProfile first{QStringLiteral("Primary agent"), QStringLiteral("agent-cli"),
+        {QStringLiteral("--mode"), QStringLiteral("read-only"), QStringLiteral("literal;$(not-a-shell)")}};
+    QVERIFY2(store.setHarness(first, &error), qPrintable(error));
+    QCOMPARE(store.load().harness->arguments, first.arguments);
+    const pacsmith::HarnessProfile second{QStringLiteral("Replacement agent"), QStringLiteral("desktop-agent"), {}};
+    QVERIFY2(store.setHarness(second, &error), qPrintable(error));
+    QCOMPARE(store.load().harness->name, QStringLiteral("Replacement agent"));
+    QFile file(store.settingsPath());
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto record = QJsonDocument::fromJson(file.readAll()).object();
+    QVERIFY(!record.contains(QStringLiteral("harnessProfiles")));
+    QCOMPARE(record.value(QStringLiteral("harness")).toObject().value(QStringLiteral("name")).toString(), second.name);
+    QVERIFY2(store.clearHarness(&error), qPrintable(error));
+    QVERIFY(!store.load().harness);
+    QVERIFY(!store.setHarness({}, &error));
     QVERIFY(error.contains(QStringLiteral("required")));
 }
 
@@ -671,6 +653,40 @@ void CoreTests::reportsInstalledUpdateStatus() {
     project.installedReleaseId.clear();
     project.externallyInstalled = true;
     QVERIFY(!project.hasAvailableUpdate());
+}
+
+void CoreTests::selectsPacsmithBuildArtifactInsteadOfImportedSource() {
+    pacsmith::PackageRelease release;
+    release.archPackageName = QStringLiteral("vendor-tool");
+    release.sourceSha256 = QStringLiteral("source-sha");
+    release.builtArtifactIds = {QStringLiteral("source-id"), QStringLiteral("built-id")};
+
+    pacsmith::BuildRecord build;
+    build.status = pacsmith::BuildStatus::Succeeded;
+    pacsmith::PackageArtifact imported;
+    imported.packageName = release.archPackageName;
+    imported.packageVersion = QStringLiteral("1.0-1");
+    imported.sha256 = release.sourceSha256;
+    imported.artifactId = QStringLiteral("source-id");
+    build.artifacts.append(imported);
+    pacsmith::PackageArtifact rebuilt;
+    rebuilt.packageName = release.archPackageName;
+    rebuilt.packageVersion = QStringLiteral("1.0-2");
+    rebuilt.sha256 = QStringLiteral("built-sha");
+    rebuilt.artifactId = QStringLiteral("built-id");
+    build.artifacts.append(rebuilt);
+    release.builds.append(build);
+
+    QCOMPARE(release.preferredBuiltArtifactId(), QStringLiteral("built-id"));
+
+    pacsmith::Project project;
+    project.id = QStringLiteral("project-id");
+    project.archPackageName = release.archPackageName;
+    release.id = QStringLiteral("release-id");
+    project.releases.append(release);
+    QCOMPARE(pacsmith::project_store_internal::installedReleaseIdForVersion(
+                 project, QStringLiteral("1.0-1")),
+             release.id);
 }
 
 void CoreTests::deletingUpdateReleaseClearsAvailableStatus() {

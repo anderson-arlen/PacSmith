@@ -155,8 +155,6 @@ void MainWindow::updateBuildJobStatus(const ServerEvent &event) {
             buildReleaseId_ = event.releaseId;
             buildProjectName_ = !event.projectName.isEmpty() ? event.projectName
                                                              : event.packageName;
-            buildLogAfter_ = 0;
-            buildLogContents_.clear();
             if (buildPollTimer_ == nullptr) {
                 buildPollTimer_ = new QTimer(this);
                 connect(buildPollTimer_, &QTimer::timeout, this, &MainWindow::pollBuildJob);
@@ -185,6 +183,7 @@ void MainWindow::restoreActiveBuildJobs() {
             event.projectName = job.projectName;
             event.packageName = job.packageName;
             event.releaseId = job.releaseId;
+            event.jobMessage = job.message;
             if (job.kind == QStringLiteral("build")) {
                 updateBuildJobStatus(event);
             } else {
@@ -212,6 +211,7 @@ bool MainWindow::updateRepositoryDistributionStatus(const ServerEvent &event) {
     } else {
         auto name = !event.projectName.isEmpty() ? event.projectName : event.packageName;
         if (name.isEmpty()) name = event.projectId;
+        if (name.isEmpty()) name = QStringLiteral("repository channels");
         if (!name.isEmpty()) repositoryDistributionJobs_.insert(event.jobId, name);
         if (!event.projectId.isEmpty()) {
             repositoryDistributionJobProjects_.insert(event.jobId, event.projectId);
@@ -233,7 +233,7 @@ bool MainWindow::updateRepositoryDistributionStatus(const ServerEvent &event) {
     names.sort(Qt::CaseInsensitive);
     if (!names.isEmpty()) {
         statusBar()->showMessage(
-            QStringLiteral("Enabling repository distribution for %1").arg(names.join(QStringLiteral(", "))));
+            QStringLiteral("Updating repository distribution for %1").arg(names.join(QStringLiteral(", "))));
     } else if (event.jobStatus == QStringLiteral("succeeded")) {
         statusBar()->showMessage(QStringLiteral("Repository distribution is up to date"), 6000);
     } else if (event.jobStatus == QStringLiteral("failed")) {
@@ -399,7 +399,11 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
             if (candidate.summaryOnly) projectHydration_.remove(candidate.id);
             else projectHydration_.markLoaded(candidate.id);
         }
-        if (listItemChanged) updateProjectListItem(candidate, updateState);
+        if (listItemChanged) {
+            const auto updated = projectCache_.constFind(candidate.id);
+            updateProjectListItem(updated == projectCache_.cend() ? candidate : updated.value(),
+                                  updateState);
+        }
     }
     if (auto *selectedItem = projectListItem(selectedId); selectedItem != nullptr) {
         projectList_->setCurrentItem(selectedItem);
@@ -496,7 +500,7 @@ void MainWindow::reloadExternalProject() {
 
 bool MainWindow::hasUnsavedProjectDraft() const {
     if (!project_) return false;
-    if (lifecycleEditing_) return true;
+    if (lifecycleEditing_ && lifecycleView_ != nullptr && lifecycleView_->document()->isModified()) return true;
     for (const auto *editor : {pkgbuildEditor_, appRunEditor_, desktopEntryEditor_}) {
         if (editor != nullptr && editor->document()->isModified()) return true;
     }

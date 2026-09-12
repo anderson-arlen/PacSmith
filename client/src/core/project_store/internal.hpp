@@ -56,6 +56,8 @@ void adoptCanonicalIdentity(Project &project, const QString &identity);
 [[nodiscard]] QString releaseId(const QString &version, const QString &sha256);
 [[nodiscard]] QString expectedArchVersion(const PackageRelease &release);
 [[nodiscard]] QString repackagedPkgrel(const QString &upstream);
+[[nodiscard]] QString installedReleaseIdForVersion(const Project &project,
+                                                   const QString &installedVersion);
 [[nodiscard]] bool releaseMatchesInstalledVersion(const Project &project,
                                                   const QString &installedVersion);
 [[nodiscard]] bool projectOwnsInstalledPackage(const Project &project,
