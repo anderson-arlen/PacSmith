@@ -399,7 +399,8 @@ int main(int argc, char *argv[]) {
         return QProcess::startDetached(program, {}) ? 0 : 1;
     }
     auto connection = pacsmith::ConnectionConfig::load();
-    if (command == QStringLiteral("mcp") && qEnvironmentVariableIsSet("PACSMITH_MCP_MODE")) {
+    const bool sessionMcp = command == QStringLiteral("mcp") && qEnvironmentVariableIsSet("PACSMITH_MCP_MODE");
+    if (sessionMcp) {
         const auto mode = qEnvironmentVariable("PACSMITH_MCP_MODE");
         if (mode != QStringLiteral("local") && mode != QStringLiteral("remote")) {
             errorStream << "error: invalid session MCP connection mode\n";
@@ -415,7 +416,9 @@ int main(int argc, char *argv[]) {
     }
     pacsmith::LibraryClient library(connection);
     QString runtimeError;
-    if (!pacsmith::applyLibraryRuntime(library.config(), &runtimeError)) {
+    // The app owns the daemon lifecycle for its injected MCP connection. Starting
+    // a tool server must not switch services or require a daemon for local chat tools.
+    if (!sessionMcp && !pacsmith::applyLibraryRuntime(library.config(), &runtimeError)) {
         errorStream << "error: " << runtimeError << '\n';
         return 1;
     }

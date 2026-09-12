@@ -82,7 +82,8 @@ for line in sys.stdin:
    assert 'set_session_description' in params['prompt'][0]['text']
    env=dict(os.environ, **{entry['name']:entry['value'] for entry in server['env']})
    messages=[dict(jsonrpc='2.0',id=1,method='initialize',params=dict(protocolVersion='2025-11-25')),dict(jsonrpc='2.0',method='notifications/initialized'),dict(jsonrpc='2.0',id=2,method='tools/call',params=dict(name='set_session_description',arguments=dict(description='Fix Slack automatic updates')))]
-   result=subprocess.run([server['command']]+server['args'],env=env,input=''.join(json.dumps(message)+'\n' for message in messages),text=True,capture_output=True,check=True)
+   result=subprocess.run([server['command']]+server['args'],env=env,input=''.join(json.dumps(message)+'\n' for message in messages),text=True,capture_output=True,timeout=5)
+   assert result.returncode==0, result.stderr
    response=json.loads(result.stdout.splitlines()[-1])['result']
    assert not response['isError'], result.stdout
   if text=='crash': sys.exit(7)
@@ -205,13 +206,26 @@ private slots:
         QVERIFY(!QFile::exists(directory.filePath(QStringLiteral("chat-8.json"))));
         QVERIFY(!QFile::exists(directory.filePath(QStringLiteral("images/live"))));
     }
+    void agentNamesSessionThroughInjectedTool_data() {
+        QTest::addColumn<bool>("remote");
+        QTest::newRow("local-without-daemon") << false;
+        QTest::newRow("remote-without-daemon") << true;
+    }
     void agentNamesSessionThroughInjectedTool() {
+        QFETCH(bool, remote);
         QTemporaryDir directory;
         const auto previous = qgetenv("XDG_DATA_HOME");
         qputenv("XDG_DATA_HOME", directory.path().toUtf8());
-        const auto agentProfile = profile(fakeAgent(directory.path()));
+        auto agentProfile = profile(fakeAgent(directory.path()));
+        // Exercise the real CLI without inheriting the developer's desktop daemon.
+        agentProfile.environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), directory.filePath(QStringLiteral("runtime")));
+        agentProfile.environment.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), QStringLiteral("unix:path=") + directory.filePath(QStringLiteral("missing-bus")));
+        ConnectionConfig connection;
+        connection.mode = remote ? ConnectionConfig::Mode::Remote : ConnectionConfig::Mode::Local;
+        connection.socketPath = directory.filePath(QStringLiteral("missing-daemon.sock"));
+        connection.remoteUrl = QUrl(QStringLiteral("https://127.0.0.1:1"));
         {
-            pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("named-chat"), {});
+            pacsmith::gui::AcpChatWidget chat(agentProfile, connection, QStringLiteral("named-chat"), {});
             chat.setConversationScope(QStringLiteral("slack"));
             chat.resize(500, 650);
             chat.show();
@@ -226,7 +240,7 @@ private slots:
             if (qEnvironmentVariableIsSet("PACSMITH_TEST_SESSION_SCREENSHOT")) chat.grab().save(qEnvironmentVariable("PACSMITH_TEST_SESSION_SCREENSHOT"));
         }
         {
-            pacsmith::gui::AcpChatWidget restored(agentProfile, {}, QStringLiteral("named-chat"), {});
+            pacsmith::gui::AcpChatWidget restored(agentProfile, connection, QStringLiteral("named-chat"), {});
             restored.setConversationScope(QStringLiteral("slack"));
             QCOMPARE(restored.findChild<QComboBox *>(QStringLiteral("sessionTitle"))->currentText(), QStringLiteral("Fix Slack automatic updates"));
         }
