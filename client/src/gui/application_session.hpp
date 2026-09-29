@@ -8,6 +8,8 @@
 #include <QString>
 #include <QSystemTrayIcon>
 #include <QTimer>
+#include <QPointer>
+class QDialog;
 
 #include <memory>
 
@@ -36,10 +38,16 @@ public:
     void runBackgroundCheck();
 
 private:
+    friend class ApplicationSessionTest;
+    void ensureWorkbench();
     [[nodiscard]] bool trayWanted() const;
     void setupTray();
     void refreshTray();
     void refreshUpdateCensus();
+    void refreshPermissions();
+    bool permissionsInFlight_{false};
+    QString permissionOrigin_;
+    QHash<QString, QPointer<QDialog>> permissionDialogs_;
     void handleServerEvent(const pacsmith::ServerEvent &event);
     void quitSession();
     void maybeOnboard();
@@ -62,7 +70,6 @@ private:
     QHash<QString, QString> activeUpdateJobs_;
     QHash<QString, QString> activePreparationJobs_;
     LibraryEventStream *libraryEventStream_{nullptr};
-    bool updateReviewRecoveryAttempted_{false};
     bool updateCensusInFlight_{false};
     bool startHidden_{false};
     bool onboardingStarted_{false};

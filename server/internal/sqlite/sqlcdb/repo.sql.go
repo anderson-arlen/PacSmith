@@ -61,6 +61,15 @@ func (q *Queries) DeleteChannelEntry(ctx context.Context, arg DeleteChannelEntry
 	return err
 }
 
+const deleteFinishedOrphanSoaks = `-- name: DeleteFinishedOrphanSoaks :exec
+DELETE FROM repo_soaks WHERE release_id IS NULL AND status NOT IN ('soaking', 'eligible')
+`
+
+func (q *Queries) DeleteFinishedOrphanSoaks(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteFinishedOrphanSoaks)
+	return err
+}
+
 const deleteRepoDatabase = `-- name: DeleteRepoDatabase :exec
 DELETE FROM repo_databases WHERE channel = ? AND arch = ?
 `

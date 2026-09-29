@@ -91,7 +91,7 @@ struct SourceAcquisition {
 enum class ArchiveLayout { PreserveRoot, OptBundle };
 
 enum class LauncherKind { Symlink, Wrapper };
-enum class IconSourceKind { None, Payload, LocalFile, RemoteUrl };
+enum class IconSourceKind { None, Payload, LocalFile, RemoteUrl, SystemTheme };
 
 // A command exposed by the generated Arch package.  The source path is always
 // an exact, inspected payload path; it is never interpreted as shell text.

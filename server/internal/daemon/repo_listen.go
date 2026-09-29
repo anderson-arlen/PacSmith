@@ -10,6 +10,7 @@ import (
 
 	"github.com/anderson-arlen/pacsmith/server/internal/events"
 	"github.com/anderson-arlen/pacsmith/server/internal/httpapi"
+	"github.com/anderson-arlen/pacsmith/server/internal/jobs"
 	"github.com/anderson-arlen/pacsmith/server/internal/listen"
 	"github.com/anderson-arlen/pacsmith/server/internal/repo"
 )
@@ -127,6 +128,23 @@ func (d *Daemon) startRepoMaintenance() {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.stopSoak = cancel
 	go d.runRepoMaintenance(ctx)
+}
+
+func (d *Daemon) enqueueUnpublishedProjects(ctx context.Context) error {
+	projects, err := d.db.Queries.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	for _, project := range projects {
+		if project.RepoPublish == 0 || project.RepoPublishedPkgname != "" {
+			continue
+		}
+		if _, err := d.jobs.Enqueue(ctx, jobs.KindRepositoryDistribution,
+			map[string]string{"project_id": project.ID}, project.ID, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) runRepoMaintenance(ctx context.Context) {

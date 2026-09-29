@@ -1,8 +1,8 @@
 -- name: InsertProject :one
 INSERT INTO projects (
     id, revision, display_name, arch_package_name, vendor_name, source_identity,
-    icon_artifact_id, icon_sha256, history_json, created_at, modified_at
-) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    icon_artifact_id, icon_sha256, history_json, created_at, modified_at, repo_publish
+) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 RETURNING *;
 
 -- name: GetProject :one

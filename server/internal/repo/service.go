@@ -435,16 +435,16 @@ func (s *Service) PrepareBuild(ctx context.Context, projectID, releaseID string)
 		return BuildPrep{}, err
 	}
 	original := originalFromRelease(release, project)
-	if project.RepoPublish == 0 {
+	settings, err := s.Settings(ctx)
+	if err != nil {
+		return BuildPrep{}, err
+	}
+	if project.RepoPublish == 0 || !settings.SigningInitialized {
 		return BuildPrep{
 			PackageName:  project.ArchPackageName,
 			OriginalName: original,
 			Publish:      false,
 		}, nil
-	}
-	settings, err := s.Settings(ctx)
-	if err != nil {
-		return BuildPrep{}, err
 	}
 	effective, original := EffectiveName(project.ArchPackageName, original, settings.PackageNamePrefix, project.RepoPkgnameOverride)
 	if IsReserved(effective) {
@@ -519,7 +519,7 @@ func (s *Service) projectViewLocked(ctx context.Context, projectID string) (Proj
 		PkgnameChangeWarning: project.RepoPublishedPkgname != "" && project.RepoPublishedPkgname != effective,
 		Reserved:             IsReserved(effective),
 		StableChannelEnabled: settings.StableEnabled,
-		AutomaticSoak:        settings.StableEnabled && policy.AutomaticSoak,
+		AutomaticSoak:        policy.AutomaticSoak,
 		SoakSecondsOverride:  policy.SoakSecondsOverride,
 		LibrarySoakSeconds:   settings.SoakSeconds,
 		EffectiveSoakSeconds: effectiveSoakSeconds(settings.SoakSeconds, policy),
@@ -611,12 +611,6 @@ func (s *Service) patchProject(ctx context.Context, projectID string, patch Proj
 			return ProjectStatus{}, fmt.Errorf("%w: project soak duration must be -1 or greater", ErrInvalid)
 		}
 		policy.SoakSecondsOverride = *patch.SoakSecondsOverride
-	}
-	if !settings.StableEnabled {
-		policy.AutomaticSoak = false
-	}
-	if publish == 0 {
-		policy.AutomaticSoak = false
 	}
 	nextSoakSeconds := effectiveSoakSeconds(settings.SoakSeconds, policy)
 	original := originalName(project)
@@ -761,6 +755,15 @@ func (s *Service) ReconcileProjectDistribution(ctx context.Context, projectID st
 }
 
 func (s *Service) ReconcileAllDistribution(ctx context.Context) error {
+	projectIDs, err := s.PublishedProjectIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, projectID := range projectIDs {
+		if err := s.ReconcileProjectDistribution(ctx, projectID); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.republishAllLocked(ctx)

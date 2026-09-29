@@ -6,6 +6,7 @@ class CoreTests final : public QObject {
     Q_OBJECT
 
 private slots:
+    void prunesDeletedLibraryCacheAndPreservesLiveFiles();
     void parsesChunkedServerEvents();
     void ignoresMalformedServerEventsAndHeartbeats();
     void describesUnnamedServerJobsWithoutOpaqueIds();
@@ -78,6 +79,7 @@ private slots:
     void inspectsArchiveIconsRepositoryEvidenceAndPrivilegedModes();
     void reviewsUnsafeArchiveSymlinksWithoutFailingImport();
     void rewritesDesktopIconFields();
+    void roundTripsSystemIconWithoutBundlingImage();
     void mapsArchiveDesktopExecToUsrBinCommand();
     void flagsMissingArchiveDesktopCommandForReview();
     void detectsStandaloneElfWithoutExecutingIt();

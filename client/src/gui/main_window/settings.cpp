@@ -1,3 +1,4 @@
+#include "core/server_ai.hpp"
 #include "gui/main_window/common.hpp"
 #include "gui/auto_save.hpp"
 #include "gui/future_button_guard.hpp"
@@ -177,6 +178,7 @@ void setListeningStatus(QLabel *label, const bool enabled, const QStringList &bo
 } // namespace
 
 void MainWindow::showSettings() {
+    appSettings_.harness = ServerAi(library_.config()).harness();
     reloadClientSettings();
     std::optional<LibrarySettings> library;
     std::optional<RepoSettings> repo;
@@ -267,7 +269,7 @@ void MainWindow::showSettings() {
     auto *harnessGroupLayout = new QVBoxLayout(harnessGroup);
     harnessGroupLayout->setContentsMargins(0, 0, 0, 0);
     harnessGroupLayout->addWidget(settingsSectionHelp(
-        harnessGroup, QStringLiteral("Choose the AI harness used for chats and automatic reviews."),
+        harnessGroup, QStringLiteral("Choose the server AI agent used by all clients for chats and automatic reviews."),
         QStringLiteral("Choose an agent from the official ACP registry, or enter an installed ACP executable. Registry agents use their declared npm or uvx package version. PacSmith supplies its MCP connection automatically. "
                        "Arguments are passed directly, one per line, without a shell or {prompt}. Codex uses separate "
                        "PacSmith storage for sessions, history, and its SQLite index; only your login credential file is shared.")));
@@ -300,7 +302,7 @@ void MainWindow::showSettings() {
     agentLayout->addWidget(agentSettings);
     auto *harnessExecutable = new QLineEdit(harnessGroup);
     harnessExecutable->setObjectName(QStringLiteral("harnessExecutable"));
-    harnessExecutable->setPlaceholderText(QStringLiteral("Executable name or absolute path"));
+    harnessExecutable->setPlaceholderText(QStringLiteral("Executable name or absolute path on the server"));
     auto *harnessArguments = new QPlainTextEdit(harnessGroup);
     harnessArguments->setObjectName(QStringLiteral("harnessArguments"));
     harnessArguments->setPlaceholderText(QStringLiteral("One argument per line (optional)"));
@@ -1311,6 +1313,19 @@ void MainWindow::showSettings() {
         reloadExternalHarness->setVisible(true);
     });
 
+    auto *harnessRefresh = new QTimer(&dialog);
+    harnessRefresh->setSingleShot(true); harnessRefresh->setInterval(250);
+    QObject::connect(this, &MainWindow::serverTopicsChanged, &dialog, [harnessRefresh](const QStringList &topics) {
+        if (topics.contains(QStringLiteral("ai")) || topics.contains(QStringLiteral("all"))) harnessRefresh->start();
+    });
+    QObject::connect(harnessRefresh, &QTimer::timeout, &dialog, [&] {
+        QString error; const auto profile=ServerAi(library_.config()).harness(&error);
+        if(!error.isEmpty())return;
+        appSettings_.harness=profile;
+        if(!harnessDirty)replaceHarness();
+        else { externalHarnessNotice->setText(QStringLiteral("Server agent settings changed. Reload them before editing further."));externalHarnessNotice->show();reloadExternalHarness->show(); }
+    });
+
     auto refreshScheduleControls = [&] {
         const bool periodic = backgroundEnabled->isChecked();
         schedule->setEnabled(periodic);
@@ -1573,7 +1588,7 @@ void MainWindow::showSettings() {
             return;
         }
         QString error;
-        if (!(cleared ? settingsStore_.clearHarness(&error) : settingsStore_.setHarness(harness, &error))) {
+        if (!(ServerAi(library_.config()).setHarness(cleared ? std::nullopt : std::optional<HarnessProfile>(harness), &error))) {
             externalHarnessNotice->setText(QStringLiteral("⚠ Could not save AI harness: %1").arg(error));
             externalHarnessNotice->setVisible(true);
             return;

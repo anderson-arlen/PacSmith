@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anderson-arlen/pacsmith/server/internal/acp"
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
 	"github.com/anderson-arlen/pacsmith/server/internal/events"
@@ -32,6 +33,7 @@ const (
 )
 
 type Config struct {
+	ACP         *acp.Service
 	DB          *sqlite.DB
 	Artifacts   *artifact.Registry
 	Library     *library.Service
@@ -63,6 +65,14 @@ func New(cfg Config) http.Handler {
 		cfg.Jobs.SetObserver(server.publishJob)
 	}
 	mux := http.NewServeMux()
+	for _, pattern := range []string{
+		"GET /api/v1/ai/settings", "PUT /api/v1/ai/settings",
+		"GET /api/v1/ai/conversations", "POST /api/v1/ai/conversations",
+		"GET /api/v1/ai/conversations/{id}", "POST /api/v1/ai/conversations/{id}/{action}",
+		"GET /api/v1/ai/permissions", "POST /api/v1/ai/permissions/{id}/response",
+	} {
+		mux.HandleFunc(pattern, server.acpAPI)
+	}
 	mux.HandleFunc("GET /api/v1/version", server.version)
 	mux.HandleFunc("GET /api/v1/health", server.health)
 	mux.HandleFunc("GET /api/v1/events", server.streamEvents)

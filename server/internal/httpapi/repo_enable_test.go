@@ -54,12 +54,6 @@ func TestEnablingRepositoryQueuesPublishedProjectsAfterBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Queries.UpdateProjectRepo(ctx, sqlcdb.UpdateProjectRepoParams{
-		RepoPublish: 1, RepoPkgnameOverride: "", RepoPublishedPkgname: "",
-		ModifiedAt: "2026-01-01T00:00:01Z", ID: project.ID, Revision: project.Revision,
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	manager, err := jobs.New(db, filepath.Join(root, "jobs"), nil)
 	if err != nil {

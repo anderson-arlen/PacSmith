@@ -632,6 +632,9 @@ void CoreTests::detectsStandaloneElfWithoutExecutingIt() {
         std::filesystem::path(executable.toUtf8().constData()), &error);
     QVERIFY2(analyzed.has_value(), qPrintable(error));
     QCOMPARE(analyzed->type, pacsmith::SourcePackageType::ElfBinary);
+    QCOMPARE(analyzed->installMapping.icon.sourceKind, pacsmith::IconSourceKind::SystemTheme);
+    QCOMPARE(analyzed->installMapping.icon.iconName, QStringLiteral("application-x-executable"));
+    QVERIFY(analyzed->installMapping.icon.isConfigured());
     QVERIFY(!analyzed->metadata.package.isEmpty());
     QVERIFY(analyzed->installMapping.binaryDestination.startsWith(QStringLiteral("/usr/bin/")));
     QCOMPARE(analyzed->installMapping.launchers.size(), 1);
@@ -971,4 +974,45 @@ void CoreTests::flagsAppRunFilenameDispatchForReview() {
     QVERIFY(analyzed->installMapping.appRun.contents.contains(QStringLiteral("BINARY_NAME")));
     QVERIFY(analyzed->installMapping.appRun.requiresReview());
     QVERIFY(analyzed->installMapping.appRun.reviewReason.contains(QStringLiteral("APPIMAGE")));
+}
+
+void CoreTests::roundTripsSystemIconWithoutBundlingImage() {
+    pacsmith::IconConfiguration icon;
+    icon.sourceKind = pacsmith::IconSourceKind::SystemTheme;
+    icon.iconName = QStringLiteral("utilities-terminal");
+    icon.provenance.origin = pacsmith::ValueOrigin::User;
+    const auto restored = pacsmith::IconConfiguration::fromJson(icon.toJson());
+    QCOMPARE(restored.sourceKind, pacsmith::IconSourceKind::SystemTheme);
+    QCOMPARE(restored.iconName, icon.iconName);
+    QVERIFY(restored.isConfigured());
+    QVERIFY(restored.installedPath().isEmpty());
+    QVERIFY(restored.sha256.isEmpty());
+
+    auto legacy = pacsmith::PackageRelease::fromJson({
+        {QStringLiteral("sourceType"), QStringLiteral("elf-binary")}});
+    QCOMPARE(legacy.installMapping.icon.iconName, QStringLiteral("application-x-executable"));
+    legacy.installMapping.icon = restored;
+    QCOMPARE(pacsmith::PackageRelease::fromJson(legacy.toJson()).installMapping.icon.iconName,
+             restored.iconName);
+
+    pacsmith::PackageRelease release;
+    release.archPackageName = QStringLiteral("vendor-tool");
+    release.sourceType = pacsmith::SourcePackageType::ElfBinary;
+    release.installMapping.icon = restored;
+    pacsmith::DesktopEntryConfiguration desktop;
+    desktop.enabled = true;
+    desktop.destination = QStringLiteral("/usr/share/applications/vendor-tool.desktop");
+    desktop.contents = QStringLiteral("[Desktop Entry]\nName=Vendor tool\nExec=vendor-tool\nIcon=old-icon\n");
+    release.installMapping.desktopEntries.append(desktop);
+    QCOMPARE(pacsmith::applyDesktopIconName(release.installMapping.desktopEntries, restored.iconName), 1);
+    const auto pkgbuild = pacsmith::PkgbuildGenerator::generate(release);
+    QVERIFY(pkgbuild.contains(QStringLiteral("Icon=utilities-terminal")));
+    QVERIFY(!pkgbuild.contains(QStringLiteral("pacsmith-icon.")));
+    QVERIFY(!pkgbuild.contains(QStringLiteral("/usr/share/pixmaps/")));
+
+    icon.iconName.clear();
+    QVERIFY(!icon.isConfigured());
+    icon.iconName = restored.iconName;
+    icon.missing = true;
+    QVERIFY(!icon.isConfigured());
 }

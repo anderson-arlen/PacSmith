@@ -670,17 +670,17 @@ func (s *Service) buildIfReviewFree(ctx context.Context, target checkTarget, rel
 	}
 	if target.Project.AutoBuildPolicy == "ai" &&
 		stringValue(object(release.Document["update"]), "lastAutomaticStatus") == "ai-reviewing" {
-		return false, &automaticReviewPending{status: "ai-reviewing", message: "external AI harness is reviewing this release"}
+		return false, &automaticReviewPending{status: "ai-reviewing", message: "server ACP agent is reviewing this release"}
 	}
 	if boolValue(release.Document, "pkgbuildManuallyModified") {
 		if target.Project.AutoBuildPolicy == "ai" {
-			return false, &automaticReviewPending{status: "ai-pending", message: "waiting for the PacSmith desktop session to launch AI review of the Custom PKGBUILD"}
+			return false, &automaticReviewPending{status: "ai-pending", message: "waiting for the library server to launch AI review of the Custom PKGBUILD"}
 		}
 		return false, fmt.Errorf("Custom PKGBUILDs require external review")
 	}
 	if blockers := automaticReviewBlockers(target.Release.Document, release.Document); len(blockers) > 0 {
 		if target.Project.AutoBuildPolicy == "ai" {
-			return false, &automaticReviewPending{status: "ai-pending", message: "waiting for the PacSmith desktop session to launch AI review: " + strings.Join(blockers, "; ")}
+			return false, &automaticReviewPending{status: "ai-pending", message: "waiting for the library server to launch AI review: " + strings.Join(blockers, "; ")}
 		}
 		return false, fmt.Errorf("%s", strings.Join(blockers, "; "))
 	}

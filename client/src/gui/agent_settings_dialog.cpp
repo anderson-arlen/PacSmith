@@ -1,3 +1,4 @@
+#include <QUuid>
 #include "gui/agent_settings_dialog.hpp"
 #include <QCheckBox>
 #include <QComboBox>
@@ -29,11 +30,7 @@ AgentSettingsDialog::AgentSettingsDialog(const HarnessProfile &profile, const Co
                                        SaveDefaults save, QWidget *parent)
     : QDialog(parent), agent_(new AcpClient(this)), lockedMode_(isCodexAcp(profile)), save_(std::move(save)) {
     initialize(true);
-    QString error;
-    const auto environment = prepareAcpEnvironment(profile, acpDataDirectory(), QProcessEnvironment::systemEnvironment(), &error);
-    if (!environment) { status_->setText(error); return; }
-    agent_->start(profile, *environment, acpMcpServers(connection,
-        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith"))));
+    agent_->startServer(connection, QUuid::createUuid().toString(QUuid::WithoutBraces));
 }
 
 AgentSettingsDialog::AgentSettingsDialog(AcpClient *agent, bool lockedMode, QWidget *parent)
@@ -94,6 +91,19 @@ void AgentSettingsDialog::initialize(bool defaults) {
         buttons->setEnabled(!busy);
         if (busy) status_->setText(agent_->isReady() ? QStringLiteral("Applying setting…") : QStringLiteral("Connecting to the agent…"));
     });
+    auto *authentication = new QWidget(this);
+    auto *authLayout = new QVBoxLayout(authentication);
+    authLayout->setContentsMargins(0, 0, 0, 0);
+    layout->insertWidget(layout->count() - 1, authentication);
+    connect(agent_, &AcpClient::authenticationAvailable, this, [this, authLayout, authentication](const QJsonArray &methods) {
+        while (auto *item=authLayout->takeAt(0)) { if(item->widget())item->widget()->deleteLater();delete item; }
+        for(const auto &entry:methods) {
+            const auto method=entry.toObject();
+            auto *button=new QPushButton(QStringLiteral("Authenticate: %1").arg(method.value(QStringLiteral("name")).toString()),authentication);
+            authLayout->addWidget(button);
+            connect(button,&QPushButton::clicked,this,[this,method] { agent_->authenticate(method.value(QStringLiteral("id")).toString()); });
+        }
+    });
     connect(agent_, &AcpClient::failed, this, [this](const QString &message) { status_->setText(message); });
     connect(agent_, &AcpClient::configurationWarning, this, [this, warning](const QString &message) { status_->clear(); warning->setText(message); warning->show(); });
     connect(agent_, &AcpClient::configOptionApplied, this, [this, warning](const QString &, const QJsonValue &) {
@@ -107,7 +117,6 @@ void AgentSettingsDialog::initialize(bool defaults) {
         QString error;
         status_->setText(save_(values, &error) ? QStringLiteral("Defaults saved") : QStringLiteral("Could not save defaults: %1").arg(error));
     });
-    if (save_) connect(agent_, &AcpClient::permissionRequested, this, [this](const QJsonValue &id, const QJsonObject &) { agent_->answerPermission(id); });
     render(agent_->configOptions());
     if (agent_->isReady()) status_->clear();
 }

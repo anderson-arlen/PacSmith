@@ -44,7 +44,7 @@ func (s *Service) publishBuildLocked(ctx context.Context, projectID, releaseID s
 		return err
 	}
 	if settings.SigningInitialized == 0 {
-		return fmt.Errorf("%w: initialize repository signing before publishing", ErrInvalid)
+		return nil
 	}
 	if len(artifactIDs) == 0 {
 		return nil

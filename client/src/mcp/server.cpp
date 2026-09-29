@@ -1,3 +1,4 @@
+#include "core/server_ai.hpp"
 #include "mcp/server.hpp"
 #include "core/acp_conversations.hpp"
 
@@ -258,13 +259,13 @@ QJsonArray tools() {
         tool(QStringLiteral("set_github_credential"), QStringLiteral("Store or replace pacsmithd's GitHub token. Marked destructive for MCP host approval; PacSmith never echoes the secret."),
              objectSchema({{QStringLiteral("token"), stringProperty(QStringLiteral("GitHub access token."))}}, {QStringLiteral("token")}), sensitiveWrite),
         tool(QStringLiteral("delete_github_credential"), QStringLiteral("Delete pacsmithd's stored GitHub token. Marked destructive for MCP host approval."), objectSchema(), sensitiveWrite),
-        tool(QStringLiteral("get_ai_harness"), QStringLiteral("Read the single AI harness configured for this PacSmith client."), objectSchema(), read),
+        tool(QStringLiteral("get_ai_harness"), QStringLiteral("Read the shared AI harness configured on the connected PacSmith server."), objectSchema(), read),
         tool(QStringLiteral("set_ai_harness"), QStringLiteral("Configure or replace the single ACP stdio executable used for chats and automatic reviews."),
              objectSchema({{QStringLiteral("name"), stringProperty(QStringLiteral("Agent name."))},
                            {QStringLiteral("executable"), stringProperty(QStringLiteral("ACP executable, not a shell command."))},
                            {QStringLiteral("arguments"), stringArrayProperty(QStringLiteral("Separate executable arguments."))}},
                           {QStringLiteral("name"), QStringLiteral("executable"), QStringLiteral("arguments")}), write),
-        tool(QStringLiteral("clear_ai_harness"), QStringLiteral("Remove the configured AI harness from this client's settings."),
+        tool(QStringLiteral("clear_ai_harness"), QStringLiteral("Remove the shared AI harness from the connected server."),
              objectSchema(), annotations(false, true, true, false)),
         tool(QStringLiteral("import_artifact"), QStringLiteral("Create or update a project by uploading and inspecting a local first-party vendor artifact through the normal PacSmith HTTP API. For a manual update, select the existing project and supply a version when the artifact does not identify itself."),
              objectSchema({{QStringLiteral("path"), stringProperty(QStringLiteral("Absolute local path to a vendor artifact."))},
@@ -783,6 +784,13 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     const auto fail = [&](const QString &message) { return toolError(id, message); };
 
     if (name == QStringLiteral("set_session_description")) {
+        if (qEnvironmentVariableIsSet("PACSMITH_SERVER_ACP")) {
+            const auto key=qEnvironmentVariable("PACSMITH_CONVERSATION_KEY");
+            const auto description=args.value(QStringLiteral("description")).toString();
+            if(key.isEmpty())return fail(QStringLiteral("No server conversation is attached."));
+            if(!ServerAi(library_.config()).request(QStringLiteral("POST"),QStringLiteral("/conversations/%1/title").arg(key),{{QStringLiteral("title"),description}},&error))return fail(error);
+            return toolResult(id,QJsonObject{{QStringLiteral("description"),description}});
+        }
         const auto directory = qEnvironmentVariable("PACSMITH_CONVERSATION_DIRECTORY");
         const auto key = qEnvironmentVariable("PACSMITH_CONVERSATION_KEY");
         if (directory.isEmpty() || key.isEmpty()) return fail(QStringLiteral("No PacSmith chat session is attached to this MCP connection."));
@@ -1034,10 +1042,10 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
             ? toolResult(id, QJsonObject{{QStringLiteral("configured"), false}}) : fail(error);
     }
     if (name == QStringLiteral("get_ai_harness")) {
-        const auto settings = AppSettingsStore{}.load(&error);
+        const auto configured = ServerAi(library_.config()).harness(&error);
         if (!error.isEmpty()) return fail(error);
-        if (!settings.harness) return toolResult(id, QJsonObject{{QStringLiteral("configured"), false}});
-        const auto &harness = *settings.harness;
+        if (!configured) return toolResult(id, QJsonObject{{QStringLiteral("configured"), false}});
+        const auto &harness = *configured;
         QJsonArray arguments;
         for (const auto &argument : harness.arguments) arguments.append(argument);
         return toolResult(id, QJsonObject{{QStringLiteral("configured"), true}, {QStringLiteral("name"), harness.name},
@@ -1052,11 +1060,11 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
             if (!argument.isString()) return fail(QStringLiteral("Every harness argument must be a string"));
             harness.arguments.append(argument.toString());
         }
-        if (!AppSettingsStore{}.setHarness(harness, &error)) return fail(error);
+        if (!ServerAi(library_.config()).setHarness(harness, &error)) return fail(error);
         return toolResult(id, QJsonObject{{QStringLiteral("name"), harness.name}, {QStringLiteral("configured"), true}});
     }
     if (name == QStringLiteral("clear_ai_harness")) {
-        if (!AppSettingsStore{}.clearHarness(&error)) return fail(error);
+        if (!ServerAi(library_.config()).setHarness(std::nullopt, &error)) return fail(error);
         return toolResult(id, QJsonObject{{QStringLiteral("configured"), false}});
     }
     if (name == QStringLiteral("get_build_job")) {
@@ -1863,10 +1871,9 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         if (!loaded) return fail(error);
         const auto current = library_.projectRepo(loaded->id, &error);
         if (!current) return fail(error);
-        const auto automaticSoak = current->stableChannelEnabled &&
-            (args.contains(QStringLiteral("automatic_soak"))
+        const auto automaticSoak = args.contains(QStringLiteral("automatic_soak"))
                  ? args.value(QStringLiteral("automatic_soak")).toBool()
-                 : current->automaticSoak);
+                 : current->automaticSoak;
         const auto soakSecondsOverride = args.contains(QStringLiteral("soak_seconds_override"))
             ? args.value(QStringLiteral("soak_seconds_override")).toInteger()
             : current->soakSecondsOverride;

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +29,7 @@ const (
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 type Registry struct {
+	mu    sync.Mutex
 	DB    *sqlite.DB
 	Store *Store
 }
@@ -42,6 +44,8 @@ type Record struct {
 }
 
 func (r *Registry) Put(ctx context.Context, filename, kind string, body io.Reader) (Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	filename, err := SanitizeFilename(filename)
 	if err != nil {
 		return Record{}, err
@@ -96,15 +100,35 @@ func (r *Registry) Get(ctx context.Context, id string) (Record, error) {
 	return recordFrom(row), nil
 }
 
-func (r *Registry) Delete(ctx context.Context, id string) error {
-	record, err := r.Get(ctx, id)
+// DeleteUnused rechecks every reference in the same transaction as deletion.
+// Keeping the row until file removal succeeds lets later cleanup retry disk errors.
+func (r *Registry) DeleteUnused(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tx, err := r.DB.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := r.DB.Queries.DeleteArtifact(ctx, id); err != nil {
+	defer tx.Rollback()
+	queries := r.DB.Queries.WithTx(tx)
+	record, err := queries.GetArtifact(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	return r.Store.Remove(record.SHA256)
+	count, err := queries.DeleteUnreferencedArtifact(ctx, id)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+	if err := r.Store.Remove(record.Sha256); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Registry) Open(ctx context.Context, id string) (Record, *os.File, error) {

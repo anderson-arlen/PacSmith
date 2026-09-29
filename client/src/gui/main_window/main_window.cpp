@@ -1390,6 +1390,7 @@ void MainWindow::reloadClientSettings() {
         statusBar()->showMessage(QStringLiteral("Could not reload client settings: %1").arg(error), 8000);
         return;
     }
+    loaded.harness = appSettings_.harness;
     preserveLibrarySettings(appSettings_.updates, loaded.updates);
     const auto path = settingsStore_.settingsPath();
     if (QFileInfo::exists(path) && !clientSettingsWatcher_->files().contains(path)) {

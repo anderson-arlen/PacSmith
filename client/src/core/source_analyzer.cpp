@@ -971,6 +971,9 @@ std::optional<SourceAnalysis> analyzeElf(const std::filesystem::path &path, QStr
         return std::nullopt;
     }
     const auto filename = QFileInfo(qPath(path)).fileName();
+    result.installMapping.icon.sourceKind = IconSourceKind::SystemTheme;
+    result.installMapping.icon.iconName = QStringLiteral("application-x-executable");
+    result.installMapping.icon.provenance.origin = ValueOrigin::Deterministic;
     result.installMapping.binarySourcePath = filename;
     result.installMapping.binaryDestination = QStringLiteral("/usr/bin/%1").arg(result.metadata.package);
     LauncherMapping launcher;

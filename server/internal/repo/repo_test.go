@@ -192,7 +192,7 @@ func TestStableChannelIsSystemWideAndDisabledByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.StableChannelEnabled || status.AutomaticSoak || status.Stable != nil || len(status.Soaks) != 0 {
+	if status.StableChannelEnabled || !status.AutomaticSoak || status.Stable != nil || len(status.Soaks) != 0 {
 		t.Fatalf("stable should be absent by default: %+v", status)
 	}
 	if status.Unstable == nil || status.Unstable.Pkgver != "1.5.0" {

@@ -19,7 +19,11 @@ public:
     ~AcpClient() override;
     void start(const HarnessProfile &profile, const AcpEnvironment &environment,
                const QJsonArray &mcpServers, const QString &sessionId = {});
-    bool prompt(const QString &text, const QJsonArray &images = {});
+    void startServer(const ConnectionConfig &connection, const QString &key, const QString &project = {}, bool initialize = true);
+    void pollServer();
+    void initializeServer() { serverAction(QStringLiteral("initialize")); }
+    [[nodiscard]] bool serverOwned() const { return serverConnection_.has_value(); }
+    bool prompt(const QString &text, const QJsonArray &images = {}, const QString &displayText = {});
     void cancel();
     void close();
     void authenticate(const QString &methodId);
@@ -32,6 +36,7 @@ public:
     [[nodiscard]] QJsonArray configOptions() const { return configOptions_; }
 
 signals:
+    void promptReceived(const QJsonArray &content);
     void ready();
     void sessionStarted(const QString &id);
     void updated(const QJsonObject &update, bool replaying);
@@ -47,6 +52,16 @@ signals:
     void busyChanged(bool busy);
 
 private:
+    void serverAction(const QString &action, const QJsonObject &body = {});
+    void applyServerSnapshot(const QJsonObject &snapshot);
+    std::optional<ConnectionConfig> serverConnection_;
+    QString serverKey_;
+    QTimer serverTimer_;
+    qint64 serverAfter_{0};
+    int serverGeneration_{0};
+    bool serverPollInFlight_{false};
+    bool serverActionInFlight_{false};
+    QString serverPermissions_;
     using Callback = std::function<void(const QJsonObject &)>;
     using ErrorCallback = std::function<void(const QString &)>;
     struct Pending { QString method; Callback callback; QTimer *timer; ErrorCallback error; };

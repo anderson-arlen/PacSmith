@@ -10,6 +10,25 @@ import (
 	"database/sql"
 )
 
+const countActiveStorageJobs = `-- name: CountActiveStorageJobs :one
+SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')
+AND (release_id = ?1 OR project_id = ?2
+     OR json_extract(payload_json, '$.release_id') = ?1
+     OR json_extract(payload_json, '$.existing_project_id') = ?2)
+`
+
+type CountActiveStorageJobsParams struct {
+	ReleaseID sql.NullString `json:"release_id"`
+	ProjectID sql.NullString `json:"project_id"`
+}
+
+func (q *Queries) CountActiveStorageJobs(ctx context.Context, arg CountActiveStorageJobsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActiveStorageJobs, arg.ReleaseID, arg.ProjectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countJobsByKind = `-- name: CountJobsByKind :one
 SELECT COUNT(*)
 FROM jobs

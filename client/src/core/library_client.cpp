@@ -1,4 +1,5 @@
 #include "core/library_client.hpp"
+#include "core/library_cache.hpp"
 
 #include "core/managed_package.hpp"
 #include "core/path_safety.hpp"
@@ -20,14 +21,6 @@
 
 namespace pacsmith {
 namespace {
-
-QString cacheRoot() {
-    const auto data = qEnvironmentVariable("XDG_DATA_HOME");
-    const auto root = (!data.isEmpty() && QDir::isAbsolutePath(data))
-                          ? data
-                          : QDir::home().filePath(QStringLiteral(".local/share"));
-    return QDir(root).filePath(QStringLiteral("pacsmith/client/cache"));
-}
 
 QString apiError(const QByteArray &body, const QString &fallback) {
     const auto document = QJsonDocument::fromJson(body);
@@ -223,6 +216,7 @@ QList<Project> LibraryClient::list(QString *error) const {
         static_cast<void>(reconcileInstalled(project, installed, nullptr));
         projects.append(std::move(project));
     }
+    library_cache::prune(projects);
     return projects;
 }
 
@@ -307,14 +301,26 @@ bool LibraryClient::recordPackageOperation(Project &project, const QString &rele
 }
 
 bool LibraryClient::deleteProject(const QString &id, QString *error) const {
-    const auto response = transport_.request(QStringLiteral("DELETE"),
-                                             QStringLiteral("/api/v1/projects/") + id);
-    return !isError(response, error) && (response.status == 204 || response.status == 200);
+    const auto project = load(id, error);
+    if (!project) return false;
+    return deleteProject(*project, error);
 }
 
 bool LibraryClient::deleteProject(const Project &project, QString *error) const {
     if (!completeProjectRequired(project, error)) return false;
-    return deleteProject(project.id, error);
+    const auto response = transport_.request(QStringLiteral("DELETE"),
+                                             QStringLiteral("/api/v1/projects/") + project.id);
+    if (isError(response, error) || (response.status != 204 && response.status != 200)) return false;
+    QSet<QString> removed;
+    for (const auto &release : project.releases) {
+        library_cache::removeRelease(project.id, release.id);
+        removed.insert(release.sourceArtifactId);
+        removed.insert(release.iconArtifactId);
+    }
+    QString refreshError;
+    const auto projects = list(&refreshError);
+    if (refreshError.isEmpty()) library_cache::prune(projects, removed);
+    return true;
 }
 
 std::optional<ImportResult> LibraryClient::importSource(const QString &sourcePath,
@@ -731,7 +737,7 @@ void LibraryClient::prefetchReleaseArtifacts(const Project &project) const {
 QString LibraryClient::cachedArtifactPath(const QString &artifactId,
                                           const QString &filename) const {
     if (artifactId.isEmpty()) return {};
-    const auto path = QDir(cacheRoot()).filePath(artifactId + QLatin1Char('-') + filename);
+    const auto path = QDir(library_cache::root()).filePath(artifactId + QLatin1Char('-') + filename);
     return QFileInfo::exists(path) ? path : QString{};
 }
 
@@ -743,7 +749,7 @@ QString LibraryClient::cacheArtifact(const QString &artifactId, const QString &f
     }
     const auto cached = cachedArtifactPath(artifactId, filename);
     if (!cached.isEmpty()) return cached;
-    const auto path = QDir(cacheRoot()).filePath(artifactId + QLatin1Char('-') + filename);
+    const auto path = QDir(library_cache::root()).filePath(artifactId + QLatin1Char('-') + filename);
     if (!downloadArtifact(artifactId, path, error)) return {};
     return path;
 }
@@ -1256,6 +1262,15 @@ bool LibraryClient::deleteRelease(Project &project, const QString &releaseId, QS
         }
         return false;
     }
+    QSet<QString> removed;
+    if (const auto *release = project.release(releaseId)) {
+        removed.insert(release->sourceArtifactId);
+        removed.insert(release->iconArtifactId);
+    }
+    library_cache::removeRelease(project.id, releaseId);
+    QString refreshError;
+    const auto projects = list(&refreshError);
+    if (refreshError.isEmpty()) library_cache::prune(projects, removed);
     project.releases.erase(std::remove_if(project.releases.begin(), project.releases.end(),
                                           [&](const auto &item) { return item.id == releaseId; }),
                            project.releases.end());
@@ -1312,7 +1327,7 @@ bool LibraryClient::setReleaseIcon(PackageRelease &release, const QString &fileP
 }
 
 std::filesystem::path LibraryClient::projectsRoot() const {
-    return std::filesystem::path(cacheRoot().toUtf8().constData());
+    return std::filesystem::path(library_cache::root().toUtf8().constData());
 }
 
 std::filesystem::path LibraryClient::sourcePath(const PackageRelease &release) const {
@@ -1326,7 +1341,7 @@ std::filesystem::path LibraryClient::releasePath(const PackageRelease &release) 
 }
 
 std::filesystem::path LibraryClient::releasePath(const QString &projectId, const QString &releaseId) const {
-    const auto path = QDir(cacheRoot()).filePath(projectId + QLatin1Char('/') + releaseId);
+    const auto path = QDir(library_cache::root()).filePath(projectId + QLatin1Char('/') + releaseId);
     QDir().mkpath(path);
     return std::filesystem::path(path.toUtf8().constData());
 }

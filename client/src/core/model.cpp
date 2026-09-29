@@ -298,11 +298,12 @@ QString withDesktopEntryField(QString contents, const QString &key, const QStrin
 }
 
 bool IconConfiguration::isConfigured() const {
-    return !missing && !sha256.isEmpty();
+    return !missing && (sourceKind == IconSourceKind::SystemTheme
+                            ? !iconName.isEmpty() : !sha256.isEmpty());
 }
 
 QString IconConfiguration::installedPath() const {
-    if (iconName.isEmpty()) return {};
+    if (sourceKind == IconSourceKind::SystemTheme || iconName.isEmpty()) return {};
     auto extension = format.toLower();
     if (extension.isEmpty()) extension = QFileInfo(projectPath).suffix().toLower();
     if (extension.isEmpty()) extension = QFileInfo(sourcePath).suffix().toLower();
@@ -382,6 +383,7 @@ QJsonObject IconConfiguration::toJson() const {
     case IconSourceKind::Payload: kind = QStringLiteral("payload"); break;
     case IconSourceKind::LocalFile: kind = QStringLiteral("local-file"); break;
     case IconSourceKind::RemoteUrl: kind = QStringLiteral("remote-url"); break;
+    case IconSourceKind::SystemTheme: kind = QStringLiteral("system-theme"); break;
     }
     return {{QStringLiteral("sourceKind"), kind},
             {QStringLiteral("sourcePath"), sourcePath},
@@ -402,6 +404,7 @@ IconConfiguration IconConfiguration::fromJson(const QJsonObject &object) {
     if (kind == QStringLiteral("payload")) result.sourceKind = IconSourceKind::Payload;
     else if (kind == QStringLiteral("local-file")) result.sourceKind = IconSourceKind::LocalFile;
     else if (kind == QStringLiteral("remote-url")) result.sourceKind = IconSourceKind::RemoteUrl;
+    else if (kind == QStringLiteral("system-theme")) result.sourceKind = IconSourceKind::SystemTheme;
     result.sourcePath = object.value(QStringLiteral("sourcePath")).toString();
     result.sourceUrl = object.value(QStringLiteral("sourceUrl")).toString();
     result.projectPath = object.value(QStringLiteral("projectPath")).toString();
@@ -1018,6 +1021,12 @@ PackageRelease PackageRelease::fromJson(const QJsonObject &object) {
     result.sourceType = sourcePackageTypeFromName(object.value(QStringLiteral("sourceType")).toString());
     result.acquisition = SourceAcquisition::fromJson(object.value(QStringLiteral("acquisition")).toObject());
     result.installMapping = InstallMapping::fromJson(object.value(QStringLiteral("installMapping")).toObject());
+    if (result.sourceType == SourcePackageType::ElfBinary &&
+        result.installMapping.icon.sourceKind == IconSourceKind::None && result.iconPath.isEmpty()) {
+        result.installMapping.icon.sourceKind = IconSourceKind::SystemTheme;
+        result.installMapping.icon.iconName = QStringLiteral("application-x-executable");
+        result.installMapping.icon.provenance.origin = ValueOrigin::Deterministic;
+    }
     result.originalSourceFilename = object.value(QStringLiteral("originalSourceFilename")).toString();
     result.sourceUrl = object.value(QStringLiteral("sourceUrl")).toString();
     result.sourceSha256 = object.value(QStringLiteral("sourceSha256")).toString();

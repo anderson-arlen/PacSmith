@@ -30,7 +30,7 @@ protected:
     void changeEvent(QEvent *event) override;
 private:
     void renderRow(int index);
-    void followOutput(bool follow);
+    void followOutput();
     QJsonArray entries_;
     QString imageDirectory_;
     QHash<QString, int> tools_;
@@ -38,5 +38,6 @@ private:
     QVBoxLayout *rows_{nullptr};
     QTimer animation_;
     int angle_{0};
+    bool followingOutput_{true};
 };
 } // namespace pacsmith::gui

@@ -96,9 +96,6 @@ func attachReleaseUpdateHealthSummary(release *Release, bodyJSON string) {
 }
 
 func attachReleaseIconSummary(release *Release, bodyJSON, artifactID string) {
-	if artifactID == "" {
-		return
-	}
 	var body struct {
 		InstallMapping struct {
 			Icon map[string]any `json:"icon"`
@@ -114,6 +111,9 @@ func attachReleaseIconSummary(release *Release, bodyJSON, artifactID string) {
 		return
 	}
 	release.Document["installMapping"] = document["installMapping"]
+	if stringValue(body.InstallMapping.Icon, "sourceKind") == "system-theme" {
+		artifactID = ""
+	}
 	release.Document["iconArtifactId"] = artifactID
 }
 
@@ -138,26 +138,6 @@ func (s *Service) GetProject(ctx context.Context, id string) (Project, error) {
 		project.Releases = append(project.Releases, full)
 	}
 	return project, nil
-}
-
-func (s *Service) DeleteProject(ctx context.Context, id string) error {
-	if _, err := s.GetProject(ctx, id); err != nil {
-		return err
-	}
-	if err := s.DB.Queries.DeleteProject(ctx, id); err != nil {
-		return err
-	}
-	if s.Repo != nil {
-		_ = s.Repo.OnProjectDeleted(ctx, id)
-	}
-	return nil
-}
-
-func (s *Service) DeleteRelease(ctx context.Context, id string) error {
-	if _, err := s.GetRelease(ctx, id); err != nil {
-		return err
-	}
-	return s.DB.Queries.DeleteRelease(ctx, id)
 }
 
 func (s *Service) FindProject(ctx context.Context, idOrName string) (Project, error) {
@@ -491,7 +471,9 @@ func (s *Service) GetRelease(ctx context.Context, id string) (Release, error) {
 			built = append(built, item.ArtifactID)
 		}
 	}
-	if !releaseIconConfigured(release.Document) {
+	install, _ := mapValue(release.Document, "installMapping")
+	icon, _ := mapValue(install, "icon")
+	if !releaseIconConfigured(release.Document) || stringValue(icon, "sourceKind") == "system-theme" {
 		iconID = ""
 	}
 	release.Document["sourceArtifactId"] = sourceID
@@ -1287,6 +1269,9 @@ func (s *Service) replaceIconArtifact(ctx context.Context, releaseID, artifactID
 func releaseIconConfigured(document map[string]any) bool {
 	install, _ := mapValue(document, "installMapping")
 	icon, _ := mapValue(install, "icon")
+	if stringValue(icon, "sourceKind") == "system-theme" {
+		return !boolValue(icon, "missing") && stringValue(icon, "iconName") != ""
+	}
 	return !boolValue(icon, "missing") && stringValue(icon, "sha256") != ""
 }
 
@@ -1457,149 +1442,6 @@ func containsToken(values []string, name string) bool {
 	return false
 }
 
-func (s *Service) Cleanup(ctx context.Context) error {
-	if s.Repo != nil {
-		return s.Repo.CleanupExclusive(ctx, func(protected map[string]struct{}) error {
-			return s.cleanupWith(ctx, protected)
-		})
-	}
-	return s.cleanupWith(ctx, map[string]struct{}{})
-}
-
-func (s *Service) cleanupWith(ctx context.Context, protected map[string]struct{}) error {
-	if err := s.trimProjectHistories(ctx); err != nil {
-		return err
-	}
-
-	settings, err := s.DB.Queries.GetLibrarySettings(ctx)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if err == nil && settings.RetentionVersions >= 0 {
-		if err := s.pruneCompletedReleases(ctx, int(settings.RetentionVersions), protected); err != nil {
-			return err
-		}
-	}
-
-	roots := map[string]struct{}{}
-	for id := range protected {
-		roots[id] = struct{}{}
-	}
-	sources, err := s.DB.Queries.ListSourceArtifactIDs(ctx)
-	if err != nil {
-		return err
-	}
-	for _, id := range sources {
-		if id.Valid {
-			roots[id.String] = struct{}{}
-		}
-	}
-	icons, err := s.DB.Queries.ListProjectIconArtifactIDs(ctx)
-	if err != nil {
-		return err
-	}
-	for _, id := range icons {
-		if id.Valid {
-			roots[id.String] = struct{}{}
-		}
-	}
-	linked, err := s.DB.Queries.ListAllReleaseArtifactIDs(ctx)
-	if err != nil {
-		return err
-	}
-	for _, id := range linked {
-		roots[id] = struct{}{}
-	}
-	artifacts, err := s.DB.Queries.ListArtifacts(ctx)
-	if err != nil {
-		return err
-	}
-	for _, art := range artifacts {
-		if _, ok := roots[art.ID]; ok {
-			continue
-		}
-		_ = s.Artifacts.Delete(ctx, art.ID)
-	}
-	return nil
-}
-
-func (s *Service) pruneCompletedReleases(ctx context.Context, keepOutdated int,
-	protected map[string]struct{}) error {
-	projects, err := s.DB.Queries.ListProjects(ctx)
-	if err != nil {
-		return err
-	}
-	channelEntries, err := s.DB.Queries.ListChannelEntries(ctx)
-	if err != nil {
-		return err
-	}
-	repoSettings, err := s.DB.Queries.GetRepoSettings(ctx)
-	if err != nil {
-		return err
-	}
-	for _, project := range projects {
-		releases, err := s.DB.Queries.ListReleasesForProject(ctx, project.ID)
-		if err != nil {
-			return err
-		}
-		boundary := len(releases) - 1
-		releaseIndexes := make(map[string]int, len(releases))
-		for index, rel := range releases {
-			releaseIndexes[rel.ID] = index
-		}
-		for _, entry := range channelEntries {
-			if !entry.ProjectID.Valid || entry.ProjectID.String != project.ID ||
-				!entry.ReleaseID.Valid || (entry.Channel == repo.ChannelStable && repoSettings.StableEnabled == 0) {
-				continue
-			}
-			if index, ok := releaseIndexes[entry.ReleaseID.String]; ok && index < boundary {
-				boundary = index
-			}
-		}
-		completedSeen := 0
-		for index := boundary - 1; index >= 0; index-- {
-			rel := releases[index]
-			arts, err := s.DB.Queries.ListReleaseArtifacts(ctx, rel.ID)
-			if err != nil {
-				return err
-			}
-			hasBuilt := false
-			for _, art := range arts {
-				if art.Role == "built_package" {
-					hasBuilt = true
-					break
-				}
-			}
-			if !hasBuilt {
-				continue
-			}
-			completedSeen++
-			if completedSeen <= keepOutdated {
-				continue
-			}
-			blocked := false
-			for _, art := range arts {
-				if _, ok := protected[art.ArtifactID]; ok {
-					blocked = true
-					break
-				}
-			}
-			if rel.SourceArtifactID.Valid {
-				if _, ok := protected[rel.SourceArtifactID.String]; ok {
-					blocked = true
-				}
-			}
-			if blocked {
-				continue
-			}
-			if err := s.DB.Queries.DeleteRelease(ctx, rel.ID); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -1638,6 +1480,7 @@ func releaseSummary(row sqlcdb.Release) Release {
 		CreatedAt:       row.CreatedAt,
 		ModifiedAt:      row.ModifiedAt,
 		Document: map[string]any{
+			"sourceArtifactId":       row.SourceArtifactID.String,
 			"originalSourceFilename": row.OriginalFilename,
 			"state":                  row.State,
 			"archPkgrel":             row.ArchPkgrel,

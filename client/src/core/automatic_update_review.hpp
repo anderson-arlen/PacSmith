@@ -13,8 +13,4 @@ struct AutomaticReviewRequest {
     QString prompt;
 };
 
-QList<AutomaticReviewRequest> claimPendingUpdateReviews(const LibraryClient &client,
-    const QList<Project> &summaries, const AppSettings &settings,
-    const QString &reviewDirectory = {}, bool recoverInterrupted = false);
-
 } // namespace pacsmith

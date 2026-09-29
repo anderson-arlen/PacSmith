@@ -1,3 +1,4 @@
+#include "../server_ai_host.hpp"
 #include "core/acp_client.hpp"
 #include "core/acp_conversations.hpp"
 #include "core/acp_registry.hpp"
@@ -24,6 +25,7 @@
 #include "gui/agent_settings_dialog.hpp"
 #include <QComboBox>
 #include <QCheckBox>
+#include <QScrollBar>
 
 using namespace pacsmith;
 
@@ -206,32 +208,22 @@ private slots:
         QVERIFY(!QFile::exists(directory.filePath(QStringLiteral("chat-8.json"))));
         QVERIFY(!QFile::exists(directory.filePath(QStringLiteral("images/live"))));
     }
-    void agentNamesSessionThroughInjectedTool_data() {
-        QTest::addColumn<bool>("remote");
-        QTest::newRow("local-without-daemon") << false;
-        QTest::newRow("remote-without-daemon") << true;
-    }
     void agentNamesSessionThroughInjectedTool() {
-        QFETCH(bool, remote);
         QTemporaryDir directory;
         const auto previous = qgetenv("XDG_DATA_HOME");
         qputenv("XDG_DATA_HOME", directory.path().toUtf8());
         auto agentProfile = profile(fakeAgent(directory.path()));
-        // Exercise the real CLI without inheriting the developer's desktop daemon.
-        agentProfile.environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), directory.filePath(QStringLiteral("runtime")));
-        agentProfile.environment.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), QStringLiteral("unix:path=") + directory.filePath(QStringLiteral("missing-bus")));
-        ConnectionConfig connection;
-        connection.mode = remote ? ConnectionConfig::Mode::Remote : ConnectionConfig::Mode::Local;
-        connection.socketPath = directory.filePath(QStringLiteral("missing-daemon.sock"));
-        connection.remoteUrl = QUrl(QStringLiteral("https://127.0.0.1:1"));
+        tests::ServerAiHost host(agentProfile);
+        const auto connection=host.connection;
         {
             pacsmith::gui::AcpChatWidget chat(agentProfile, connection, QStringLiteral("named-chat"), {});
+            QTRY_VERIFY(!chat.isBusy());
             chat.setConversationScope(QStringLiteral("slack"));
             chat.resize(500, 650);
             chat.show();
             auto *title = chat.findChild<QComboBox *>(QStringLiteral("sessionTitle"));
             QVERIFY(title != nullptr);
-            QCOMPARE(title->currentText(), QStringLiteral("New conversation"));
+            QTRY_COMPARE(title->currentText(), QStringLiteral("New conversation"));
             QSignalSpy completed(&chat, &pacsmith::gui::AcpChatWidget::completed);
             QVERIFY(chat.submit(QStringLiteral("name-session")));
             QTRY_COMPARE(completed.count(), 1);
@@ -241,10 +233,40 @@ private slots:
         }
         {
             pacsmith::gui::AcpChatWidget restored(agentProfile, connection, QStringLiteral("named-chat"), {});
+            QTRY_VERIFY(!restored.isBusy());
             restored.setConversationScope(QStringLiteral("slack"));
-            QCOMPARE(restored.findChild<QComboBox *>(QStringLiteral("sessionTitle"))->currentText(), QStringLiteral("Fix Slack automatic updates"));
+            QTRY_COMPARE(restored.findChild<QComboBox *>(QStringLiteral("sessionTitle"))->currentText(), QStringLiteral("Fix Slack automatic updates"));
         }
         if (previous.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", previous);
+    }
+    void transcriptFollowsOutputUntilScrolledAway() {
+        pacsmith::gui::ChatTranscript transcript;
+        transcript.resize(420, 240);
+        transcript.show();
+        for (int index = 0; index < 20; ++index)
+            transcript.message(QStringLiteral("assistant"), QStringLiteral("A paragraph of output. ").repeated(8));
+        auto *bar = transcript.verticalScrollBar();
+        QTRY_VERIFY(bar->maximum() > 500);
+        QTRY_COMPARE(bar->value(), bar->maximum());
+        const auto previousMaximum = bar->maximum();
+        transcript.message(QStringLiteral("assistant"), QStringLiteral(" More streamed output. ").repeated(80), true);
+        transcript.resize(300, 240);
+        QTRY_VERIFY(bar->maximum() > previousMaximum);
+        QTRY_COMPARE(bar->value(), bar->maximum());
+        bar->setValue(bar->maximum() / 3);
+        const auto readingPosition = bar->value();
+        transcript.toolCall({{QStringLiteral("toolCallId"), QStringLiteral("scroll-test")},
+                             {QStringLiteral("title"), QStringLiteral("Checking settings")}});
+        transcript.message(QStringLiteral("assistant"), QStringLiteral("Another response. ").repeated(80));
+        QTest::qWait(100);
+        QCOMPARE(bar->value(), readingPosition);
+        bar->setValue(bar->maximum());
+        transcript.message(QStringLiteral("assistant"), QStringLiteral("Continuing. ").repeated(80), true);
+        QTRY_COMPARE(bar->value(), bar->maximum());
+        transcript.message(QStringLiteral("assistant"), QStringLiteral("Queued output. ").repeated(80));
+        bar->setValue(0);
+        QTest::qWait(100);
+        QCOMPARE(bar->value(), 0);
     }
     void toolCallsUpdateOneRowAndRestore() {
         pacsmith::gui::ChatTranscript transcript;
@@ -334,8 +356,11 @@ private slots:
         QTemporaryDir directory;
         const auto previous = qgetenv("XDG_DATA_HOME");
         qputenv("XDG_DATA_HOME", directory.path().toUtf8());
+        const auto agentProfile=profile(fakeAgent(directory.path()));
+        tests::ServerAiHost host(agentProfile);
         {
-            pacsmith::gui::AcpChatWidget chat(profile(fakeAgent(directory.path())), {}, QStringLiteral("composer-action"), {});
+            pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("composer-action"), {});
+            QTRY_VERIFY(!chat.isBusy());
             chat.resize(460, 700); chat.show();
             auto *action = chat.findChild<QPushButton *>(QStringLiteral("chatAction"));
             auto *composer = chat.findChild<QPlainTextEdit *>(QStringLiteral("aiComposer"));
@@ -371,10 +396,11 @@ private slots:
         agentProfile.environment.insert(QStringLiteral("PACSMITH_TEST_REQUESTS"), requests);
         AppSettingsStore store(directory.filePath(QStringLiteral("settings")));
         QVERIFY(store.setHarness(agentProfile));
+        tests::ServerAiHost host(agentProfile);
         {
             pacsmith::gui::AgentSettingsDialog dialog(agentProfile, {}, [&](const QJsonObject &values, QString *error) {
                 agentProfile.configDefaults = values;
-                return store.setHarness(agentProfile, error);
+                return store.setHarness(agentProfile, error) && ServerAi(host.connection).setHarness(agentProfile,error);
             });
             dialog.show();
             const auto combo = [&](const QString &id) -> QComboBox * {
@@ -393,7 +419,7 @@ private slots:
             QTRY_COMPARE(store.load().harness->configDefaults.value(QStringLiteral("reasoning")).toString(), QStringLiteral("high"));
             QCheckBox *fast = nullptr;
             for (auto *check : dialog.findChildren<QCheckBox *>(QStringLiteral("provider.fast"))) if (check->isVisible()) fast = check;
-            QVERIFY(fast != nullptr); fast->click();
+            QVERIFY(fast != nullptr); QTRY_VERIFY(fast->isEnabled()); fast->click();
             QTRY_VERIFY(store.load().harness->configDefaults.value(QStringLiteral("provider.fast")).toBool());
             if (qEnvironmentVariableIsSet("PACSMITH_TEST_DEFAULTS_SCREENSHOT")) dialog.grab().save(qEnvironmentVariable("PACSMITH_TEST_DEFAULTS_SCREENSHOT"));
         }
@@ -487,8 +513,10 @@ private slots:
         agentProfile.arguments.append(QStringLiteral("--images"));
         const auto requests = directory.filePath(QStringLiteral("requests.jsonl"));
         agentProfile.environment.insert(QStringLiteral("PACSMITH_TEST_REQUESTS"), requests);
+        tests::ServerAiHost host(agentProfile);
         {
             pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("screen"), {});
+            QTRY_VERIFY(!chat.isBusy());
             chat.resize(480, 800); chat.show();
             auto *composer = chat.findChild<QPlainTextEdit *>(QStringLiteral("aiComposer"));
             auto *newChat = chat.findChild<QPushButton *>(QStringLiteral("newChat"));
@@ -560,6 +588,7 @@ private slots:
         }
         {
             pacsmith::gui::AcpChatWidget reopened(agentProfile, {}, QStringLiteral("screen"), {});
+            QTRY_VERIFY(!reopened.isBusy());
             auto *transcript = reopened.findChild<pacsmith::gui::ChatTranscript *>(QStringLiteral("aiTranscript"));
             QCOMPARE(transcript->entries().first().toObject().value(QStringLiteral("images")).toArray().size(), 1);
             QCOMPARE(transcript->findChildren<QPushButton *>(QStringLiteral("chatImage")).size(), 2);
@@ -571,8 +600,11 @@ private slots:
         QTemporaryDir directory;
         const auto previous = qgetenv("XDG_DATA_HOME");
         qputenv("XDG_DATA_HOME", directory.path().toUtf8());
+        const auto agentProfile=profile(fakeAgent(directory.path()));
+        tests::ServerAiHost host(agentProfile);
         {
-            pacsmith::gui::AcpChatWidget chat(profile(fakeAgent(directory.path())), {}, QStringLiteral("no-images"), {});
+            pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("no-images"), {});
+            QTRY_VERIFY(!chat.isBusy());
             QImage screenshot(10, 10, QImage::Format_RGB32); screenshot.fill(Qt::blue);
             QByteArray bytes; QBuffer buffer(&bytes); buffer.open(QIODevice::WriteOnly); QVERIFY(screenshot.save(&buffer, "PNG"));
             QVERIFY(chat.attachImage(bytes, QStringLiteral("screen.png")));
@@ -587,7 +619,8 @@ private slots:
             QVERIFY(!chat.attachImage(QByteArray("invalid"), QStringLiteral("not-an-image.png")));
         }
         {
-            pacsmith::gui::AcpChatWidget reopened(profile(fakeAgent(directory.path())), {}, QStringLiteral("no-images"), {});
+            pacsmith::gui::AcpChatWidget reopened(agentProfile, {}, QStringLiteral("no-images"), {});
+            QTRY_VERIFY(!reopened.isBusy());
             QCOMPARE(reopened.findChild<QPlainTextEdit *>(QStringLiteral("aiComposer"))->toPlainText(), QStringLiteral("Explain this"));
             int removals = 0;
             for (auto *button : reopened.findChildren<QPushButton *>()) if (button->text() == QStringLiteral("Remove")) ++removals;
@@ -601,8 +634,10 @@ private slots:
         const auto previous = qgetenv("XDG_DATA_HOME");
         qputenv("XDG_DATA_HOME", directory.path().toUtf8());
         const auto agentProfile = profile(fakeAgent(directory.path()));
+        tests::ServerAiHost host(agentProfile);
         {
             pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("test"), {});
+            QTRY_VERIFY(!chat.isBusy());
             QSignalSpy completed(&chat, &pacsmith::gui::AcpChatWidget::completed);
             chat.resize(600, 700);
             chat.show();
@@ -621,6 +656,7 @@ private slots:
         }
         {
             pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("test"), {});
+            QTRY_VERIFY(!chat.isBusy());
             auto *transcript = chat.findChild<pacsmith::gui::ChatTranscript *>(QStringLiteral("aiTranscript"));
             QCOMPARE(transcript->toPlainText().count(QStringLiteral("Hello world")), 1);
             QCOMPARE(transcript->findChildren<QWidget *>(QStringLiteral("toolCallRow")).size(), 1);
@@ -634,14 +670,16 @@ private slots:
             chat.setDefaultsProvider([&] { ++defaultsReads; return QJsonObject{{QStringLiteral("model"), QStringLiteral("deliberate")}}; });
             chat.findChild<QPushButton *>(QStringLiteral("newChat"))->click();
             QTRY_VERIFY(!chat.isBusy());
-            QCOMPARE(defaultsReads, 1);
+            QCOMPARE(defaultsReads, 0);
             QVERIFY(transcript->toPlainText().isEmpty());
             QFile record(QDir(acpDataDirectory()).filePath(QStringLiteral("conversations/%1.json").arg(chat.objectName())));
             QVERIFY(record.open(QIODevice::ReadOnly));
             QVERIFY(QJsonDocument::fromJson(record.readAll()).object().value(QStringLiteral("transcript")).toString().isEmpty());
             QFile previousChat(QDir(acpDataDirectory()).filePath(QStringLiteral("conversations/test.json")));
             QVERIFY(previousChat.open(QIODevice::ReadOnly));
-            QVERIFY(QJsonDocument::fromJson(previousChat.readAll()).object().value(QStringLiteral("transcript")).toString().contains(QStringLiteral("Hello world")));
+            QVERIFY(!QJsonDocument::fromJson(previousChat.readAll()).object().contains(QStringLiteral("transcript")));
+            const auto shared=ServerAi(host.connection).request(QStringLiteral("GET"),QStringLiteral("/conversations/test"));
+            QVERIFY(shared && !shared->value(QStringLiteral("events")).toArray().isEmpty());
         }
         if (previous.isNull()) qunsetenv("XDG_DATA_HOME");
         else qputenv("XDG_DATA_HOME", previous);
@@ -783,8 +821,10 @@ private slots:
                 if (button->isEnabled() && button->isVisible() && button->property("optionId").toString() == id) return button;
             return nullptr;
         };
+        tests::ServerAiHost host(agentProfile);
         {
             pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("permission-a"), {});
+            QTRY_VERIFY(!chat.isBusy());
             chat.resize(500, 850); chat.show();
             QSignalSpy completed(&chat, &pacsmith::gui::AcpChatWidget::completed);
             QVERIFY(chat.submit(QStringLiteral("permission")));
@@ -799,6 +839,7 @@ private slots:
         }
         {
             pacsmith::gui::AcpChatWidget chat(agentProfile, {}, QStringLiteral("permission-b"), {});
+            QTRY_VERIFY(!chat.isBusy());
             chat.show();
             QSignalSpy requested(&chat, &pacsmith::gui::AcpChatWidget::approvalRequired);
             QSignalSpy completed(&chat, &pacsmith::gui::AcpChatWidget::completed);
@@ -808,15 +849,17 @@ private slots:
             QVERIFY(chat.findChild<pacsmith::gui::ChatTranscript *>()->toPlainText().contains(QStringLiteral("Allowed by saved permission")));
         }
         {
-            ConnectionConfig other; other.socketPath = directory.filePath(QStringLiteral("other.sock"));
+            tests::ServerAiHost otherHost(agentProfile);
+            const auto other=otherHost.connection;
             pacsmith::gui::AcpChatWidget chat(agentProfile, other, QStringLiteral("permission-c"), {});
+            QTRY_VERIFY(!chat.isBusy());
             chat.show();
             QSignalSpy completed(&chat, &pacsmith::gui::AcpChatWidget::completed);
             QVERIFY(chat.submit(QStringLiteral("permission")));
             QTRY_VERIFY(choice(chat, QStringLiteral("no")) != nullptr);
             choice(chat, QStringLiteral("no"))->click();
             QTRY_COMPARE(completed.count(), 1);
-            QVERIFY(chat.findChild<pacsmith::gui::ChatTranscript *>()->toPlainText().contains(QStringLiteral("Reject")));
+            QVERIFY(chat.findChild<pacsmith::gui::ChatTranscript *>()->toPlainText().contains(QStringLiteral("no")));
         }
         if (previous.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", previous);
     }

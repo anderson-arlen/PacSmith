@@ -1,5 +1,6 @@
 #include "gui/application_session.hpp"
 #include "gui/appearance.hpp"
+#include "gui/system_icons.hpp"
 #include "gui/gui_instance.hpp"
 #include "gui/wheel_scroll_guard.hpp"
 #include "core/app_settings.hpp"
@@ -59,6 +60,7 @@ int main(int argc, char *argv[]) {
     }
 
     QApplication application(argc, argv);
+    pacsmith::gui::initializeSystemIconTheme();
     QCoreApplication::setApplicationName(QStringLiteral("pacsmith-gui"));
     QCoreApplication::setApplicationVersion(QStringLiteral(PACSMITH_VERSION));
     QCoreApplication::setOrganizationName(QStringLiteral("PacSmith"));

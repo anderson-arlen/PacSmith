@@ -103,6 +103,13 @@ ChatTranscript::ChatTranscript(QWidget *parent) : QScrollArea(parent) {
     rows_->setSpacing(8);
     rows_->setAlignment(Qt::AlignTop);
     setWidget(contents_);
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        followingOutput_ = verticalScrollBar()->maximum() - value < 24;
+    });
+    // Wrapped text and images can change the range after the initial layout pass.
+    connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int maximum) {
+        if (followingOutput_) verticalScrollBar()->setValue(maximum);
+    });
     animation_.setInterval(80);
     connect(&animation_, &QTimer::timeout, this, [this] {
         angle_ = (angle_ + 24) % 360;
@@ -192,14 +199,15 @@ void ChatTranscript::renderRow(int index) {
     rows_->insertWidget(index, row);
 }
 
-void ChatTranscript::followOutput(bool follow) {
-    if (follow) QTimer::singleShot(0, this, [this] { verticalScrollBar()->setValue(verticalScrollBar()->maximum()); });
+void ChatTranscript::followOutput() {
+    QTimer::singleShot(0, this, [this] {
+        if (followingOutput_) verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+    });
     emit changed();
 }
 
 void ChatTranscript::message(const QString &kind, const QString &text, bool continuation, const QJsonArray &images) {
     if (text.isEmpty() && images.isEmpty()) return;
-    const bool follow = verticalScrollBar()->maximum() - verticalScrollBar()->value() < 24;
     if (continuation && !entries_.isEmpty() && entries_.last().toObject().value(QStringLiteral("kind")).toString() == kind) {
         auto entry = entries_.last().toObject();
         entry.insert(QStringLiteral("text"), entry.value(QStringLiteral("text")).toString() + text);
@@ -210,11 +218,10 @@ void ChatTranscript::message(const QString &kind, const QString &text, bool cont
         entries_.append(entry);
     }
     renderRow(static_cast<int>(entries_.size() - 1));
-    followOutput(follow);
+    followOutput();
 }
 
 void ChatTranscript::toolCall(const QJsonObject &update) {
-    const bool follow = verticalScrollBar()->maximum() - verticalScrollBar()->value() < 24;
     const auto id = update.value(QStringLiteral("toolCallId")).toString();
     if (id.isEmpty()) return;
     const int index = tools_.value(id, static_cast<int>(entries_.size()));
@@ -238,7 +245,7 @@ void ChatTranscript::toolCall(const QJsonObject &update) {
     for (const auto &item : entries_) active |= running(item.toObject());
     if (active && !animation_.isActive()) animation_.start();
     else if (!active) animation_.stop();
-    followOutput(follow);
+    followOutput();
 }
 
 void ChatTranscript::beginTurn() { tools_.clear(); }
@@ -253,6 +260,7 @@ void ChatTranscript::endTurn(bool succeeded) {
     emit changed();
 }
 void ChatTranscript::clear() {
+    followingOutput_ = true;
     animation_.stop(); tools_.clear(); entries_ = {};
     while (auto *item = rows_->takeAt(0)) { delete item->widget(); delete item; }
     emit changed();

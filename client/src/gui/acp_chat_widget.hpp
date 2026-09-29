@@ -24,7 +24,7 @@ class AcpChatWidget final : public QWidget {
     Q_OBJECT
 public:
     AcpChatWidget(HarnessProfile profile, ConnectionConfig connection, QString key, QString context,
-                  QWidget *parent = nullptr);
+                  QWidget *parent = nullptr, QString projectId = {});
     ~AcpChatWidget() override;
     bool submit(const QString &prompt);
     void setContextProvider(std::function<std::optional<ChatScreenContext>()> provider);
@@ -53,6 +53,7 @@ private:
     std::function<QJsonObject()> defaultsProvider_;
     ConnectionConfig connection_;
     QString context_;
+    QString projectId_;
     std::function<std::optional<ChatScreenContext>()> contextProvider_;
     QString filePath_;
     QString sessionId_;
@@ -70,6 +71,7 @@ private:
     QString scope_;
     std::unique_ptr<QLockFile> lease_;
     QTimer historyTimer_;
+    bool historyInFlight_{false};
     QPushButton *action_;
     QPushButton *fresh_;
     QWidget *permissions_;

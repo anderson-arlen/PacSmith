@@ -714,6 +714,9 @@ QString projectDirectory(const LibraryClient &library, const Project &project) {
 QIcon projectIcon(const LibraryClient &library, const Project &project) {
     for (const auto &release : project.releases) {
         if (!release.installMapping.icon.isConfigured()) continue;
+        if (release.installMapping.icon.sourceKind == IconSourceKind::SystemTheme) {
+            return systemIcon(release.installMapping.icon.iconName);
+        }
         if (!release.installMapping.icon.projectPath.isEmpty()) {
             const auto path = library.releasePath(release) /
                               std::filesystem::path(release.installMapping.icon.projectPath.toUtf8().constData());
@@ -726,7 +729,7 @@ QIcon projectIcon(const LibraryClient &library, const Project &project) {
         QPixmap pixmap;
         if (pixmap.load(cached)) return QIcon(pixmap);
     }
-    return QIcon::fromTheme(QStringLiteral("application-x-executable"));
+    return systemIcon(QStringLiteral("application-x-executable"));
 }
 
 QString retainedPackagePath(const LibraryClient &library, const PackageRelease &release) {

@@ -151,6 +151,9 @@ SELECT * FROM repo_soaks WHERE pkgname = ? AND arch = ? ORDER BY pkgver;
 -- name: ListActiveSoaks :many
 SELECT * FROM repo_soaks WHERE status IN ('soaking', 'eligible') ORDER BY pkgname, arch, pkgver;
 
+-- name: DeleteFinishedOrphanSoaks :exec
+DELETE FROM repo_soaks WHERE release_id IS NULL AND status NOT IN ('soaking', 'eligible');
+
 -- name: UpsertSoak :exec
 INSERT INTO repo_soaks (
     pkgname, arch, pkgver, project_id, release_id, epoch, pkgrel, artifact_id,

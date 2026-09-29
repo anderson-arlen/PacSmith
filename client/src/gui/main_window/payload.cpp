@@ -848,6 +848,16 @@ void MainWindow::populateIcon() {
         if (selected >= 0) payloadIconCandidates_->setCurrentIndex(selected);
     }
     QPixmap pixmap;
+    if (icon.isConfigured() && icon.sourceKind == IconSourceKind::SystemTheme) {
+        const QSignalBlocker systemBlocker(systemIconCandidates_);
+        auto selected = systemIconCandidates_->findData(icon.iconName);
+        if (selected < 0) {
+            systemIconCandidates_->addItem(systemIcon(icon.iconName), icon.iconName, icon.iconName);
+            selected = systemIconCandidates_->count() - 1;
+        }
+        systemIconCandidates_->setCurrentIndex(selected);
+        pixmap = systemIcon(icon.iconName).pixmap(iconPreview_->size() - QSize(16, 16));
+    }
     if (icon.isConfigured() && !icon.projectPath.isEmpty()) {
         const auto path = library_.releasePath(*currentRelease()) /
                           std::filesystem::path(icon.projectPath.toUtf8().constData());
@@ -868,12 +878,42 @@ void MainWindow::populateIcon() {
         iconPreview_->setText(QStringLiteral("No icon selected"));
     }
     iconStatus_->setText(
-        icon.isConfigured()
+        icon.isConfigured() && icon.sourceKind == IconSourceKind::SystemTheme
+            ? QStringLiteral("System icon: %1\nUses the installed desktop theme.").arg(icon.iconName)
+        : icon.isConfigured()
             ? QStringLiteral("Source: %1\nStored as: %2\nSHA256: %3")
                   .arg(icon.sourcePath.isEmpty() ? icon.sourceUrl : icon.sourcePath,
                        icon.projectPath, icon.sha256)
             : QStringLiteral("No project icon is configured. The package can still be built, but desktop integration may look incomplete."));
     updateSectionReviewMarkers();
+}
+
+void MainWindow::selectSystemIcon() {
+    if (!project_ || currentRelease() == nullptr || payloadInspectionRunning_ ||
+        !ensureCurrentProjectWritable()) return;
+    const auto name = systemIconCandidates_->currentData().toString();
+    if (name.isEmpty()) return;
+    auto &release = *currentRelease();
+    release.installMapping.icon = {};
+    auto &icon = release.installMapping.icon;
+    icon.sourceKind = IconSourceKind::SystemTheme;
+    icon.iconName = name;
+    icon.provenance.origin = ValueOrigin::User;
+    icon.provenance.userApproved = true;
+    icon.provenance.timestamp = QDateTime::currentDateTimeUtc();
+    release.iconArtifactId.clear();
+    release.iconPath.clear();
+    release.iconSourcePath.clear();
+    release.iconSha256.clear();
+    project_->iconPath.clear();
+    project_->iconSourcePath.clear();
+    project_->iconSha256.clear();
+    applyDesktopIconName(release.installMapping.desktopEntries, name);
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateIcon();
+    populateDesktopEntries();
+    if (auto *item = projectList_->currentItem()) item->setIcon(systemIcon(name));
+    if (overviewIcon_ != nullptr) overviewIcon_->setPixmap(systemIcon(name).pixmap(96, 96));
 }
 
 void MainWindow::selectPayloadIcon() {

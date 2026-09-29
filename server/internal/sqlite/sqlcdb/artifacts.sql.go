@@ -19,6 +19,28 @@ func (q *Queries) DeleteArtifact(ctx context.Context, id string) error {
 	return err
 }
 
+const deleteUnreferencedArtifact = `-- name: DeleteUnreferencedArtifact :execrows
+DELETE FROM artifacts WHERE id = ?
+AND NOT EXISTS (SELECT 1 FROM releases WHERE artifacts.id IN (source_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM projects WHERE artifacts.id IN (icon_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM release_artifacts WHERE artifacts.id IN (artifact_id))
+AND NOT EXISTS (SELECT 1 FROM build_artifacts WHERE artifacts.id IN (artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_channel_entries WHERE artifacts.id IN (artifact_id, sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_soaks WHERE artifacts.id IN (artifact_id, sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_databases WHERE artifacts.id IN (db_artifact_id, db_sig_artifact_id, files_artifact_id, files_sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_settings WHERE artifacts.id IN (signing_pubkey_artifact_id, root_pubkey_artifact_id, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM jobs WHERE status IN ('queued', 'running')
+                AND json_extract(payload_json, '$.artifact_id') = artifacts.id)
+`
+
+func (q *Queries) DeleteUnreferencedArtifact(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnreferencedArtifact, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getArtifact = `-- name: GetArtifact :one
 SELECT id, sha256, size_bytes, original_filename, kind, created_at
 FROM artifacts
@@ -185,6 +207,38 @@ func (q *Queries) ListProjectIconArtifactIDs(ctx context.Context) ([]sql.NullStr
 	return items, nil
 }
 
+const listReleaseStorageArtifactIDs = `-- name: ListReleaseStorageArtifactIDs :many
+SELECT source_artifact_id AS artifact_id FROM releases
+WHERE releases.id = ?1 AND source_artifact_id IS NOT NULL
+UNION SELECT artifact_id FROM release_artifacts WHERE release_id = ?1
+UNION SELECT artifact_id FROM build_artifacts
+JOIN builds ON builds.id = build_artifacts.build_id
+WHERE builds.release_id = ?1
+`
+
+func (q *Queries) ListReleaseStorageArtifactIDs(ctx context.Context, releaseID string) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, listReleaseStorageArtifactIDs, releaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var artifact_id sql.NullString
+		if err := rows.Scan(&artifact_id); err != nil {
+			return nil, err
+		}
+		items = append(items, artifact_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSourceArtifactIDs = `-- name: ListSourceArtifactIDs :many
 SELECT source_artifact_id FROM releases WHERE source_artifact_id IS NOT NULL
 `
@@ -202,6 +256,50 @@ func (q *Queries) ListSourceArtifactIDs(ctx context.Context) ([]sql.NullString, 
 			return nil, err
 		}
 		items = append(items, source_artifact_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnreferencedArtifacts = `-- name: ListUnreferencedArtifacts :many
+SELECT id, sha256, size_bytes, original_filename, kind, created_at FROM artifacts
+WHERE NOT EXISTS (SELECT 1 FROM releases WHERE artifacts.id IN (source_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM projects WHERE artifacts.id IN (icon_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM release_artifacts WHERE artifacts.id IN (artifact_id))
+AND NOT EXISTS (SELECT 1 FROM build_artifacts WHERE artifacts.id IN (artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_channel_entries WHERE artifacts.id IN (artifact_id, sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_soaks WHERE artifacts.id IN (artifact_id, sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_databases WHERE artifacts.id IN (db_artifact_id, db_sig_artifact_id, files_artifact_id, files_sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM repo_settings WHERE artifacts.id IN (signing_pubkey_artifact_id, root_pubkey_artifact_id, certified_pubkey_artifact_id, keyring_gpg_artifact_id, keyring_trusted_artifact_id, keyring_revoked_artifact_id, keyring_package_artifact_id, keyring_package_sig_artifact_id))
+AND NOT EXISTS (SELECT 1 FROM jobs WHERE status IN ('queued', 'running')
+                AND json_extract(payload_json, '$.artifact_id') = artifacts.id)
+`
+
+func (q *Queries) ListUnreferencedArtifacts(ctx context.Context) ([]Artifact, error) {
+	rows, err := q.db.QueryContext(ctx, listUnreferencedArtifacts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artifact
+	for rows.Next() {
+		var i Artifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sha256,
+			&i.SizeBytes,
+			&i.OriginalFilename,
+			&i.Kind,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

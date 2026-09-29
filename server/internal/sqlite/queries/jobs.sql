@@ -58,3 +58,9 @@ LIMIT 1;
 SELECT COUNT(*)
 FROM jobs
 WHERE kind = ?;
+
+-- name: CountActiveStorageJobs :one
+SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')
+AND (release_id = sqlc.arg(release_id) OR project_id = sqlc.arg(project_id)
+     OR json_extract(payload_json, '$.release_id') = sqlc.arg(release_id)
+     OR json_extract(payload_json, '$.existing_project_id') = sqlc.arg(project_id));

@@ -38,7 +38,7 @@ func (s *Service) PublishedProjectIDs(ctx context.Context) ([]string, error) {
 func (s *Service) projectPolicy(ctx context.Context, projectID string) (projectRepoPolicy, error) {
 	row, err := s.DB.Queries.GetProjectRepoPolicy(ctx, projectID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return projectRepoPolicy{SoakSecondsOverride: -1}, nil
+		return projectRepoPolicy{AutomaticSoak: true, SoakSecondsOverride: -1}, nil
 	}
 	return projectRepoPolicy{
 		AutomaticSoak:       row.AutomaticSoak != 0,

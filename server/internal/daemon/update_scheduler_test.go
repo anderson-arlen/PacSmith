@@ -53,7 +53,15 @@ func TestScheduledUpdateCheckRunsCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			registry := &artifact.Registry{DB: db, Store: store}
-			orphan, err := registry.Put(ctx, "orphan.bin", "unknown", bytes.NewReader([]byte("orphan")))
+			orphanObject, err := store.Ingest(bytes.NewReader([]byte("orphan")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			orphan, err := db.Queries.InsertArtifact(ctx, sqlcdb.InsertArtifactParams{
+				ID: "55555555-5555-4555-8555-555555555555", Sha256: orphanObject.SHA256,
+				SizeBytes: orphanObject.Size, OriginalFilename: "orphan.bin", Kind: "unknown",
+				CreatedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano),
+			})
 			if err != nil {
 				t.Fatal(err)
 			}

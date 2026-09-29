@@ -875,6 +875,8 @@ func iconSourceKindName(kind inspect.IconSourceKind) string {
 		return "local-file"
 	case inspect.IconRemoteURL:
 		return "remote-url"
+	case inspect.IconSystemTheme:
+		return "system-theme"
 	default:
 		return "none"
 	}

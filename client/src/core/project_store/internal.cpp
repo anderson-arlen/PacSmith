@@ -271,6 +271,7 @@ bool materializeIntegrationIcon(const ProjectStore &store, Project &project,
                                 const QByteArray &fallbackContents,
                                 QString *error) {
     auto &icon = release.installMapping.icon;
+    if (icon.sourceKind == IconSourceKind::SystemTheme) return true;
     QByteArray contents;
     if (icon.sourceKind == IconSourceKind::Payload && !icon.sourcePath.isEmpty()) {
         QString readError;

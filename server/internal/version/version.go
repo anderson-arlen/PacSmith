@@ -10,6 +10,7 @@ const API = "v1"
 // do not change the protocol; they only add a capability name.
 var Capabilities = []string{
 	"http",
+	"server-acp",
 	"unix",
 	"artifacts",
 	"library",

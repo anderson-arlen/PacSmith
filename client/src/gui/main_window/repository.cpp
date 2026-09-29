@@ -58,7 +58,7 @@ void MainWindow::applyProjectRepository(const ProjectRepository &status) {
     populating_ = true;
     repoPublishCheck_->setChecked(status.publish);
     repoStablePolicy_->setVisible(status.stableChannelEnabled);
-    repoAutomaticSoakCheck_->setChecked(status.stableChannelEnabled && status.automaticSoak);
+    repoAutomaticSoakCheck_->setChecked(status.automaticSoak);
     repoSoakOverrideCheck_->setChecked(status.soakSecondsOverride >= 0);
     const auto displayedSoakSeconds = status.soakSecondsOverride >= 0
         ? status.soakSecondsOverride : status.librarySoakSeconds;
@@ -204,8 +204,7 @@ bool MainWindow::saveProjectRepository() {
     }
     const auto projectId = project_->id;
     const auto publish = repoPublishCheck_ != nullptr && repoPublishCheck_->isChecked();
-    const auto automaticSoak = publish && project_->repository.stableChannelEnabled &&
-                               repoAutomaticSoakCheck_ != nullptr &&
+    const auto automaticSoak = repoAutomaticSoakCheck_ != nullptr &&
                                repoAutomaticSoakCheck_->isChecked();
     qint64 soakSecondsOverride = -1;
     if (repoSoakOverrideCheck_ != nullptr && repoSoakOverrideCheck_->isChecked() &&

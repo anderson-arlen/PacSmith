@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anderson-arlen/pacsmith/server/internal/acp"
 	"github.com/anderson-arlen/pacsmith/server/internal/artifact"
 	"github.com/anderson-arlen/pacsmith/server/internal/auth"
 	"github.com/anderson-arlen/pacsmith/server/internal/events"
@@ -36,6 +37,7 @@ type Config struct {
 }
 
 type Daemon struct {
+	acp         *acp.Service
 	Dirs        paths.Dirs
 	server      *http.Server
 	handler     http.Handler
@@ -50,6 +52,8 @@ type Daemon struct {
 	repoServes  []repoServe
 	stopSoak    context.CancelFunc
 	stopUpdates context.CancelFunc
+	stopStorage context.CancelFunc
+	storageDone chan struct{}
 	db          *sqlite.DB
 	jobs        *jobs.Manager
 	events      *events.Hub
@@ -161,7 +165,17 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 		jobs:   manager,
 		events: eventHub,
 	}
+	d.acp = &acp.Service{DB: db, Library: lib, Events: eventHub, Directory: filepath.Join(cfg.Dirs.Data, "ai"), Socket: cfg.Dirs.Socket}
+	if err := d.acp.Start(ctx); err != nil {
+		manager.Stop()
+		_ = db.Close()
+		return nil, err
+	}
+	if err := d.acp.MigrateProfile(ctx, filepath.Join(filepath.Dir(cfg.Dirs.Config), "settings.json")); err != nil {
+		log.Printf("ACP settings migration: %v", err)
+	}
 	handler := httpapi.New(httpapi.Config{
+		ACP:         d.acp,
 		DB:          db,
 		Artifacts:   registry,
 		Library:     lib,
@@ -181,6 +195,7 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 	d.handler = handler
 	listener, err := listenUnix(cfg.Dirs.Socket)
 	if err != nil {
+		d.acp.Close()
 		manager.Stop()
 		_ = db.Close()
 		return nil, err
@@ -207,7 +222,12 @@ func StartConfig(ctx context.Context, cfg Config) (*Daemon, error) {
 			_ = d.Close()
 			return nil, err
 		}
+		if err := d.enqueueUnpublishedProjects(ctx); err != nil {
+			_ = d.Close()
+			return nil, err
+		}
 	}
+	d.startStorageMaintenance(ctx, lib)
 	d.startRepoMaintenance()
 	d.startUpdateScheduler(ctx)
 	return d, nil
@@ -536,7 +556,14 @@ func (d *Daemon) Close() error {
 		return nil
 	}
 	d.closeOnce.Do(func() {
+		if d.acp != nil {
+			d.acp.Close()
+		}
 		var errs []error
+		if d.stopStorage != nil {
+			d.stopStorage()
+			<-d.storageDone
+		}
 		if d.stopSoak != nil {
 			d.stopSoak()
 		}

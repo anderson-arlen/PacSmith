@@ -704,9 +704,9 @@ QWidget *MainWindow::createIconPage() {
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->addWidget(pageIntroduction(
-        QStringLiteral("Choose an icon from the artifact, a local file, or an official HTTPS URL."),
+        QStringLiteral("Choose a system icon, an icon from the artifact, a local file, or an official HTTPS URL."),
         page,
-        QStringLiteral("PacSmith stores the chosen bytes in the release and pins their SHA256.")));
+        QStringLiteral("System icons follow the desktop theme. Image files are stored in the release and pinned by SHA256.")));
     auto *top = new QHBoxLayout;
     iconPreview_ = new QLabel(page);
     iconPreview_->setFixedSize(160, 160);
@@ -715,6 +715,43 @@ QWidget *MainWindow::createIconPage() {
     top->addWidget(iconPreview_);
     auto *formWidget = new QWidget(page);
     auto *form = new QFormLayout(formWidget);
+    systemIconCandidates_ = new QComboBox(formWidget);
+    systemIconCandidates_->setObjectName(QStringLiteral("systemIconCandidates"));
+    systemIconCandidates_->setIconSize(QSize(24, 24));
+    for (const auto &choice : standardSystemIcons()) {
+        systemIconCandidates_->addItem(choice.icon, choice.label, choice.name);
+        systemIconCandidates_->setItemData(systemIconCandidates_->count() - 1, choice.name, Qt::ToolTipRole);
+    }
+    auto *selectSystem = new QPushButton(QStringLiteral("Use Selected System Icon"), formWidget);
+    selectSystem->setObjectName(QStringLiteral("selectSystemIcon"));
+    selectSystem->setEnabled(systemIconCandidates_->count() > 0);
+    if (systemIconCandidates_->count() == 0) {
+        systemIconCandidates_->addItem(QStringLiteral("No system icons available"));
+        systemIconCandidates_->setEnabled(false);
+    }
+    auto *systemRow = new QHBoxLayout;
+    systemRow->addWidget(systemIconCandidates_, 1);
+    systemRow->addWidget(selectSystem);
+    auto *browseSystem = new QPushButton(QStringLiteral("Browse All…"), formWidget);
+    browseSystem->setObjectName(QStringLiteral("browseSystemIcons"));
+    systemRow->addWidget(browseSystem);
+    connect(browseSystem, &QPushButton::clicked, this, [this, selectSystem] {
+        if (!project_ || currentRelease() == nullptr || !ensureCurrentProjectWritable()) return;
+        const auto name = chooseSystemIcon(this);
+        if (name.isEmpty()) return;
+        auto selected = systemIconCandidates_->findData(name);
+        if (selected < 0) {
+            systemIconCandidates_->addItem(systemIcon(name), name, name);
+            selected = systemIconCandidates_->count() - 1;
+        }
+        systemIconCandidates_->setEnabled(true);
+        selectSystem->setEnabled(true);
+        systemIconCandidates_->setCurrentIndex(selected);
+        selectSystemIcon();
+    });
+    auto *systemContainer = new QWidget(formWidget);
+    systemContainer->setLayout(systemRow);
+    form->addRow(QStringLiteral("System icon"), systemContainer);
     payloadIconCandidates_ = new QComboBox(formWidget);
     auto *selectPayload = new QPushButton(QStringLiteral("Use Selected Payload Icon"), formWidget);
     auto *payloadRow = new QHBoxLayout;
@@ -741,6 +778,7 @@ QWidget *MainWindow::createIconPage() {
     iconStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(iconStatus_);
     layout->addStretch(1);
+    connect(selectSystem, &QPushButton::clicked, this, &MainWindow::selectSystemIcon);
     connect(selectPayload, &QPushButton::clicked, this, &MainWindow::selectPayloadIcon);
     connect(browse, &QPushButton::clicked, this, &MainWindow::importLocalIcon);
     connect(fetch, &QPushButton::clicked, this, &MainWindow::fetchRemoteIcon);
@@ -1076,7 +1114,7 @@ QWidget *MainWindow::createUpdatesPage() {
     }
     updateSave->watch(githubPrereleases_);
     autoBuildPolicy_->setToolTip(QStringLiteral(
-        "Automatic AI review opens the default ACP agent from the running PacSmith desktop session. "
+        "Automatic AI review runs on the library server, even with every desktop client closed. "
         "Configure an ACP executable in Settings → AI Harness."));
     connect(updateCandidates_, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem *item) {

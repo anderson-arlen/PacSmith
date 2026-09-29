@@ -8,6 +8,51 @@ import (
 	"database/sql"
 )
 
+type AcpConversation struct {
+	ID          string `json:"id"`
+	ProjectID   string `json:"project_id"`
+	ReleaseID   string `json:"release_id"`
+	Automatic   int64  `json:"automatic"`
+	Title       string `json:"title"`
+	ProfileJson string `json:"profile_json"`
+	SessionID   string `json:"session_id"`
+	Status      string `json:"status"`
+	ConfigJson  string `json:"config_json"`
+	Error       string `json:"error"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type AcpEvent struct {
+	ID             int64  `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	Kind           string `json:"kind"`
+	BodyJson       string `json:"body_json"`
+}
+
+type AcpGrant struct {
+	Identity  string `json:"identity"`
+	Tool      string `json:"tool"`
+	SessionID string `json:"session_id"`
+}
+
+type AcpPermission struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	RequestJson    string `json:"request_json"`
+	Status         string `json:"status"`
+	OptionID       string `json:"option_id"`
+	AnsweredBy     string `json:"answered_by"`
+	CreatedAt      string `json:"created_at"`
+	ResolvedAt     string `json:"resolved_at"`
+}
+
+type AcpSetting struct {
+	ID          int64  `json:"id"`
+	Revision    int64  `json:"revision"`
+	ProfileJson string `json:"profile_json"`
+}
+
 type Artifact struct {
 	ID               string `json:"id"`
 	Sha256           string `json:"sha256"`

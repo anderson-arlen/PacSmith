@@ -111,6 +111,7 @@ const (
 	IconPayload
 	IconLocalFile
 	IconRemoteURL
+	IconSystemTheme
 )
 
 type FieldProvenance struct {

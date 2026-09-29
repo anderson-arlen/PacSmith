@@ -1,3 +1,4 @@
+#include "core/server_ai.hpp"
 #include <QDir>
 #include <QSet>
 #include "core/acp_client.hpp"
@@ -211,7 +212,13 @@ void AcpClient::configureSession(const QJsonObject &result) {
     emit ready();
 }
 
-bool AcpClient::prompt(const QString &text, const QJsonArray &images) {
+bool AcpClient::prompt(const QString &text, const QJsonArray &images, const QString &displayText) {
+    if (serverConnection_) {
+        if (busy_ || serverActionInFlight_) return false;
+        QJsonArray content; if (!text.isEmpty()) content.append(QJsonObject{{QStringLiteral("type"),QStringLiteral("text")},{QStringLiteral("text"),text}});
+        for (const auto &image : images) content.append(image);
+        serverAction(QStringLiteral("prompt"), {{QStringLiteral("content"),content},{QStringLiteral("display_text"),displayText.isNull() ? QJsonValue(QJsonValue::Null) : QJsonValue(displayText)}}); return true;
+    }
     if (!ready_ || busy_ || (text.trimmed().isEmpty() && images.isEmpty())) return false;
     if (!images.isEmpty() && !supportsImages_) {
         emit failed(QStringLiteral("This ACP agent does not support images. Choose an agent with image support; your message and attachments are still in the composer."));
@@ -236,6 +243,7 @@ bool AcpClient::prompt(const QString &text, const QJsonArray &images) {
 }
 
 void AcpClient::authenticate(const QString &methodId) {
+ if (serverConnection_) { serverAction(QStringLiteral("authenticate"),{{QStringLiteral("method"),methodId}}); return; }
     if (busy_ || process_.state() != QProcess::Running) return;
     setBusy(true);
     request(QStringLiteral("authenticate"), {{QStringLiteral("methodId"), methodId}},
@@ -243,6 +251,7 @@ void AcpClient::authenticate(const QString &methodId) {
 }
 
 void AcpClient::setConfigOption(const QString &id, const QJsonValue &value) {
+ if (serverConnection_) { serverAction(QStringLiteral("configure"),{{QStringLiteral("config_id"),id},{QStringLiteral("value"),value}}); return; }
     if (!ready_ || busy_ || (codex_ && id == QStringLiteral("mode") && value.toString() != QStringLiteral("read-only"))) return;
     setBusy(true);
     QJsonObject params{{QStringLiteral("sessionId"), sessionId_}, {QStringLiteral("configId"), id}, {QStringLiteral("value"), value}};
@@ -260,6 +269,7 @@ void AcpClient::setConfigOption(const QString &id, const QJsonValue &value) {
 }
 
 void AcpClient::cancel() {
+ if (serverConnection_) { serverAction(QStringLiteral("cancel")); return; }
     if (!busy_) return;
     cancelled_ = true;
     const auto ids = permissions_.keys();
@@ -275,10 +285,16 @@ void AcpClient::cancel() {
 }
 
 bool AcpClient::clearRememberedPermissions(QString *error) {
+ if (serverConnection_) { return ServerAi(*serverConnection_).request(QStringLiteral("POST"),QStringLiteral("/conversations/%1/clear-permissions").arg(serverKey_),{},error).has_value(); }
     return !toolPermissions_ || toolPermissions_->clear(error);
 }
 
 void AcpClient::answerPermission(const QJsonValue &requestId, const QString &optionId) {
+    if (serverConnection_) {
+        QString error;
+        if (!ServerAi(*serverConnection_).request(QStringLiteral("POST"),QStringLiteral("/permissions/%1/response").arg(requestId.toString()),{{QStringLiteral("option_id"),optionId}},&error)) emit configurationWarning(error);
+        pollServer(); return;
+    }
     const auto key = permissionKey(requestId);
     if (!permissions_.contains(key)) return;
     const auto offered = permissions_.take(key);
@@ -401,6 +417,11 @@ void AcpClient::setBusy(bool busy) {
 }
 
 void AcpClient::close() {
+    if (serverConnection_) {
+        ++serverGeneration_; serverTimer_.stop(); serverConnection_.reset(); serverKey_.clear();
+        serverAfter_ = 0; serverPermissions_.clear(); serverPollInFlight_ = false; serverActionInFlight_ = false;
+        ready_ = false; setBusy(false); return;
+    }
     closing_ = true;
     disconnect(startedConnection_);
     cancelTimer_.stop();

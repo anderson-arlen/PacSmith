@@ -359,14 +359,17 @@ void MainWindow::applyEventProjects(QList<Project> projects, const QString &erro
         return candidate.id == selectedId;
     });
     const bool selectedWasFetched = found != projects.cend();
-    const bool deleted = !selectedId.isEmpty() && removedIds.contains(selectedId);
+    const bool deleted = !selectedId.isEmpty() &&
+        (removedIds.contains(selectedId) || (fullRefresh && !selectedWasFetched));
     bool externalChange = false;
     if (project_ && selectedWasFetched) {
         externalChange = projectListStateDiffers(*project_, *found) ||
                          topics.contains(QStringLiteral("repository"));
     }
     const bool hasDraft = hasUnsavedProjectDraft();
-    if (projectStale_ || ((deleted || externalChange) && hasDraft)) {
+    // Partial refreshes for other packages must leave the pending conflict intact.
+    if ((deleted || selectedWasFetched) &&
+        (projectStale_ || ((deleted || externalChange) && hasDraft))) {
         pendingExternalDeletion_ = deleted;
         pendingExternalProject_ = deleted ? std::optional<Project>{}
                                           : std::optional<Project>{*found};

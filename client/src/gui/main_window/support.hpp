@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/background_updates.hpp"
+#include "gui/system_icons.hpp"
 #include "core/model.hpp"
 #include "core/library_client.hpp"
 

@@ -14,6 +14,7 @@
 #include "gui/main_window/main_window.hpp"
 
 #include <QAction>
+#include <QDialog>
 #include <QApplication>
 #include <QColor>
 #include <QCoreApplication>
@@ -51,7 +52,6 @@ QIcon trayStatusIcon(const int availableUpdates, const QColor &foreground,
 
 struct UpdateCensusResult {
     QList<Project> projects;
-    QList<AutomaticReviewRequest> reviews;
     QString error;
 };
 
@@ -148,7 +148,7 @@ ApplicationSession::ApplicationSession(AppSettingsStore &settingsStore, QObject 
     });
 }
 
-ApplicationSession::~ApplicationSession() = default;
+ApplicationSession::~ApplicationSession() { for (auto dialog : permissionDialogs_) if (dialog) delete dialog; }
 
 bool ApplicationSession::listen() { return server_.listen(); }
 
@@ -158,20 +158,11 @@ bool ApplicationSession::trayWanted() const {
 }
 
 void ApplicationSession::start(const bool startHidden, const QString &importPath) {
-    const AcpConversations conversations(QDir(acpDataDirectory()).filePath(QStringLiteral("conversations")));
-    conversations.cleanup();
-    auto *conversationCleanup = new QTimer(this);
-    conversationCleanup->setInterval(60 * 60 * 1000);
-    connect(conversationCleanup, &QTimer::timeout, this, [this, conversations] {
-        const auto now = QDateTime::currentDateTimeUtc();
-        if (window_) for (auto *chat : window_->findChildren<AcpChatWidget *>()) {
-            if (chat->isVisible() || chat->isBusy()) continue;
-            const QFileInfo record(QDir(acpDataDirectory()).filePath(QStringLiteral("conversations/%1.json").arg(chat->objectName())));
-            if (record.exists() && record.lastModified() < now.addDays(-10)) delete chat;
-        }
-        conversations.cleanup(now);
-    });
-    conversationCleanup->start();
+    auto *permissions = new QTimer(this);
+    permissions->setInterval(1000);
+    connect(permissions, &QTimer::timeout, this, &ApplicationSession::refreshPermissions);
+    permissions->start();
+    refreshPermissions();
     startHidden_ = startHidden;
     trayRefresh_.start();
     auto *reviewRefresh = new QTimer(this);
@@ -253,16 +244,19 @@ void ApplicationSession::handleServerEvent(const ServerEvent &event) {
     refreshTray();
 }
 
-void ApplicationSession::showWorkbench(const QString &importPath) {
-    const bool created = window_ == nullptr;
-    if (created) {
+void ApplicationSession::ensureWorkbench() {
+    if (window_ == nullptr) {
         window_ = std::make_unique<MainWindow>(settingsStore_);
         window_->resize(1180, 760);
         window_->setWindowIcon(applicationIcon());
     }
     window_->setKeepRunningInTray(trayWanted());
+}
+
+void ApplicationSession::showWorkbench(const QString &importPath) {
+    ensureWorkbench();
     window_->activateExistingSession(importPath);
-    if (created && importPath.isEmpty()) maybeOnboard();
+    if (importPath.isEmpty()) maybeOnboard();
 }
 
 void ApplicationSession::ensureTray() {
@@ -370,22 +364,14 @@ void ApplicationSession::refreshUpdateCensus() {
         watcher->deleteLater();
         updateCensusInFlight_ = false;
         if (!result.error.isEmpty()) return;
-        updateReviewRecoveryAttempted_ = true;
         static_cast<void>(BackgroundUpdateStateStore::syncAvailableUpdates(result.projects));
         refreshTray();
-        if (!result.reviews.isEmpty()) {
-            showWorkbench();
-            for (const auto &review : result.reviews) window_->openAiConversation(review, true);
-        }
     });
     const auto connection = ConnectionConfig::load();
-    const auto settings = settingsStore_.load();
-    const bool recoverInterrupted = !updateReviewRecoveryAttempted_;
-    watcher->setFuture(QtConcurrent::run([connection, settings, recoverInterrupted] {
+    watcher->setFuture(QtConcurrent::run([connection] {
         UpdateCensusResult result;
         const LibraryClient client(connection);
         result.projects = client.list(&result.error);
-        if (result.error.isEmpty()) result.reviews = claimPendingUpdateReviews(client, result.projects, settings, {}, recoverInterrupted);
         return result;
     }));
 }

@@ -1,3 +1,6 @@
+#include <QFutureWatcher>
+#include <QtConcurrent>
+#include "core/server_ai.hpp"
 #include "gui/acp_chat_widget.hpp"
 #include "core/acp_conversations.hpp"
 #include <QComboBox>
@@ -38,14 +41,11 @@ void clearLayout(QLayout *layout) {
 
 }
 
-AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection, QString key, QString context, QWidget *parent)
-    : QWidget(parent), profile_(std::move(profile)), connection_(std::move(connection)), context_(std::move(context)) {
+AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection, QString key, QString context, QWidget *parent, QString projectId)
+    : QWidget(parent), profile_(std::move(profile)), connection_(std::move(connection)), context_(std::move(context)), projectId_(std::move(projectId)) {
     filePath_ = QDir(acpDataDirectory()).filePath(QStringLiteral("conversations/%1.json").arg(key));
     setObjectName(key);
     QDir().mkpath(QFileInfo(filePath_).absolutePath());
-    lease_ = std::make_unique<QLockFile>(QFileInfo(filePath_).dir().filePath(key + QStringLiteral(".lock")));
-    lease_->setStaleLockTime(0);
-    lease_->tryLock(0);
     auto *layout = new QVBoxLayout(this);
     auto *header = new QHBoxLayout;
     sessionTitle_ = new QComboBox(this);
@@ -162,11 +162,7 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
     QFile file(filePath_);
     if (file.open(QIODevice::ReadOnly)) {
         const auto record = QJsonDocument::fromJson(file.readAll()).object();
-        sessionId_ = record.value(QStringLiteral("sessionId")).toString();
-        if (record.contains(QStringLiteral("entries"))) transcript_->restore(record.value(QStringLiteral("entries")).toArray());
-        else transcript_->restoreLegacy(record.value(QStringLiteral("transcript")).toString());
         input_->setPlainText(record.value(QStringLiteral("draft")).toString());
-        transcript_->restoreLegacyImages(record.value(QStringLiteral("images")).toArray());
         for (const auto &entry : record.value(QStringLiteral("draftImages")).toArray()) {
             const auto draft = entry.toObject();
             const auto stored = draft.value(QStringLiteral("file")).toString();
@@ -195,9 +191,6 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
         const auto freshKey = AcpConversations::freshKey();
         filePath_ = QFileInfo(filePath_).dir().filePath(freshKey + QStringLiteral(".json"));
         setObjectName(freshKey);
-        lease_ = std::make_unique<QLockFile>(QFileInfo(filePath_).dir().filePath(freshKey + QStringLiteral(".lock")));
-        lease_->setStaleLockTime(0);
-        lease_->tryLock(0);
         setConversationScope(scope_);
         sessionId_.clear();
         transcript_->clear();
@@ -206,12 +199,12 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
         renderAttachments();
         save();
         emit conversationReset();
-        start();
+        agent_.startServer(connection_, objectName(), projectId_, false);
     });
     connect(&agent_, &AcpClient::busyChanged, this, [this] { controls(); });
     connect(&agent_, &AcpClient::ready, this, [this] {
         status_->setText(QStringLiteral("Connected"));
-        if (turnActive_) sendQueued();
+        if (turnActive_ && !queued_.isEmpty()) sendQueued();
         controls();
     });
     connect(&agent_, &AcpClient::sessionStarted, this, [this](const QString &id) { sessionId_ = id; save(); });
@@ -295,6 +288,26 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
         controls(); save();
         if (active) emit completed(message);
     });
+    connect(&agent_, &AcpClient::promptReceived, this, [this](const QJsonArray &content) {
+        if (!queued_.isEmpty()) {
+            queued_.clear(); queuedQuestion_.clear(); images_.clear(); input_->clear(); renderAttachments();
+        }
+        transcript_->beginTurn();
+        QString text; QJsonArray attachments;
+        for (const auto &entry : content) {
+            const auto item=entry.toObject();
+            if(item.value(QStringLiteral("type")).toString()==QStringLiteral("text")) text+=item.value(QStringLiteral("text")).toString();
+            else if(item.value(QStringLiteral("type")).toString()==QStringLiteral("image")) {
+                const auto bytes=QByteArray::fromBase64(item.value(QStringLiteral("data")).toString().toLatin1());
+                const auto name=QUuid::createUuid().toString(QUuid::WithoutBraces);
+                QFile cachedImage(QFileInfo(filePath_).dir().filePath(QStringLiteral("images/")+name));
+                QDir().mkpath(QFileInfo(cachedImage).absolutePath());
+                if(cachedImage.open(QIODevice::WriteOnly)){cachedImage.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner);cachedImage.write(bytes);attachments.append(QJsonObject{{QStringLiteral("file"),name},{QStringLiteral("name"),QStringLiteral("Screenshot")}});}
+            }
+        }
+        transcript_->message(QStringLiteral("user"),text,false,attachments);
+    });
+    agent_.startServer(connection_, objectName(), projectId_, false);
     refreshSessions();
     controls();
 }
@@ -318,10 +331,7 @@ void AcpChatWidget::save() {
     if (!QDir().mkpath(QFileInfo(filePath_).absolutePath())) { status_->setText(QStringLiteral("Could not create conversation storage.")); return; }
     QJsonArray drafts;
     for (const auto &image : images_) drafts.append(QJsonObject{{QStringLiteral("file"), image.storageName}, {QStringLiteral("name"), image.name}});
-    const auto bytes = QJsonDocument(QJsonObject{{QStringLiteral("sessionId"), sessionId_},
-        {QStringLiteral("draft"), input_->toPlainText()}, {QStringLiteral("draftImages"), drafts},
-        {QStringLiteral("transcript"), transcript_->toPlainText()},
-        {QStringLiteral("entries"), transcript_->entries()}}).toJson(QJsonDocument::Compact);
+    const auto bytes = QJsonDocument(QJsonObject{{QStringLiteral("draft"), input_->toPlainText()}, {QStringLiteral("draftImages"), drafts}}).toJson(QJsonDocument::Compact);
     QFile previous(filePath_);
     if (previous.open(QIODevice::ReadOnly) && previous.readAll() == bytes) return;
     previous.close();
@@ -331,12 +341,9 @@ void AcpChatWidget::save() {
     }
 }
 void AcpChatWidget::start() {
-    if (sessionId_.isEmpty() && defaultsProvider_) profile_.configDefaults = defaultsProvider_();
-    QString error;
-    const auto environment = prepareAcpEnvironment(profile_, acpDataDirectory(), QProcessEnvironment::systemEnvironment(), &error);
-    if (!environment) { emit agent_.failed(error); return; }
-    status_->setText(QStringLiteral("Connecting…"));
-    agent_.start(profile_, *environment, acpMcpServers(connection_, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith")), objectName()), sessionId_);
+    status_->setText(QStringLiteral("Connecting to the server agent…"));
+    if (agent_.serverOwned()) agent_.initializeServer();
+    else agent_.startServer(connection_, objectName(), projectId_);
 }
 bool AcpChatWidget::submit(const QString &prompt) {
     if (isBusy() || (prompt.trimmed().isEmpty() && images_.isEmpty())) return false;
@@ -360,15 +367,8 @@ void AcpChatWidget::sendQueued() {
         content.append(image.content());
         attachments.append(QJsonObject{{QStringLiteral("file"), image.storageName}, {QStringLiteral("name"), image.name}});
     }
-    if (!agent_.prompt(queued_, content)) return;
-    transcript_->beginTurn();
-    transcript_->message(QStringLiteral("user"), queuedQuestion_, false, attachments);
+    if (!agent_.prompt(queued_, content, queuedQuestion_.isNull() ? QStringLiteral("") : queuedQuestion_)) return;
     status_->setText(QStringLiteral("Agent working…"));
-    queued_.clear();
-    queuedQuestion_.clear();
-    images_.clear();
-    input_->clear();
-    renderAttachments();
 }
 bool AcpChatWidget::attachImage(const QByteArray &bytes, const QString &name) {
     if (isBusy()) return false;
@@ -419,28 +419,28 @@ void AcpChatWidget::focusComposer() {
 }
 void AcpChatWidget::setConversationScope(const QString &scope) {
     scope_ = scope.isEmpty() ? objectName() : scope;
-    QString error;
-    if (!AcpConversations(QFileInfo(filePath_).absolutePath()).select(scope_, objectName(), &error)) status_->setText(error);
     refreshSessions();
 }
 void AcpChatWidget::refreshSessions() {
     if (sessionTitle_->view()->isVisible()) return;
-    const AcpConversations conversations(QFileInfo(filePath_).absolutePath());
-    auto sessions = conversations.recent(scope_);
-    const auto current = objectName();
-    if (std::none_of(sessions.begin(), sessions.end(), [&](const auto &session) { return session.key == current; })) {
-        if (sessions.size() >= 10) sessions.removeLast();
-        sessions.prepend({current, conversations.description(current), {}});
-    }
-    const QSignalBlocker blocker(sessionTitle_);
-    sessionTitle_->clear();
-    for (const auto &session : sessions) {
-        sessionTitle_->addItem(session.description.isEmpty() ? QStringLiteral("New conversation") : session.description, session.key);
-        sessionTitle_->setItemData(sessionTitle_->count() - 1, session.updatedAt.toLocalTime().toString(), Qt::ToolTipRole);
-    }
-    sessionTitle_->setCurrentIndex(sessionTitle_->findData(current));
-    sessionTitle_->setToolTip(sessionTitle_->currentText());
+    if(historyInFlight_)return;
+    historyInFlight_=true;
+    auto *watcher=new QFutureWatcher<QJsonArray>(this);
+    connect(watcher,&QFutureWatcher<QJsonArray>::finished,this,[this,watcher] {
+        const auto sessions=watcher->result();watcher->deleteLater();historyInFlight_=false;
+        if(sessionTitle_->view()->isVisible())return;
+        const QSignalBlocker blocker(sessionTitle_);sessionTitle_->clear();
+        for(const auto &entry:sessions) {
+            const auto row=entry.toObject();auto title=row.value(QStringLiteral("title")).toString();
+            sessionTitle_->addItem(title.isEmpty()?QStringLiteral("New conversation"):title,row.value(QStringLiteral("id")).toString());
+        }
+        if(sessionTitle_->findData(objectName())<0)sessionTitle_->addItem(QStringLiteral("New conversation"),objectName());
+        sessionTitle_->setCurrentIndex(sessionTitle_->findData(objectName()));sessionTitle_->setToolTip(sessionTitle_->currentText());
+    });
+    const auto connection=connection_;const auto project=projectId_;
+    watcher->setFuture(QtConcurrent::run([connection,project] { return ServerAi(connection).conversations(project); }));
 }
+
 bool AcpChatWidget::refreshContext() {
     if (!contextProvider_) return true;
     const auto current = contextProvider_();

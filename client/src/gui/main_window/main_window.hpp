@@ -79,6 +79,8 @@ protected:
     void dropEvent(QDropEvent *event) override;
 
 private:
+    friend class LibrarySyncTest;
+
     enum class EditorSection {
         SourceOverview,
         SourceMetadata,
@@ -245,6 +247,7 @@ private:
     void deleteDesktopEntry();
     void populateIcon();
     void selectPayloadIcon();
+    void selectSystemIcon();
     void importLocalIcon();
     void fetchRemoteIcon();
     void applyIconBytes(const QByteArray &contents, const QString &suffix,
@@ -547,6 +550,7 @@ private:
     QPushButton *deleteDesktopEntryButton_{nullptr};
     QLabel *iconPreview_{nullptr};
     QComboBox *payloadIconCandidates_{nullptr};
+    QComboBox *systemIconCandidates_{nullptr};
     QLineEdit *iconUrl_{nullptr};
     QLabel *iconStatus_{nullptr};
     QNetworkAccessManager *iconNetwork_{nullptr};

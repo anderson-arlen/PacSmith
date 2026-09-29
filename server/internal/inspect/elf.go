@@ -51,6 +51,11 @@ func analyzeELF(path, originalFilename string) (Analysis, error) {
 	inferNameVersion(originalFilename, &result.Metadata)
 	result.Metadata.Architecture = architecture
 	filename := filepath.Base(originalFilename)
+	result.Install.Icon = IconConfiguration{
+		SourceKind: IconSystemTheme,
+		IconName:   "application-x-executable",
+		Provenance: deterministicProvenance("", "Default system icon for a standalone executable"),
+	}
 	result.Install.BinarySourcePath = filename
 	result.Install.BinaryDestination = "/usr/bin/" + result.Metadata.Package
 	result.Install.Launchers = []LauncherMapping{{

@@ -1,3 +1,4 @@
+#include "../server_ai_host.hpp"
 #include "core/acp_conversations.hpp"
 #include <QComboBox>
 #include <QScopeGuard>
@@ -40,7 +41,7 @@ private slots:
         AppSettingsStore store(directory.filePath(QStringLiteral("settings")));
         HarnessProfile harness;
         harness.name = QStringLiteral("Codex"); harness.executable = QStringLiteral("codex-acp");
-        QVERIFY(store.setHarness(harness));
+        tests::ServerAiHost host(harness);
         bool inspected = false;
         {
             MainWindow window(store); window.show();
@@ -68,14 +69,14 @@ private slots:
                 name->setFocus();
                 name->selectAll(); QTest::keyClicks(name, QStringLiteral("My agent"));
                 QTest::keyClick(name, Qt::Key_Tab);
-                QTRY_COMPARE(store.load().harness->name, QStringLiteral("My agent"));
-                QCOMPARE(store.load().harness->executable, QStringLiteral("codex-acp"));
+                QTRY_COMPARE(ServerAi(host.connection).harness()->name, QStringLiteral("My agent"));
+                QCOMPARE(ServerAi(host.connection).harness()->executable, QStringLiteral("codex-acp"));
                 if (qEnvironmentVariableIsSet("PACSMITH_TEST_HARNESS_SCREENSHOT")) dialog->grab().save(qEnvironmentVariable("PACSMITH_TEST_HARNESS_SCREENSHOT"));
                 auto *executable = page->findChild<QLineEdit *>(QStringLiteral("harnessExecutable"));
                 name->setFocus(); name->selectAll(); QTest::keyClick(name, Qt::Key_Backspace);
                 executable->setFocus(); executable->selectAll(); QTest::keyClick(executable, Qt::Key_Backspace);
                 QTest::keyClick(executable, Qt::Key_Tab);
-                QTRY_VERIFY(!store.load().harness);
+                QTRY_VERIFY(!ServerAi(host.connection).harness());
                 inspected = true;
             });
             inspect.start();
@@ -88,7 +89,7 @@ private slots:
         }
         if (configHome.isNull()) qunsetenv("XDG_CONFIG_HOME"); else qputenv("XDG_CONFIG_HOME", configHome);
     }
-    void packageConversationsResumeAndAutomaticRunsAreFresh() {
+    void conversationsAreSharedAndSurviveClientClosure() {
         QTemporaryDir directory;
         const auto configHome = qgetenv("XDG_CONFIG_HOME");
         const auto dataHome = qgetenv("XDG_DATA_HOME");
@@ -135,91 +136,40 @@ for line in sys.stdin:
         profile.arguments = {script.fileName(), log};
         AppSettingsStore store(directory.filePath(QStringLiteral("settings")));
         QVERIFY(store.setHarness(profile));
-        const auto sessions = [&](const QString &method) {
-            QStringList ids;
-            QFile file(log);
-            if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) {
-                const auto record = QJsonDocument::fromJson(line).object();
-                if (record.value(QStringLiteral("method")).toString() == method) ids.append(record.value(QStringLiteral("session")).toString());
-            }
-            return ids;
-        };
-        AutomaticReviewRequest first{connection, profile, QStringLiteral("package-a"), QStringLiteral("release-a1"), QStringLiteral("Package A"), QStringLiteral("manual hold")};
-        auto review = first; review.prompt = QStringLiteral("automatic one");
-        QString latestKey;
-        QString latestSession;
-        {
-            MainWindow window(store); window.show();
-            auto *manual = window.openAiConversation(first);
-            QVERIFY(manual != nullptr);
-            QTRY_COMPARE(sessions(QStringLiteral("session/prompt")).size(), 1);
-            QVERIFY(manual->isBusy());
-            auto *automatic = window.openAiConversation(review, true);
-            QVERIFY(automatic != nullptr); QVERIFY(automatic != manual);
-            QTRY_VERIFY(!automatic->isBusy());
-            review.prompt = QStringLiteral("automatic two");
-            auto *latest = window.openAiConversation(review, true);
-            QVERIFY(latest != nullptr); QVERIFY(latest != automatic);
-            QTRY_VERIFY(!latest->isBusy());
-            QVERIFY(manual->isBusy());
-            QCOMPARE(sessions(QStringLiteral("session/new")).size(), 3);
-            QVERIFY(sessions(QStringLiteral("session/load")).isEmpty());
-            latestKey = latest->objectName();
-            latestSession = sessions(QStringLiteral("session/new")).last();
-            const auto createdSessions = sessions(QStringLiteral("session/new"));
-            QCOMPARE(QSet<QString>(createdSessions.begin(), createdSessions.end()).size(), 3);
-            auto second = first;
-            second.projectId = QStringLiteral("package-b"); second.title = QStringLiteral("Package B");
-            second.prompt = QStringLiteral("question for B");
-            auto *other = window.openAiConversation(second);
-            QVERIFY(other != nullptr); QVERIFY(other != latest);
-            QTRY_VERIFY(!other->isBusy());
-            first.prompt.clear(); first.releaseId = QStringLiteral("release-a2");
-            QCOMPARE(window.openAiConversation(first), latest);
-            manual->findChild<QPushButton *>(QStringLiteral("chatAction"))->click();
-            QTRY_VERIFY(!manual->isBusy());
-            QCOMPARE(window.openAiConversation(first), latest);
-        }
-        {
-            MainWindow window(store); window.show();
-            auto *resumed = window.openAiConversation(first);
-            QVERIFY(resumed != nullptr); QCOMPARE(resumed->objectName(), latestKey);
-            auto *transcript = resumed->findChild<ChatTranscript *>(QStringLiteral("aiTranscript"));
-            QVERIFY(transcript->toPlainText().contains(QStringLiteral("automatic two")));
-            QVERIFY(!transcript->toPlainText().contains(QStringLiteral("question for B")));
-            QVERIFY(resumed->submit(QStringLiteral("follow-up")));
-            QTRY_VERIFY(!resumed->isBusy());
-            QCOMPARE(sessions(QStringLiteral("session/load")), QStringList{latestSession});
-            auto *fresh = window.openAiConversation(review, true);
-            QVERIFY(fresh != nullptr); QVERIFY(fresh != resumed);
-            QTRY_VERIFY(!fresh->isBusy());
-            QCOMPARE(sessions(QStringLiteral("session/new")).size(), 5);
-            QCOMPARE(sessions(QStringLiteral("session/load")).size(), 1);
-            const auto previousKey = resumed->objectName();
-            resumed->findChild<QPushButton *>(QStringLiteral("newChat"))->click();
-            QTRY_VERIFY(!resumed->isBusy());
-            QCOMPARE(window.openAiConversation(first), resumed);
-            QCOMPARE(sessions(QStringLiteral("session/new")).size(), 6);
-            QVERIFY(resumed->objectName() != previousKey);
-            resumed->refreshSessions();
-            auto *titles = resumed->findChild<QComboBox *>(QStringLiteral("sessionTitle"));
-            QVERIFY(titles != nullptr);
-            const auto index = titles->findData(previousKey);
-            QVERIFY(index >= 0);
-            const auto before = sessions(QStringLiteral("session/prompt")).size();
-            titles->setCurrentIndex(index);
-            emit titles->activated(index);
-            auto *historical = window.openAiConversation(first);
-            QVERIFY(historical != resumed);
-            QCOMPARE(historical->objectName(), previousKey);
-            QVERIFY(historical->findChild<ChatTranscript *>(QStringLiteral("aiTranscript"))->toPlainText().contains(QStringLiteral("automatic two")));
-            QCOMPARE(sessions(QStringLiteral("session/prompt")).size(), before);
-            QVERIFY(historical->submit(QStringLiteral("continue older conversation")));
-            QTRY_VERIFY(!historical->isBusy());
-            QCOMPARE(sessions(QStringLiteral("session/load")).last(), latestSession);
-        }
-        if (configHome.isNull()) qunsetenv("XDG_CONFIG_HOME"); else qputenv("XDG_CONFIG_HOME", configHome);
-        if (dataHome.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", dataHome);
+        tests::ServerAiHost host(profile);
+        connection=host.connection;
+        AutomaticReviewRequest request{connection,profile,QStringLiteral("package-a"),{},QStringLiteral("Package A"),{}};
+        auto first=std::make_unique<MainWindow>(store);
+        auto *chat=first->openAiConversation(request);
+        QVERIFY(chat != nullptr);
+        QTRY_VERIFY(!chat->isBusy());
+        QVERIFY(chat->submit(QStringLiteral("manual hold")));
+        QTRY_VERIFY(chat->isBusy());
+        MainWindow second(store);
+        auto *shared=second.openAiConversation(request);
+        QVERIFY(shared != nullptr);
+        QCOMPARE(shared->objectName(),chat->objectName());
+        auto *transcript=shared->findChild<ChatTranscript *>(QStringLiteral("aiTranscript"));
+        QTRY_VERIFY(transcript->toPlainText().contains(QStringLiteral("manual hold")));
+        QVERIFY(shared->isBusy());
+        first.reset();
+        const auto running=ServerAi(connection).request(QStringLiteral("GET"),QStringLiteral("/conversations/%1").arg(shared->objectName()));
+        QVERIFY(running);QCOMPARE(running->value(QStringLiteral("status")).toString(),QStringLiteral("running"));
+        shared->findChild<QPushButton *>(QStringLiteral("chatAction"))->click();
+        QTRY_VERIFY(!shared->isBusy());
+        const auto oldKey=shared->objectName();
+        shared->findChild<QPushButton *>(QStringLiteral("newChat"))->click();
+        QTRY_VERIFY(!shared->isBusy());
+        QVERIFY(shared->objectName()!=oldKey);
+        QVERIFY(shared->submit(QStringLiteral("new conversation")));
+        QTRY_VERIFY(!shared->isBusy());
+        MainWindow third(store);
+        auto *latest=third.openAiConversation(request);
+        QVERIFY(latest != nullptr);QCOMPARE(latest->objectName(),shared->objectName());
+        QTRY_VERIFY(latest->findChild<ChatTranscript *>()->toPlainText().contains(QStringLiteral("new conversation")));
+        QVERIFY(!latest->findChild<ChatTranscript *>()->toPlainText().contains(QStringLiteral("manual hold")));
+        if(configHome.isNull())qunsetenv("XDG_CONFIG_HOME");else qputenv("XDG_CONFIG_HOME",configHome);
+        if(dataHome.isNull())qunsetenv("XDG_DATA_HOME");else qputenv("XDG_DATA_HOME",dataHome);
     }
 
     void availableOnMainWindowWithoutDialogInjection() {
@@ -252,7 +202,7 @@ for line in sys.stdin:
         script.close();
         profile.executable = QStringLiteral("/usr/bin/python3");
         profile.arguments = {script.fileName(), requests};
-        QVERIFY(store.setHarness(profile));
+        tests::ServerAiHost host(profile);
         {
             MainWindow window(store);
             window.resize(1450, 850); window.show();
@@ -316,7 +266,7 @@ for line in sys.stdin:
             QVERIFY(dock->isVisible()); QVERIFY(ask->isChecked());
             splitter->setSizes({260, 920});
             auto *chat = window.findChild<AcpChatWidget *>();
-            QVERIFY(chat != nullptr); QVERIFY(!chat->isBusy());
+            QVERIFY(chat != nullptr); QTRY_VERIFY(!chat->isBusy());
             auto *transcript = chat->findChild<pacsmith::gui::ChatTranscript *>(QStringLiteral("aiTranscript"));
             QVERIFY(transcript->toPlainText().isEmpty());
             QVERIFY(!QFile::exists(requests));
@@ -363,6 +313,7 @@ for line in sys.stdin:
             ask->click(); QVERIFY(!dock->isVisible());
             ask->click(); QVERIFY(dock->isVisible());
             QTRY_VERIFY(composer->hasFocus());
+            QVERIFY(!chat->isBusy());
             QVERIFY(chat->submit(QStringLiteral("Back to the library")));
             QTRY_COMPARE(completed.count(), 2);
             QVERIFY(sentPrompt().contains(QStringLiteral("Library overview")));

@@ -461,6 +461,12 @@ func TestELFNotExecuted(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("ELF payload was executed")
 	}
+	if analysis.Install.Icon.SourceKind != IconSystemTheme || analysis.Install.Icon.IconName != "application-x-executable" {
+		t.Fatalf("executable default icon: %+v", analysis.Install.Icon)
+	}
+	if analysis.Icon != nil || analysis.Install.Icon.SHA256 != "" {
+		t.Fatal("system icon should not have bundled image bytes")
+	}
 	if analysis.Type != SourceELF {
 		t.Fatalf("type %v", analysis.Type)
 	}
