@@ -73,7 +73,7 @@ bool writeImportedLifecycle(const std::filesystem::path &releaseDirectory,
         if (error != nullptr) *error = QStringLiteral("Unsafe Arch lifecycle filename");
         return false;
     }
-    const auto validation = LifecycleValidator::validate(release.lifecycleScript.contents);
+    const auto validation = LifecycleValidator::validate(release.lifecycleScript.contents, &release);
     release.lifecycleScript.validationPassed = validation.passed;
     release.lifecycleScript.validationMessage = validation.message();
     return writeBytes(releaseDirectory / pathFromQString(release.lifecycleScript.fileName),

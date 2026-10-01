@@ -330,6 +330,8 @@ Generated PKGBUILDs use a relative source link and verify SHA-256 through makepk
 
 PKGBUILD validation is static and does not source the file. A generated Arch `.install` file is checked with `bash -n` (syntax only) and a restrictive policy, then requires exact-content acknowledgment because pacman will run its lifecycle functions as root.
 
+An unchanged `.INSTALL` from an imported Arch package can instead be explicitly approved for reuse. Both validators retain size, lifecycle-entry-point, and Bash syntax checks while allowing the original shell behavior. This exception requires an exact content match to that release's imported `.INSTALL` and an Arch source type; edits return to the authored-script policy. The GUI copies the original into the output lifecycle file, binds its responsibility findings, and records exact-content approval in one action.
+
 Guided builds use `makepkg --force --nodeps`: those recipes unpack prebuilt vendor files, so `depends=` are runtime metadata for `pacman -U` rather than libraries needed to assemble the package. Custom builds install the dependency arrays from `.SRCINFO` inside the container and then run `makepkg --force --noconfirm`. Source hashes and `package()` still run in both modes.
 
 ## Updates and acquisition

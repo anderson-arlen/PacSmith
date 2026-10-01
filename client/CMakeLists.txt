@@ -196,6 +196,18 @@ if(BUILD_TESTING)
     add_test(NAME pacsmith-library-sync-tests COMMAND pacsmith-library-sync-tests)
     set_tests_properties(pacsmith-library-sync-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    add_executable(pacsmith-scripts-page-tests tests/gui_tests/scripts_page_test.cpp)
+    target_link_libraries(pacsmith-scripts-page-tests PRIVATE pacsmith_gui Qt6::Test)
+    pacsmith_target_defaults(pacsmith-scripts-page-tests)
+    add_test(NAME pacsmith-scripts-page-tests COMMAND pacsmith-scripts-page-tests)
+    set_tests_properties(pacsmith-scripts-page-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(pacsmith-github-picker-tests tests/gui_tests/github_picker_test.cpp)
+    target_link_libraries(pacsmith-github-picker-tests PRIVATE pacsmith_gui Qt6::Test)
+    pacsmith_target_defaults(pacsmith-github-picker-tests)
+    add_test(NAME pacsmith-github-picker-tests COMMAND pacsmith-github-picker-tests)
+    set_tests_properties(pacsmith-github-picker-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(pacsmith-tests
         tests/core_tests/core_tests.hpp
         tests/core_tests/core_tests.cpp

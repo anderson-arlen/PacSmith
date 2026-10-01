@@ -21,6 +21,7 @@ private slots:
     void acknowledgesScriptContentSpecifically();
     void extractsScriptResponsibilitiesAndAptEvidence();
     void validatesLifecycleScriptsAndContentAcknowledgement();
+    void validatesUnchangedOriginalArchLifecycle();
     void parsesAptSourceFormats();
     void comparesDebianVersions();
     void extractsPayloadRpmRepositoryEvidence();

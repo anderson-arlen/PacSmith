@@ -851,7 +851,7 @@ func (s *Service) PutFile(ctx context.Context, releaseID, name, contents string,
 			body["pkgbuildManuallyModified"] = false
 		}
 	case strings.HasSuffix(name, ".install"):
-		validation := recipe.ValidateLifecycle(contents)
+		validation := validateReleaseLifecycle(body, contents)
 		if !validation.Passed {
 			return Release{}, fmt.Errorf("%w: %s", ErrInvalid, validation.Message())
 		}

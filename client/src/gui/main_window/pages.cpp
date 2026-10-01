@@ -419,7 +419,10 @@ QWidget *MainWindow::createConfigScriptsPage() {
     layout->addWidget(pageIntroduction(
         QStringLiteral("Map vendor script responsibilities onto Arch lifecycle handling."),
         page,
-        QStringLiteral("Each row is an extracted responsibility. Set Arch handling here; the .install file below is what pacman may run as root.")));
+        QStringLiteral("For an existing Arch .INSTALL, use Approve and Use Original Script to include it unchanged. "
+                       "Otherwise, Unresolved leaves the decision pending; Lifecycle script means you will supply an output .install; "
+                       "Handled by PacSmith means the package configuration already covers the action; Handled by Arch means system hooks cover it; "
+                       "Not applicable means the action is unnecessary. These choices record your decision; they do not copy script contents.")));
     scriptsActionNotice_ = new QLabel(page);
     scriptsActionNotice_->setWordWrap(true);
     scriptsActionNotice_->setFrameStyle(QFrame::StyledPanel);
@@ -440,6 +443,7 @@ QWidget *MainWindow::createConfigScriptsPage() {
     scriptFindingsTable_->verticalHeader()->setVisible(false);
     scriptFindingsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     scriptFindingsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    scriptFindingsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     mappingLayout->addWidget(scriptFindingsTable_, 1);
     auto *jumpRow = new QHBoxLayout;
     auto *viewSource = new QPushButton(QStringLiteral("View vendor scripts"), mapping);
@@ -447,7 +451,22 @@ QWidget *MainWindow::createConfigScriptsPage() {
     jumpRow->addStretch();
     mappingLayout->addLayout(jumpRow);
 
-    auto *lifecycleGroup = new QGroupBox(QStringLiteral("Arch lifecycle (.install)"), splitter);
+    auto *scriptComparison = new QSplitter(Qt::Horizontal, splitter);
+    auto *sourceGroup = new QGroupBox(QStringLiteral("Existing imported script (reference only)"), scriptComparison);
+    auto *sourceLayout = new QVBoxLayout(sourceGroup);
+    scriptFindingSourceStatus_ = new QLabel(sourceGroup);
+    scriptFindingSourceStatus_->setWordWrap(true);
+    scriptFindingSourceStatus_->setTextFormat(Qt::PlainText);
+    scriptFindingSourceView_ = new QPlainTextEdit(sourceGroup);
+    makeReadOnlyCodeEditor(scriptFindingSourceView_);
+    new PkgbuildHighlighter(scriptFindingSourceView_->document());
+    sourceLayout->addWidget(scriptFindingSourceStatus_);
+    sourceLayout->addWidget(scriptFindingSourceView_, 1);
+    useOriginalLifecycleButton_ = new QPushButton(QStringLiteral("Approve and Use Original Script…"), sourceGroup);
+    sourceLayout->addWidget(useOriginalLifecycleButton_);
+    connect(useOriginalLifecycleButton_, &QPushButton::clicked, this, &MainWindow::useOriginalLifecycleScript);
+
+    auto *lifecycleGroup = new QGroupBox(QStringLiteral("Output Arch lifecycle (.install)"), scriptComparison);
     auto *lifecycleLayout = new QVBoxLayout(lifecycleGroup);
     lifecycleStatus_ = new QLabel(lifecycleGroup);
     lifecycleStatus_->setWordWrap(true);
@@ -469,10 +488,16 @@ QWidget *MainWindow::createConfigScriptsPage() {
     lifecycleLayout->addWidget(lifecycleView_, 1);
     lifecycleLayout->addLayout(lifecycleButtons);
     splitter->addWidget(mapping);
-    splitter->addWidget(lifecycleGroup);
+    scriptComparison->addWidget(sourceGroup);
+    scriptComparison->addWidget(lifecycleGroup);
+    scriptComparison->setStretchFactor(0, 1);
+    scriptComparison->setStretchFactor(1, 1);
+    splitter->addWidget(scriptComparison);
     splitter->setStretchFactor(0, 1);
     splitter->setStretchFactor(1, 1);
     layout->addWidget(splitter, 1);
+    connect(scriptFindingsTable_, &QTableWidget::currentCellChanged, this,
+            [this] { if (!populating_) updateScriptFindingPreview(); });
     connect(viewSource, &QPushButton::clicked, this, [this] {
         selectSection(EditorSection::SourceScripts);
     });

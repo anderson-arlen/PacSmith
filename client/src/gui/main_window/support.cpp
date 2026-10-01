@@ -469,7 +469,6 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
         auto *item = new QListWidgetItem(asset, list);
         if (isGitHubSidecarAsset(asset)) {
             item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
-            item->setForeground(dialog.palette().placeholderText());
             item->setToolTip(QStringLiteral("Signature, checksum, and manifest sidecars are verification data, not installable package sources."));
         }
     }
@@ -486,7 +485,10 @@ std::optional<GitHubRuleChoice> chooseGitHubAssetRule(
             const bool selected = !isGitHubSidecarAsset(item->text()) &&
                                   regex.isValid() && match.hasMatch() &&
                                   match.capturedLength() == item->text().size();
-            item->setBackground(selected ? QColor(30, 105, 55) : QColor{});
+            item->setData(Qt::BackgroundRole,
+                          selected ? QVariant(list->palette().brush(QPalette::Highlight)) : QVariant{});
+            item->setData(Qt::ForegroundRole,
+                          selected ? QVariant(list->palette().brush(QPalette::HighlightedText)) : QVariant{});
             if (selected) ++matches;
         }
         status->setText(!regex.isValid()

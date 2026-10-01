@@ -46,12 +46,16 @@ var (
 )
 
 type LifecycleValidation struct {
-	Passed   bool
-	Problems []string
+	Passed             bool
+	Problems           []string
+	OriginalArchScript bool
 }
 
 func (v LifecycleValidation) Message() string {
 	if v.Passed {
+		if v.OriginalArchScript {
+			return "Original Arch script unchanged. Bash syntax validation passed; authored-script restrictions do not apply."
+		}
 		return "Syntax and PacSmith lifecycle policy validation passed."
 	}
 	return strings.Join(v.Problems, "\n")
@@ -60,7 +64,15 @@ func (v LifecycleValidation) Message() string {
 // ValidateLifecycle checks an Arch .install script with bash -n and the
 // PacSmith policy. The script is never sourced or executed as a package.
 func ValidateLifecycle(contents string) LifecycleValidation {
-	var result LifecycleValidation
+	return validateLifecycle(contents, false)
+}
+
+func ValidateOriginalArchLifecycle(contents string) LifecycleValidation {
+	return validateLifecycle(contents, true)
+}
+
+func validateLifecycle(contents string, originalArchScript bool) LifecycleValidation {
+	result := LifecycleValidation{OriginalArchScript: originalArchScript}
 	if strings.TrimSpace(contents) == "" {
 		result.Problems = append(result.Problems, "Lifecycle script is empty")
 		return result
@@ -69,16 +81,17 @@ func ValidateLifecycle(contents string) LifecycleValidation {
 		result.Problems = append(result.Problems, "Lifecycle script exceeds 128 KiB")
 	}
 	for _, rule := range forbiddenLifecycle {
-		if rule.re.MatchString(contents) {
+		if !originalArchScript && rule.re.MatchString(contents) {
 			result.Problems = append(result.Problems, rule.message)
 		}
 	}
 
 	foundFunction := false
 	for _, match := range lifecycleFunction.FindAllStringSubmatch(contents, -1) {
-		foundFunction = true
 		name := match[1]
-		if _, ok := allowedLifecycle[name]; !ok {
+		if _, ok := allowedLifecycle[name]; ok {
+			foundFunction = true
+		} else if !originalArchScript {
 			result.Problems = append(result.Problems, "Unsupported lifecycle function: "+name)
 		}
 	}

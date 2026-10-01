@@ -704,7 +704,7 @@ bool ProjectStore::saveLifecycle(Project &project, PackageRelease &release,
         if (error != nullptr) *error = QStringLiteral("Unsafe Arch lifecycle filename");
         return false;
     }
-    const auto validation = LifecycleValidator::validate(release.lifecycleScript.contents);
+    const auto validation = LifecycleValidator::validate(release.lifecycleScript.contents, &release);
     release.lifecycleScript.validationPassed = validation.passed;
     release.lifecycleScript.validationMessage = validation.message();
     release.lifecycleScript.manuallyModified = false;
@@ -760,7 +760,7 @@ bool ProjectStore::synchronizeLifecycle(Project &project, PackageRelease &releas
     }
     const auto validation = missing
         ? LifecycleValidation{false, {QStringLiteral("The project-local lifecycle file is missing")}}
-        : LifecycleValidator::validate(release.lifecycleScript.contents);
+        : LifecycleValidator::validate(release.lifecycleScript.contents, &release);
     if (release.lifecycleScript.validationPassed != validation.passed ||
         release.lifecycleScript.validationMessage != validation.message()) {
         release.lifecycleScript.validationPassed = validation.passed;

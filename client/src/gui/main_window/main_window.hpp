@@ -80,6 +80,7 @@ protected:
 
 private:
     friend class LibrarySyncTest;
+    friend class ScriptsPageTest;
 
     enum class EditorSection {
         SourceOverview,
@@ -219,6 +220,8 @@ private:
     void loadRepositoryPackageCatalog(std::function<void()> completed = {});
     void scheduleRepositoryPackageValidation(const QStringList &packages);
     void populateScripts();
+    void updateScriptFindingPreview();
+    void useOriginalLifecycleScript();
     void updateSelectedScript();
     void acknowledgeSelectedScript();
     void beginLifecycleEdit();
@@ -518,6 +521,9 @@ private:
     QLabel *scriptStatus_{nullptr};
     QPushButton *acknowledgeScriptButton_{nullptr};
     QTableWidget *scriptFindingsTable_{nullptr};
+    QPlainTextEdit *scriptFindingSourceView_{nullptr};
+    QLabel *scriptFindingSourceStatus_{nullptr};
+    QPushButton *useOriginalLifecycleButton_{nullptr};
     QPlainTextEdit *lifecycleView_{nullptr};
     QLabel *lifecycleStatus_{nullptr};
     QPushButton *editLifecycleButton_{nullptr};

@@ -191,6 +191,32 @@ void CoreTests::detectsExternalLifecycleEdits() {
     QVERIFY(!QFileInfo::exists(QString::fromUtf8(lifecyclePath.string().c_str())));
 }
 
+void CoreTests::validatesUnchangedOriginalArchLifecycle() {
+    const auto contents = QStringLiteral("_reload() { local user; user=$(printf root); }\npost_install() { _reload; }\n");
+    pacsmith::PackageRelease release;
+    release.sourceType = pacsmith::SourcePackageType::ArchPackage;
+    release.maintainerScripts.append({QStringLiteral(".INSTALL"), contents, {}});
+    QVERIFY(!pacsmith::LifecycleValidator::validate(contents).passed);
+    const auto validation = pacsmith::LifecycleValidator::validate(contents, &release);
+    QVERIFY2(validation.passed, qPrintable(validation.message()));
+    QVERIFY(validation.originalArchScript);
+    QVERIFY(!pacsmith::LifecycleValidator::validate(contents + QStringLiteral("\n"), &release).passed);
+    release.lifecycleScript.fileName = QStringLiteral("original.install");
+    release.lifecycleScript.contents = contents;
+    release.lifecycleScript.acknowledge();
+    QVERIFY(!release.lifecycleScript.requiresAcknowledgement());
+    release.lifecycleScript.contents += QLatin1Char('\n');
+    QVERIFY(release.lifecycleScript.requiresAcknowledgement());
+    release.sourceType = pacsmith::SourcePackageType::Debian;
+    QVERIFY(!pacsmith::LifecycleValidator::validate(contents, &release).passed);
+    release.sourceType = pacsmith::SourcePackageType::ArchPackage;
+    release.maintainerScripts[0].name = QStringLiteral("postinst");
+    QVERIFY(!pacsmith::LifecycleValidator::validate(contents, &release).passed);
+    release.maintainerScripts[0].name = QStringLiteral(".INSTALL");
+    release.maintainerScripts[0].contents = QStringLiteral("post_install() { if; }\n");
+    QVERIFY(!pacsmith::LifecycleValidator::validate(release.maintainerScripts[0].contents, &release).passed);
+}
+
 void CoreTests::reanalyzesReleaseFromBlankPackageSetup() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());

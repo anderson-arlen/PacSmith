@@ -1,4 +1,5 @@
 #include "core/lifecycle_validator.hpp"
+#include "core/model.hpp"
 
 #include <QProcess>
 #include <QRegularExpression>
@@ -9,12 +10,22 @@
 namespace pacsmith {
 
 QString LifecycleValidation::message() const {
-    return passed ? QStringLiteral("Syntax and PacSmith lifecycle policy validation passed.")
+    return passed ? originalArchScript
+                      ? QStringLiteral("Original Arch script unchanged. Bash syntax validation passed; authored-script restrictions do not apply.")
+                      : QStringLiteral("Syntax and PacSmith lifecycle policy validation passed.")
                   : problems.join(QLatin1Char('\n'));
 }
 
-LifecycleValidation LifecycleValidator::validate(const QString &contents) {
+LifecycleValidation LifecycleValidator::validate(const QString &contents, const PackageRelease *release) {
     LifecycleValidation result;
+    if (release != nullptr && release->sourceType == SourcePackageType::ArchPackage) {
+        for (const auto &script : release->maintainerScripts) {
+            if (script.name == QStringLiteral(".INSTALL") && script.contents == contents) {
+                result.originalArchScript = true;
+                break;
+            }
+        }
+    }
     if (contents.trimmed().isEmpty()) {
         result.problems.append(QStringLiteral("Lifecycle script is empty"));
         return result;
@@ -39,7 +50,7 @@ LifecycleValidation LifecycleValidator::validate(const QString &contents) {
         {QRegularExpression(QStringLiteral("`|\\$\\(")),
          QStringLiteral("Command substitution is not allowed in lifecycle scripts")}};
     for (const auto &[expression, message] : forbidden) {
-        if (expression.match(contents).hasMatch()) result.problems.append(message);
+        if (!result.originalArchScript && expression.match(contents).hasMatch()) result.problems.append(message);
     }
 
     static const QRegularExpression functionExpression(
@@ -50,9 +61,9 @@ LifecycleValidation LifecycleValidator::validate(const QString &contents) {
     bool foundFunction = false;
     auto functions = functionExpression.globalMatch(contents);
     while (functions.hasNext()) {
-        foundFunction = true;
         const auto name = functions.next().captured(1);
-        if (!allowed.contains(name)) {
+        if (allowed.contains(name)) foundFunction = true;
+        else if (!result.originalArchScript) {
             result.problems.append(QStringLiteral("Unsupported lifecycle function: %1").arg(name));
         }
     }

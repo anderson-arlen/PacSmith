@@ -710,6 +710,7 @@ void MainWindow::scriptFindingDispositionChanged(const int row, const int) {
     if (row < 0 || row >= currentRelease()->scriptFindings.size()) return;
     auto *combo = qobject_cast<QComboBox *>(scriptFindingsTable_->cellWidget(row, 2));
     if (combo == nullptr) return;
+    scriptFindingsTable_->setCurrentCell(row, 0);
     auto &finding = currentRelease()->scriptFindings[row];
     finding.disposition = static_cast<ScriptDisposition>(combo->currentData().toInt());
     finding.provenance = {ValueOrigin::User, {}, {}, {}, QStringLiteral("user override"),

@@ -274,14 +274,8 @@ void MainWindow::populateDependencies() {
         if (dependency.provided || dependency.status == MappingStatus::Provided) treatment->setCurrentIndex(1);
         else if (dependency.bundled || dependency.status == MappingStatus::Bundled) treatment->setCurrentIndex(2);
         else if (dependency.ignored || dependency.status == MappingStatus::Ignored) treatment->setCurrentIndex(3);
-        if (unavailable) {
-            treatment->setStyleSheet(QStringLiteral("QComboBox { background: #7d2323; color: white; }"));
+        if (unavailable || unresolved) {
             treatment->setToolTip(statusItem->toolTip());
-        } else if (unresolved) {
-            treatment->setStyleSheet(QStringLiteral("QComboBox { background: #70520c; color: white; }"));
-            treatment->setToolTip(statusItem->toolTip());
-        } else if (aiGenerated) {
-            treatment->setStyleSheet(QStringLiteral("QComboBox { background: #235a37; color: white; }"));
         }
         connect(treatment, &QComboBox::currentIndexChanged, this,
                 [this, row](const int index) { dependencyDispositionChanged(row, index); });
@@ -380,7 +374,9 @@ void MainWindow::populateScripts() {
                 "background: rgba(229,185,61,28); border: 1px solid #b89624; border-radius: 5px;"));
         } else if (unresolvedResponsibilities > 0) {
             scriptsActionNotice_->setText(
-                QStringLiteral("Set Arch handling for each unresolved responsibility, or create a lifecycle script."));
+                currentRelease()->sourceType == SourcePackageType::ArchPackage
+                    ? QStringLiteral("Review the imported script below. Choose Approve and Use Original Script to include it unchanged, or select another Arch handling option.")
+                    : QStringLiteral("Set Arch handling for each unresolved responsibility, or create a lifecycle script."));
             scriptsActionNotice_->setStyleSheet(QStringLiteral(
                 "background: rgba(229,185,61,28); border: 1px solid #b89624; border-radius: 5px;"));
         } else {
@@ -394,6 +390,7 @@ void MainWindow::populateScripts() {
     }
     populating_ = true;
     if (scriptFindingsTable_ != nullptr) {
+        const auto previousRow = scriptFindingsTable_->currentRow();
         scriptFindingsTable_->setRowCount(static_cast<int>(currentRelease()->scriptFindings.size()));
         const auto dispositions = QList<ScriptDisposition>{
             ScriptDisposition::Unresolved, ScriptDisposition::LifecycleRequired,
@@ -403,6 +400,7 @@ void MainWindow::populateScripts() {
             const auto &finding = currentRelease()->scriptFindings.at(row);
             auto *scriptItem = new QTableWidgetItem(finding.scriptName);
             auto *summaryItem = new QTableWidgetItem(finding.summary);
+            summaryItem->setToolTip(finding.summary);
             const auto provenanceName = valueOriginName(finding.provenance.origin);
             auto *provenanceItem = new QTableWidgetItem(
                 finding.provenance.origin == ValueOrigin::Ai
@@ -433,14 +431,13 @@ void MainWindow::populateScripts() {
             }
             const auto currentIndex = handling->findData(static_cast<int>(finding.disposition));
             handling->setCurrentIndex(currentIndex < 0 ? 0 : currentIndex);
-            if (findingNeedsReview) {
-                handling->setStyleSheet(QStringLiteral("QComboBox { background: #70520c; color: white; }"));
-            } else if (finding.provenance.origin == ValueOrigin::Ai) {
-                handling->setStyleSheet(QStringLiteral("QComboBox { background: #235a37; color: white; }"));
-            }
             connect(handling, &QComboBox::currentIndexChanged, this,
                     [this, row](const int index) { scriptFindingDispositionChanged(row, index); });
             scriptFindingsTable_->setCellWidget(row, 2, handling);
+        }
+        if (scriptFindingsTable_->rowCount() > 0) {
+            scriptFindingsTable_->setCurrentCell(
+                previousRow >= 0 && previousRow < scriptFindingsTable_->rowCount() ? previousRow : 0, 0);
         }
     }
     if (scriptsList_ != nullptr) {
@@ -457,6 +454,7 @@ void MainWindow::populateScripts() {
         }
     }
     populating_ = false;
+    updateScriptFindingPreview();
     if (scriptsList_ == nullptr || scriptsList_->count() == 0) {
         if (scriptView_ != nullptr) {
             scriptView_->setPlainText(QStringLiteral("No imported package lifecycle scripts were detected."));
@@ -485,14 +483,24 @@ void MainWindow::populateScripts() {
                                       ? QStringLiteral("Create Lifecycle Script")
                                       : QStringLiteral("Edit Lifecycle Script"));
     cancelLifecycleButton_->setVisible(false);
-    const auto lifecycleOrigin = lifecycle.provenance.origin == ValueOrigin::Ai
+    const bool originalArchScript = currentRelease()->sourceType == SourcePackageType::ArchPackage &&
+        !lifecycle.contents.isEmpty() &&
+        std::any_of(currentRelease()->maintainerScripts.cbegin(), currentRelease()->maintainerScripts.cend(),
+                    [&](const auto &script) {
+            return script.name == QStringLiteral(".INSTALL") && script.contents == lifecycle.contents;
+        });
+    const auto lifecycleOrigin = originalArchScript
+                                     ? QStringLiteral("Original imported Arch script")
+                                 : lifecycle.provenance.origin == ValueOrigin::Ai
                                      ? QStringLiteral("<span style='color:#55cc77'>Legacy AI provenance</span>")
                                  : lifecycle.provenance.origin == ValueOrigin::User
                                      ? QStringLiteral("User-authored")
                                      : QStringLiteral("Generated");
-    lifecycleView_->setPlainText(lifecycle.contents.isEmpty()
-                                     ? QStringLiteral("No Arch lifecycle script is configured. PacSmith will rely on normal package files and Arch hooks.")
-                                     : lifecycle.contents);
+    lifecycleView_->setPlainText(!lifecycle.contents.isEmpty()
+                                    ? lifecycle.contents
+                                    : unresolvedResponsibilities > 0
+                                        ? QStringLiteral("No output lifecycle script is configured. Review the imported script alongside this panel and choose its Arch handling above.")
+                                        : QStringLiteral("No output lifecycle script is configured. PacSmith will rely on normal package files and Arch hooks."));
     if (lifecycle.contents.isEmpty()) {
         const auto lifecycleNeeded = std::count_if(
             currentRelease()->scriptFindings.cbegin(), currentRelease()->scriptFindings.cend(),
@@ -503,7 +511,9 @@ void MainWindow::populateScripts() {
             lifecycleNeeded > 0
                 ? QStringLiteral("No lifecycle script yet. %1 responsibility item(s) are set to Lifecycle script.")
                       .arg(lifecycleNeeded)
-                : QStringLiteral("No privileged package lifecycle script is needed."));
+                : unresolvedResponsibilities > 0
+                    ? QStringLiteral("Arch handling is still unresolved. Review the existing imported script before deciding whether an output script is needed.")
+                    : QStringLiteral("No privileged package lifecycle script is needed."));
         acknowledgeLifecycleButton_->setEnabled(false);
         discardLifecycleButton_->setEnabled(false);
     } else if (!lifecycle.validationPassed) {
@@ -522,6 +532,86 @@ void MainWindow::populateScripts() {
         acknowledgeLifecycleButton_->setEnabled(false);
         discardLifecycleButton_->setEnabled(true);
     }
+}
+
+void MainWindow::updateScriptFindingPreview() {
+    if (scriptFindingSourceView_ == nullptr || scriptFindingSourceStatus_ == nullptr) return;
+    scriptFindingSourceView_->clear();
+    useOriginalLifecycleButton_->setEnabled(false);
+    scriptFindingSourceStatus_->setText(QStringLiteral("Select a responsibility above to read its imported script."));
+    const auto *release = currentRelease();
+    const auto row = scriptFindingsTable_->currentRow();
+    if (release == nullptr || row < 0 || row >= release->scriptFindings.size()) return;
+    const auto &finding = release->scriptFindings.at(row);
+    for (const auto &script : release->maintainerScripts) {
+        if (script.name != finding.scriptName) continue;
+        scriptFindingSourceStatus_->setText(
+            QStringLiteral("%1 · Imported source for review; not automatically included in the output package.").arg(script.name));
+        scriptFindingSourceView_->setPlainText(script.contents);
+        useOriginalLifecycleButton_->setEnabled(
+            release->sourceType == SourcePackageType::ArchPackage &&
+            script.name == QStringLiteral(".INSTALL") && !script.contents.isEmpty() && !lifecycleEditing_);
+        return;
+    }
+    scriptFindingSourceStatus_->setText(
+        QStringLiteral("The imported contents of %1 are unavailable. Reanalyze the artifact to restore them.").arg(finding.scriptName));
+}
+
+void MainWindow::useOriginalLifecycleScript() {
+    if (!project_ || currentRelease() == nullptr || lifecycleEditing_ || !ensureCurrentProjectWritable()) return;
+    const auto row = scriptFindingsTable_->currentRow();
+    if (row < 0 || row >= currentRelease()->scriptFindings.size()) return;
+    const auto scriptName = currentRelease()->scriptFindings.at(row).scriptName;
+    const auto releaseId = currentRelease()->id;
+    if (currentRelease()->sourceType != SourcePackageType::ArchPackage || scriptName != QStringLiteral(".INSTALL")) return;
+    QString contents;
+    for (const auto &script : currentRelease()->maintainerScripts) {
+        if (script.name == scriptName) contents = script.contents;
+    }
+    const auto validation = LifecycleValidator::validate(contents, currentRelease());
+    if (!validation.passed) {
+        QMessageBox::warning(this, QStringLiteral("Cannot use original script"), validation.message());
+        return;
+    }
+    if (QMessageBox::warning(
+            this, QStringLiteral("Approve and use original Arch script"),
+            QStringLiteral("Use the complete imported .INSTALL script exactly as shown? "
+                           "It will replace any configured output lifecycle script. Pacman will run it as root during package transactions. "
+                           "The original script is syntax-checked, without PacSmith's restrictions for authored scripts. "
+                           "Changes to its contents require new approval."),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    if (currentRelease() == nullptr || currentRelease()->id != releaseId || !ensureCurrentProjectWritable() ||
+        !LifecycleValidator::validate(contents, currentRelease()).originalArchScript) return;
+    const auto previous = *project_;
+    auto &release = *currentRelease();
+    for (auto &finding : release.scriptFindings) {
+        if (finding.scriptName != scriptName) continue;
+        finding.disposition = ScriptDisposition::LifecycleRequired;
+        finding.provenance = {ValueOrigin::User, {}, {}, {}, QStringLiteral("Use original Arch script"),
+                              QDateTime::currentDateTimeUtc(), true};
+    }
+    auto &lifecycle = release.lifecycleScript;
+    lifecycle = {};
+    lifecycle.fileName = project_->archPackageName + QStringLiteral(".install");
+    lifecycle.contents = contents;
+    lifecycle.validationPassed = validation.passed;
+    lifecycle.validationMessage = validation.message();
+    lifecycle.provenance = {ValueOrigin::User, {}, {}, sha256Hex(contents.toUtf8()),
+                            QStringLiteral("Approved unchanged imported Arch .INSTALL script"),
+                            QDateTime::currentDateTimeUtc(), true};
+    lifecycle.bindRequiredFindings(release.scriptFindings);
+    lifecycle.acknowledge();
+    release.buildStatus = BuildStatus::NeverBuilt;
+    release.producedPackages.clear();
+    if (!persistCurrent()) {
+        project_ = previous;
+        return;
+    }
+    refreshGeneratedPkgbuildAfterModelChange();
+    populateScripts();
+    populateOverview();
+    populateBuild();
+    populateHistory();
 }
 
 void MainWindow::updateSelectedScript() {
@@ -625,7 +715,7 @@ void MainWindow::saveLifecycleEdit() {
         }
     }
     lifecycle.sourceFingerprints.removeDuplicates();
-    const auto validation = LifecycleValidator::validate(contents);
+    const auto validation = LifecycleValidator::validate(contents, currentRelease());
     lifecycle.validationPassed = validation.passed;
     lifecycle.validationMessage = validation.message();
     lifecycle.provenance = {
