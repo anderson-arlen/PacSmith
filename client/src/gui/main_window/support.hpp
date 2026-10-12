@@ -73,6 +73,8 @@ QList<RepositoryKeySeed> knownRepositoryKeys(const QHash<QString, Project> &proj
                                              const LibraryClient &library);
 std::optional<RepositorySourceChoice> chooseRepositorySource(
     QWidget *parent, bool rpm, const QList<RepositoryKeySeed> &knownKeys);
+std::optional<RepositorySourceChoice> choosePPAPackage(
+    QWidget *parent, const QJsonObject &source);
 QString suggestedAssetRegex(const QString &asset);
 bool isGitHubSidecarAsset(const QString &asset);
 int githubArtifactPreference(const QString &asset);

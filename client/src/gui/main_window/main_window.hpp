@@ -147,6 +147,7 @@ private:
     void importGitHubUrl();
     void importDirectUrl();
     void importAptRepository();
+    void importPPA();
     void importRpmRepository();
     void beginRepositoryImport(UpdateConfiguration configuration,
                                const QUrl &signingKeyUrl,

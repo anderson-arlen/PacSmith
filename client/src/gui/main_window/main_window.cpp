@@ -158,6 +158,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     auto *packageFileAction = new QAction(QStringLiteral("Package File…"), this);
     auto *directUrlAction = new QAction(QStringLiteral("Direct Download URL…"), this);
     auto *aptRepositoryAction = new QAction(QStringLiteral("APT Repository…"), this);
+    auto *ppaAction = new QAction(QStringLiteral("Ubuntu PPA…"), this);
     auto *rpmRepositoryAction = new QAction(QStringLiteral("RPM Repository…"), this);
     packageFileAction->setShortcut(QKeySequence::Open);
     connect(githubAction, &QAction::triggered, this, &MainWindow::importGitHubUrl);
@@ -165,6 +166,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     connect(directUrlAction, &QAction::triggered, this, &MainWindow::importDirectUrl);
     connect(aptRepositoryAction, &QAction::triggered, this,
             &MainWindow::importAptRepository);
+    connect(ppaAction, &QAction::triggered, this, &MainWindow::importPPA);
     connect(rpmRepositoryAction, &QAction::triggered, this,
             &MainWindow::importRpmRepository);
 
@@ -225,6 +227,7 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     sidebarNewMenu->addAction(directUrlAction);
     sidebarNewMenu->addSeparator();
     sidebarNewMenu->addAction(aptRepositoryAction);
+    sidebarNewMenu->addAction(ppaAction);
     sidebarNewMenu->addAction(rpmRepositoryAction);
     newButton->setMenu(sidebarNewMenu);
     newButton->setToolTip(QStringLiteral("Create a project from a repository, GitHub release, package file, or direct download URL"));

@@ -13,6 +13,23 @@ type updateCheckRequest struct {
 	Scheduled bool   `json:"scheduled,omitempty"`
 }
 
+func (s *Server) resolvePPA(w http.ResponseWriter, r *http.Request) {
+	if s.Updates == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "PPA discovery is unavailable")
+		return
+	}
+	var request updatecheck.PPARequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := s.Updates.ResolvePPA(r.Context(), request)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "ppa", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) inspectRepositoryKey(w http.ResponseWriter, r *http.Request) {
 	if s.Updates == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "repository-key inspection is unavailable")

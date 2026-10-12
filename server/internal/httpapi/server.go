@@ -100,6 +100,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("POST /api/v1/remote-imports", server.createRemoteImport)
 	mux.HandleFunc("POST /api/v1/repository-imports", server.createRepositoryImport)
 	mux.HandleFunc("POST /api/v1/repository-keys/inspect", server.inspectRepositoryKey)
+	mux.HandleFunc("POST /api/v1/ppa/resolve", server.resolvePPA)
 	mux.HandleFunc("POST /api/v1/update-checks", server.createUpdateCheck)
 	mux.HandleFunc("POST /api/v1/releases/{id}/prepare", server.prepareDiscoveredUpdate)
 	mux.HandleFunc("POST /api/v1/releases/{id}/reanalyze", server.reanalyze)
@@ -182,7 +183,8 @@ func publishesMutation(request *http.Request) bool {
 	return isMutation(request.Method) &&
 		!(request.Method == http.MethodPost &&
 			(request.URL.Path == "/api/v1/github/resolve" ||
-				request.URL.Path == "/api/v1/repository-keys/inspect"))
+				request.URL.Path == "/api/v1/repository-keys/inspect" ||
+				request.URL.Path == "/api/v1/ppa/resolve"))
 }
 
 func (s *Server) principalFor(r *http.Request) auth.Principal {
