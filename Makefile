@@ -53,11 +53,19 @@ check-user:
 	fi
 
 deps: check-arch check-user
-	@if ! command -v "$(word 1,$(SUDO))" >/dev/null 2>&1; then \
+	@set -eu; \
+	missing=""; \
+	for package in $(DEPENDENCIES); do \
+		if ! $(PACMAN) -Q "$$package" >/dev/null 2>&1; then \
+			missing="$$missing $$package"; \
+		fi; \
+	done; \
+	if [ -z "$$missing" ]; then exit 0; fi; \
+	if ! command -v "$(word 1,$(SUDO))" >/dev/null 2>&1; then \
 		echo "error: $(word 1,$(SUDO)) is required for dependency installation (override with SUDO=doas if needed)." >&2; \
 		exit 1; \
-	fi
-	$(SUDO) $(PACMAN) -S --needed $(DEPENDENCIES)
+	fi; \
+	$(SUDO) $(PACMAN) -S --needed $$missing
 
 configure: check-arch check-user
 	cmake -S . -B "$(BUILD_DIR)" -G Ninja \
