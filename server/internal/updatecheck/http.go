@@ -136,7 +136,7 @@ func safeRepositoryPath(value string, allowTrailingSlash bool) bool {
 		}
 		for _, character := range part {
 			if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-				character >= '0' && character <= '9' || strings.ContainsRune("._+-", character) {
+				character >= '0' && character <= '9' || strings.ContainsRune("._+~-", character) {
 				continue
 			}
 			return false

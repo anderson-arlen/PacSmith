@@ -289,10 +289,11 @@ QJsonArray tools() {
                            {QStringLiteral("expected_sha256"), stringProperty(QStringLiteral("Optional 64-character publisher SHA256 that must match the downloaded artifact."))}},
                           {QStringLiteral("url")}), annotations(false, false, false, true)),
         tool(QStringLiteral("resolve_ppa"),
-             QStringLiteral("Discover a public Ubuntu PPA's repository, signing fingerprint, Ubuntu releases and published packages from Launchpad. Does not import or trust a key."),
+             QStringLiteral("Discover a public Ubuntu PPA's repository, signing fingerprint and Ubuntu releases publishing one package for the requested architecture. Does not import or trust a key."),
              objectSchema({{QStringLiteral("ppa"), stringProperty(QStringLiteral("PPA name such as ppa:ubuntugis/ubuntugis-unstable."))},
+                           {QStringLiteral("package"), stringProperty(QStringLiteral("Debian binary package name, such as grass-core."))},
                            {QStringLiteral("architecture"), stringProperty(QStringLiteral("Debian architecture; defaults to amd64."))}},
-                          {QStringLiteral("ppa")}), annotations(true, false, true, true)),
+                          {QStringLiteral("ppa"), QStringLiteral("package")}), annotations(true, false, true, true)),
         tool(QStringLiteral("import_ppa_package"),
              QStringLiteral("Import one package from a public Ubuntu PPA and configure signed APT updates. Downloads and pins the PPA's Launchpad signing key, verifies signed repository metadata and the package checksum, then performs normal inspection. Marked destructive because it establishes signing-key trust; MCP host approval is the authorization boundary."),
              objectSchema({{QStringLiteral("ppa"), stringProperty(QStringLiteral("PPA name such as ppa:ubuntugis/ubuntugis-unstable."))},
@@ -1275,7 +1276,8 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         auto architecture = argumentString(args, QStringLiteral("architecture"));
         if (architecture.isEmpty()) architecture = QStringLiteral("amd64");
         if (name == QStringLiteral("resolve_ppa")) {
-            const auto resolved = library_.resolvePPA(ppa, architecture, &error);
+            const auto resolved = library_.resolvePPA(
+                ppa, argumentString(args, QStringLiteral("package")), architecture, &error);
             return resolved ? toolResult(id, *resolved) : fail(error);
         }
         const auto imported = library_.importPPA(

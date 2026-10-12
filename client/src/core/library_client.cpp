@@ -412,20 +412,20 @@ std::optional<QJsonObject> LibraryClient::inspectRepositoryKey(const QUrl &url,
 }
 
 std::optional<QJsonObject> LibraryClient::resolvePPA(const QString &ppa,
+                                                   const QString &package,
                                                    const QString &architecture,
                                                    QString *error) const {
     return sendJson(QStringLiteral("POST"), QStringLiteral("/api/v1/ppa/resolve"),
-                    {{QStringLiteral("ppa"), ppa},
+                    {{QStringLiteral("ppa"), ppa}, {QStringLiteral("package"), package},
                      {QStringLiteral("architecture"), architecture}}, error, 200);
 }
 
 std::optional<ImportResult> LibraryClient::importPPA(
     const QString &ppa, const QString &suite, const QString &package,
     const QString &architecture, QString *error) const {
-    const auto source = resolvePPA(ppa, architecture, error);
+    const auto source = resolvePPA(ppa, package, architecture, error);
     if (!source) return std::nullopt;
-    if (!source->value(QStringLiteral("packages")).toObject().value(suite).toArray()
-             .contains(package)) {
+    if (!source->value(QStringLiteral("suites")).toArray().contains(suite)) {
         if (error != nullptr) *error = QStringLiteral("Package is not published for this PPA release and architecture");
         return std::nullopt;
     }
@@ -442,8 +442,8 @@ std::optional<ImportResult> LibraryClient::importPPA(
     update.url = source->value(QStringLiteral("repository_url")).toString();
     update.aptSuite = suite;
     update.aptComponent = QStringLiteral("main");
-    update.aptArchitecture = architecture;
-    update.aptPackageName = package;
+    update.aptArchitecture = source->value(QStringLiteral("architecture")).toString();
+    update.aptPackageName = source->value(QStringLiteral("package")).toString();
     update.trustedSigningFingerprint = fingerprint;
     return importRepository(update,
         QByteArray::fromBase64(key->value(QStringLiteral("contents")).toString().toLatin1()),

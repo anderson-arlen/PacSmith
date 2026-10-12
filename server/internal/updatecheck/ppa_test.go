@@ -29,6 +29,10 @@ func ppaTestService(t *testing.T, archive map[string]any, pages ...map[string]an
 			if r.URL.Host != "api.launchpad.net" || page >= len(pages) {
 				t.Fatalf("unexpected request %s", r.URL)
 			}
+			if page == 0 && (r.URL.Query().Get("binary_name") != "grass-core" ||
+				r.URL.Query().Get("exact_match") != "true") {
+				t.Fatalf("lookup must filter by exact package name: %s", r.URL)
+			}
 			response = pages[page]
 			page++
 		}
@@ -52,14 +56,14 @@ func TestResolvePPAPaginatesAndFiltersPackages(t *testing.T) {
 			ppaTestBinary("grass-core", "noble", "amd64"), ppaTestBinary("grass", "noble", "arm64"),
 			ppaTestBinary("grass", "noble", "amd64")}},
 		map[string]any{"entries": []any{ppaTestBinary("grass-core", "noble", "amd64"),
-			ppaTestBinary("gdal-bin", "jammy", "amd64"),
+			ppaTestBinary("grass-core", "jammy", "amd64"),
 			map[string]any{"binary_package_name": "injected", "status": "Published", "distro_arch_series_link": "noble/amd64"}}})
-	result, err := service.ResolvePPA(context.Background(), PPARequest{PPA: " ppa:ubuntugis/ubuntugis-unstable "})
+	result, err := service.ResolvePPA(context.Background(), PPARequest{PPA: " ppa:ubuntugis/ubuntugis-unstable ", Package: "grass-core"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.Packages, map[string][]string{"noble": {"grass", "grass-core"}, "jammy": {"gdal-bin"}}) {
-		t.Fatalf("packages = %#v", result.Packages)
+	if !reflect.DeepEqual(result.Suites, []string{"jammy", "noble"}) || result.Package != "grass-core" {
+		t.Fatalf("package releases = %#v", result)
 	}
 	if result.RepositoryURL != "https://ppa.launchpadcontent.net/ubuntugis/ubuntugis-unstable/ubuntu" ||
 		result.SigningFingerprint != testPPAFingerprint || result.Architecture != "amd64" ||
@@ -74,8 +78,13 @@ func TestResolvePPARejectsUnsafeInput(t *testing.T) {
 		return nil, nil
 	})}}
 	for _, input := range []string{"", "ppa:owner", "ppa:owner/../archive", "https://evil.invalid/p/", "ppa:owner/archive?extra", "ppa:~owner/archive"} {
-		if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: input}); err == nil {
+		if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: input, Package: "grass-core"}); err == nil {
 			t.Errorf("accepted %q", input)
+		}
+	}
+	for _, name := range []string{"", "../grass-core", "grass-core&status=Deleted", "Grass", "grass core"} {
+		if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: "ppa:owner/archive", Package: name}); err == nil {
+			t.Errorf("accepted package %q", name)
 		}
 	}
 }
@@ -91,7 +100,7 @@ func TestResolvePPARejectsUnusableArchive(t *testing.T) {
 		t.Run(test.field, func(t *testing.T) {
 			archive := ppaTestArchive()
 			archive[test.field] = test.value
-			if _, err := ppaTestService(t, archive).ResolvePPA(context.Background(), PPARequest{PPA: "ppa:ubuntugis/ubuntugis-unstable"}); err == nil {
+			if _, err := ppaTestService(t, archive).ResolvePPA(context.Background(), PPARequest{PPA: "ppa:ubuntugis/ubuntugis-unstable", Package: "grass-core"}); err == nil {
 				t.Fatal("unusable archive accepted")
 			}
 		})
@@ -100,17 +109,17 @@ func TestResolvePPARejectsUnusableArchive(t *testing.T) {
 
 func TestResolvePPARejectsUnsafeOrRepeatingPagination(t *testing.T) {
 	for _, next := range []string{"https://evil.invalid/packages", "http://api.launchpad.net/1.0/packages", testPPAURL + "/other?ws.start=300",
-		testPPAURL + "?ws.op=getPublishedBinaries&status=Published&ws.size=300"} {
+		testPPAURL + "?ws.op=getPublishedBinaries&status=Published&ws.size=300&binary_name=grass-core&exact_match=true"} {
 		service := ppaTestService(t, ppaTestArchive(), map[string]any{"next_collection_link": next})
-		if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: "ppa:ubuntugis/ubuntugis-unstable"}); err == nil {
+		if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: "ppa:ubuntugis/ubuntugis-unstable", Package: "grass-core"}); err == nil {
 			t.Errorf("accepted pagination %q", next)
 		}
 	}
 }
 
 func TestResolvePPARejectsEmptyArchitecture(t *testing.T) {
-	service := ppaTestService(t, ppaTestArchive(), map[string]any{"entries": []any{ppaTestBinary("grass", "noble", "arm64")}})
-	if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: "ppa:ubuntugis/ubuntugis-unstable", Architecture: "amd64"}); err == nil {
+	service := ppaTestService(t, ppaTestArchive(), map[string]any{"entries": []any{ppaTestBinary("grass-core", "noble", "arm64")}})
+	if _, err := service.ResolvePPA(context.Background(), PPARequest{PPA: "ppa:ubuntugis/ubuntugis-unstable", Package: "grass-core", Architecture: "amd64"}); err == nil {
 		t.Fatal("archive without matching packages accepted")
 	}
 }

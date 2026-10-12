@@ -5,30 +5,25 @@ namespace pacsmith::gui {
 std::optional<RepositorySourceChoice> choosePPAPackage(
     QWidget *parent, const QJsonObject &source) {
     QDialog dialog(parent);
-    dialog.setWindowTitle(QStringLiteral("Choose PPA Package"));
+    dialog.setWindowTitle(QStringLiteral("Choose Ubuntu Release"));
     dialog.resize(560, 240);
     auto *layout = new QVBoxLayout(&dialog);
     auto *description = new QLabel(
-        QStringLiteral("%1\n%2\nArchitecture: %3")
+        QStringLiteral("%1\n%2\nPackage: %3\nArchitecture: %4")
             .arg(source.value(QStringLiteral("display_name")).toString(),
                  source.value(QStringLiteral("ppa")).toString(),
+                 source.value(QStringLiteral("package")).toString(),
                  source.value(QStringLiteral("architecture")).toString()), &dialog);
     description->setTextFormat(Qt::PlainText);
     description->setWordWrap(true);
     layout->addWidget(description);
-    const auto packages = source.value(QStringLiteral("packages")).toObject();
     auto *suite = new QComboBox(&dialog);
     suite->setObjectName(QStringLiteral("ppaSuite"));
-    suite->addItems(packages.keys());
-    auto *package = new QComboBox(&dialog);
-    package->setObjectName(QStringLiteral("ppaPackage"));
-    package->setEditable(true);
-    package->setInsertPolicy(QComboBox::NoInsert);
-    package->completer()->setCaseSensitivity(Qt::CaseInsensitive);
-    package->completer()->setFilterMode(Qt::MatchContains);
+    for (const auto &name : source.value(QStringLiteral("suites")).toArray()) {
+        suite->addItem(name.toString());
+    }
     auto *form = new QFormLayout;
     form->addRow(QStringLiteral("Ubuntu release"), suite);
-    form->addRow(QStringLiteral("Package"), package);
     layout->addLayout(form);
     auto *help = new QLabel(
         QStringLiteral("Choose the Ubuntu release whose package you want to import. "
@@ -39,24 +34,9 @@ std::optional<RepositorySourceChoice> choosePPAPackage(
                                         &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Review Signing Key"));
     layout->addWidget(buttons);
-    const auto validate = [package, buttons] {
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(
-            package->findText(package->currentText(), Qt::MatchExactly) >= 0);
-    };
-    const auto updatePackages = [suite, package, packages, validate] {
-        package->clear();
-        for (const auto &name : packages.value(suite->currentText()).toArray()) {
-            package->addItem(name.toString());
-        }
-        package->setCurrentIndex(-1);
-        package->setEditText({});
-        validate();
-    };
-    QObject::connect(suite, &QComboBox::currentTextChanged, &dialog, updatePackages);
-    QObject::connect(package, &QComboBox::editTextChanged, &dialog, validate);
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(suite->count() > 0);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    updatePackages();
     if (dialog.exec() != QDialog::Accepted) return std::nullopt;
     RepositorySourceChoice choice;
     choice.update.strategy = UpdateStrategy::AptRepository;
@@ -64,7 +44,7 @@ std::optional<RepositorySourceChoice> choosePPAPackage(
     choice.update.aptSuite = suite->currentText();
     choice.update.aptComponent = QStringLiteral("main");
     choice.update.aptArchitecture = source.value(QStringLiteral("architecture")).toString();
-    choice.update.aptPackageName = package->currentText();
+    choice.update.aptPackageName = source.value(QStringLiteral("package")).toString();
     choice.update.trustedSigningFingerprint =
         source.value(QStringLiteral("signing_fingerprint")).toString();
     choice.signingKeyUrl = QUrl(source.value(QStringLiteral("signing_key_url")).toString());
@@ -73,15 +53,36 @@ std::optional<RepositorySourceChoice> choosePPAPackage(
 
 void MainWindow::importPPA() {
     if (repositoryImportRunning_ || serverImportRunning_ || importThread_ != nullptr) return;
-    bool accepted = false;
-    const auto ppa = QInputDialog::getText(
-        this, QStringLiteral("New Project from Ubuntu PPA"),
-        QStringLiteral("Enter the PPA name, for example ppa:ubuntugis/ubuntugis-unstable"),
-        QLineEdit::Normal, {}, &accepted).trimmed();
-    if (!accepted || ppa.isEmpty()) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("New Project from Ubuntu PPA"));
+    dialog.resize(560, 160);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *ppaInput = new QLineEdit(&dialog);
+    ppaInput->setPlaceholderText(QStringLiteral("ppa:ubuntugis/ubuntugis-unstable"));
+    auto *packageInput = new QLineEdit(&dialog);
+    packageInput->setPlaceholderText(QStringLiteral("grass-core"));
+    form->addRow(QStringLiteral("PPA"), ppaInput);
+    form->addRow(QStringLiteral("Package"), packageInput);
+    layout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Find Ubuntu Releases"));
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    layout->addWidget(buttons);
+    const auto validate = [ppaInput, packageInput, buttons] {
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(
+            !ppaInput->text().trimmed().isEmpty() && !packageInput->text().trimmed().isEmpty());
+    };
+    connect(ppaInput, &QLineEdit::textChanged, &dialog, validate);
+    connect(packageInput, &QLineEdit::textChanged, &dialog, validate);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const auto ppa = ppaInput->text().trimmed();
+    const auto package = packageInput->text().trimmed();
     repositoryImportRunning_ = true;
     auto *progress = new QProgressDialog(
-        QStringLiteral("Looking up the PPA and its published packages on Launchpad…"),
+        QStringLiteral("Looking up this package's published Ubuntu releases on Launchpad…"),
         QString{}, 0, 0, this);
     progress->setWindowTitle(QStringLiteral("Ubuntu PPA"));
     progress->setWindowModality(Qt::WindowModal);
@@ -105,10 +106,10 @@ void MainWindow::importPPA() {
     });
     const auto config = library_.config();
     const auto architecture = repositoryArchitecture(true);
-    watcher->setFuture(QtConcurrent::run([config, ppa, architecture] {
+    watcher->setFuture(QtConcurrent::run([config, ppa, package, architecture] {
         LibraryClient client(config);
         Result result;
-        result.first = client.resolvePPA(ppa, architecture, &result.second);
+        result.first = client.resolvePPA(ppa, package, architecture, &result.second);
         return result;
     }));
 }

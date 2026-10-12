@@ -15,28 +15,22 @@ namespace pacsmith::gui {
 class PPAPickerTest final : public QObject {
     Q_OBJECT
 private slots:
-    void selectsOnlyPackagesPublishedForTheChosenRelease() {
+    void selectsPublishedReleaseAndPreservesPackageAndSigningIdentity() {
         bool inspected = false;
         QTimer::singleShot(0, [&] {
             auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
             QVERIFY(dialog != nullptr);
             auto close = qScopeGuard([&] { dialog->reject(); });
             auto *suite = dialog->findChild<QComboBox *>(QStringLiteral("ppaSuite"));
-            auto *package = dialog->findChild<QComboBox *>(QStringLiteral("ppaPackage"));
             auto *buttons = dialog->findChild<QDialogButtonBox *>();
-            QVERIFY(suite && package && buttons);
+            QVERIFY(suite && buttons);
             auto *ok = buttons->button(QDialogButtonBox::Ok);
-            QVERIFY(!ok->isEnabled());
+            QCOMPARE(suite->count(), 2);
+            QVERIFY(ok->isEnabled());
             suite->setCurrentText(QStringLiteral("jammy"));
-            package->setEditText(QStringLiteral("gdal-bin"));
-            QVERIFY(ok->isEnabled());
+            QCOMPARE(suite->currentText(), QStringLiteral("jammy"));
             suite->setCurrentText(QStringLiteral("noble"));
-            QVERIFY(package->currentText().isEmpty());
-            QVERIFY(!ok->isEnabled());
-            package->setEditText(QStringLiteral("gdal-bin"));
-            QVERIFY(!ok->isEnabled());
-            package->setEditText(QStringLiteral("grass-core"));
-            QVERIFY(ok->isEnabled());
+            QCOMPARE(suite->currentText(), QStringLiteral("noble"));
             inspected = true;
             dialog->accept();
             close.dismiss();
@@ -46,12 +40,11 @@ private slots:
             {QStringLiteral("ppa"), QStringLiteral("ppa:ubuntugis/ubuntugis-unstable")},
             {QStringLiteral("display_name"), QStringLiteral("UbuntuGIS")},
             {QStringLiteral("architecture"), QStringLiteral("amd64")},
+            {QStringLiteral("package"), QStringLiteral("grass-core")},
             {QStringLiteral("repository_url"), QStringLiteral("https://ppa.launchpadcontent.net/ubuntugis/ubuntugis-unstable/ubuntu")},
             {QStringLiteral("signing_key_url"), QStringLiteral("https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x") + fingerprint},
             {QStringLiteral("signing_fingerprint"), fingerprint},
-            {QStringLiteral("packages"), QJsonObject{
-                {QStringLiteral("jammy"), QJsonArray{QStringLiteral("gdal-bin")}},
-                {QStringLiteral("noble"), QJsonArray{QStringLiteral("grass"), QStringLiteral("grass-core")}}}}});
+            {QStringLiteral("suites"), QJsonArray{QStringLiteral("jammy"), QStringLiteral("noble")}}});
         QVERIFY(inspected);
         QVERIFY(choice);
         QCOMPARE(choice->update.aptSuite, QStringLiteral("noble"));
