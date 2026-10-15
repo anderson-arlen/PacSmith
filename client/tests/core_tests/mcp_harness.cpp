@@ -54,6 +54,8 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
     QVERIFY(names.contains(QStringLiteral("prepare_release")));
     QVERIFY(names.contains(QStringLiteral("import_github_release")));
     QVERIFY(names.contains(QStringLiteral("import_direct_url")));
+    QVERIFY(names.contains(QStringLiteral("resolve_ppa")));
+    QVERIFY(names.contains(QStringLiteral("import_ppa_package")));
     QVERIFY(names.contains(QStringLiteral("import_repository_signing_key")));
     QVERIFY(names.contains(QStringLiteral("get_ai_harness")));
     QVERIFY(names.contains(QStringLiteral("set_ai_harness")));
@@ -94,6 +96,18 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
                                          .value(QStringLiteral("annotations")).toObject();
     QCOMPARE(pkgbuildAnnotations.value(QStringLiteral("destructiveHint")).toBool(), false);
     QCOMPARE(pkgbuildAnnotations.value(QStringLiteral("idempotentHint")).toBool(), true);
+    const auto ppaRead = findTool(QStringLiteral("resolve_ppa"))
+                             .value(QStringLiteral("annotations")).toObject();
+    QCOMPARE(ppaRead.value(QStringLiteral("readOnlyHint")).toBool(), true);
+    QCOMPARE(ppaRead.value(QStringLiteral("destructiveHint")).toBool(), false);
+    const auto ppaImport = findTool(QStringLiteral("import_ppa_package"));
+    QCOMPARE(ppaImport.value(QStringLiteral("annotations")).toObject()
+                 .value(QStringLiteral("destructiveHint")).toBool(), true);
+    const auto ppaRequired = ppaImport.value(QStringLiteral("inputSchema")).toObject()
+                                 .value(QStringLiteral("required")).toArray();
+    QVERIFY(ppaRequired.contains(QStringLiteral("ppa")));
+    QVERIFY(ppaRequired.contains(QStringLiteral("suite")));
+    QVERIFY(ppaRequired.contains(QStringLiteral("package")));
     const auto updateAnnotations =
         findTool(QStringLiteral("check_updates")).value(QStringLiteral("annotations")).toObject();
     QCOMPARE(updateAnnotations.value(QStringLiteral("readOnlyHint")).toBool(), false);

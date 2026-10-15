@@ -136,6 +136,7 @@ add_library(pacsmith_gui STATIC
     src/gui/main_window/support.cpp
     src/gui/main_window/pages.cpp
     src/gui/main_window/import.cpp
+    src/gui/main_window/ppa_import.cpp
     src/gui/main_window/dashboard.cpp
     src/gui/main_window/repository.cpp
     src/gui/main_window/library_sync.cpp
@@ -207,6 +208,12 @@ if(BUILD_TESTING)
     pacsmith_target_defaults(pacsmith-github-picker-tests)
     add_test(NAME pacsmith-github-picker-tests COMMAND pacsmith-github-picker-tests)
     set_tests_properties(pacsmith-github-picker-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(pacsmith-ppa-picker-tests tests/gui_tests/ppa_picker_test.cpp)
+    target_link_libraries(pacsmith-ppa-picker-tests PRIVATE pacsmith_gui Qt6::Test)
+    pacsmith_target_defaults(pacsmith-ppa-picker-tests)
+    add_test(NAME pacsmith-ppa-picker-tests COMMAND pacsmith-ppa-picker-tests)
+    set_tests_properties(pacsmith-ppa-picker-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(pacsmith-tests
         tests/core_tests/core_tests.hpp

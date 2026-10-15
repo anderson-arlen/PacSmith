@@ -3,6 +3,7 @@ package updatecheck
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,6 +71,17 @@ func (s *Service) verifyGPG(ctx context.Context, target checkTarget, contents, s
 	defer cancel()
 	command := exec.CommandContext(commandContext, "gpgv", arguments...)
 	output, err := command.CombinedOutput()
+	if commandContext.Err() != nil {
+		return fmt.Errorf("repository signature verification interrupted: %w", commandContext.Err())
+	}
+	verified := pinnedSignatureMatches(string(output), fingerprints)
+	// Repositories may retain an extra rotation signature whose public key is
+	// absent. Only that specific gpgv failure can accompany a valid pinned signer.
+	var exitError *exec.ExitError
+	if verified && (err == nil || (errors.As(err, &exitError) && exitError.ExitCode() == 2 &&
+		missingPublicKeysOnly(string(output)))) {
+		return nil
+	}
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if suggestion := alternateStoredSigningKey(target.Update, detail); suggestion != "" {
@@ -77,16 +89,61 @@ func (s *Service) verifyGPG(ctx context.Context, target checkTarget, contents, s
 		}
 		return fmt.Errorf("repository signature verification failed: %s", detail)
 	}
-	actual, primary := validSignatureFingerprints(string(output))
+	actual, _ := validSignatureFingerprints(string(output))
 	if actual == "" {
 		return fmt.Errorf("gpgv did not report a valid repository signature")
 	}
-	for _, pinned := range fingerprints {
-		if strings.EqualFold(actual, pinned) || strings.EqualFold(primary, pinned) {
-			return nil
+	return fmt.Errorf("repository signature did not match the pinned signing-key fingerprint")
+}
+
+func pinnedSignatureMatches(output string, fingerprints []string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		actual, primary := validSignatureFingerprints(line)
+		if actual == "" {
+			continue
+		}
+		for _, pinned := range fingerprints {
+			if strings.EqualFold(actual, pinned) || strings.EqualFold(primary, pinned) {
+				return true
+			}
 		}
 	}
-	return fmt.Errorf("repository signature did not match the pinned signing-key fingerprint")
+	return false
+}
+
+func missingPublicKeysOnly(output string) bool {
+	errorsByKey := map[string]bool{}
+	missingKeys := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "[GNUPG:]" {
+			continue
+		}
+		switch fields[1] {
+		case "NEWSIG", "KEY_CONSIDERED", "SIG_ID", "GOODSIG", "VALIDSIG":
+		case "ERRSIG":
+			if len(fields) < 8 || fields[7] != "9" {
+				return false
+			}
+			errorsByKey[fields[2]] = true
+		case "NO_PUBKEY":
+			if len(fields) != 3 {
+				return false
+			}
+			missingKeys[fields[2]] = true
+		default:
+			return false
+		}
+	}
+	if len(errorsByKey) == 0 || len(errorsByKey) != len(missingKeys) {
+		return false
+	}
+	for key := range errorsByKey {
+		if !missingKeys[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func alternateStoredSigningKey(update map[string]any, output string) string {

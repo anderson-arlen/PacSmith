@@ -303,6 +303,15 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
                                   inspectionError);
             return;
         }
+        const auto expectedFingerprint = configuration.trustedSigningFingerprint;
+        if (!expectedFingerprint.isEmpty() &&
+            !inspection->fingerprints.contains(expectedFingerprint, Qt::CaseInsensitive)) {
+            repositoryImportRunning_ = false;
+            QMessageBox::critical(this, QStringLiteral("Signing key does not match"),
+                QStringLiteral("The downloaded key does not contain the expected fingerprint %1.")
+                    .arg(expectedFingerprint));
+            return;
+        }
         QMessageBox review(QMessageBox::Question,
                            QStringLiteral("Trust repository signing key?"),
                            QStringLiteral("PacSmith inspected the selected OpenPGP key. Verify the fingerprint against a separate official source before trusting it.\n\nFingerprint(s):\n%1")
@@ -320,7 +329,8 @@ void MainWindow::beginRepositoryImport(UpdateConfiguration configuration,
             return;
         }
 
-        configuration.trustedSigningFingerprint = inspection->fingerprints.first();
+        configuration.trustedSigningFingerprint = expectedFingerprint.isEmpty()
+            ? inspection->fingerprints.first() : expectedFingerprint;
         if (rpm) {
             configuration.rpmCandidates.append(
                 {configuration.url, configuration.rpmArchitecture,

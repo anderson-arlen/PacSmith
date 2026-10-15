@@ -411,6 +411,45 @@ std::optional<QJsonObject> LibraryClient::inspectRepositoryKey(const QUrl &url,
                     {{QStringLiteral("url"), url.toString()}}, error, 200);
 }
 
+std::optional<QJsonObject> LibraryClient::resolvePPA(const QString &ppa,
+                                                   const QString &package,
+                                                   const QString &architecture,
+                                                   QString *error) const {
+    return sendJson(QStringLiteral("POST"), QStringLiteral("/api/v1/ppa/resolve"),
+                    {{QStringLiteral("ppa"), ppa}, {QStringLiteral("package"), package},
+                     {QStringLiteral("architecture"), architecture}}, error, 200);
+}
+
+std::optional<ImportResult> LibraryClient::importPPA(
+    const QString &ppa, const QString &suite, const QString &package,
+    const QString &architecture, QString *error) const {
+    const auto source = resolvePPA(ppa, package, architecture, error);
+    if (!source) return std::nullopt;
+    if (!source->value(QStringLiteral("suites")).toArray().contains(suite)) {
+        if (error != nullptr) *error = QStringLiteral("Package is not published for this PPA release and architecture");
+        return std::nullopt;
+    }
+    const auto keyUrl = QUrl(source->value(QStringLiteral("signing_key_url")).toString());
+    const auto key = inspectRepositoryKey(keyUrl, error);
+    if (!key) return std::nullopt;
+    const auto fingerprint = source->value(QStringLiteral("signing_fingerprint")).toString();
+    if (!key->value(QStringLiteral("fingerprints")).toArray().contains(fingerprint)) {
+        if (error != nullptr) *error = QStringLiteral("Downloaded key does not match Launchpad's signing fingerprint");
+        return std::nullopt;
+    }
+    UpdateConfiguration update;
+    update.strategy = UpdateStrategy::AptRepository;
+    update.url = source->value(QStringLiteral("repository_url")).toString();
+    update.aptSuite = suite;
+    update.aptComponent = QStringLiteral("main");
+    update.aptArchitecture = source->value(QStringLiteral("architecture")).toString();
+    update.aptPackageName = source->value(QStringLiteral("package")).toString();
+    update.trustedSigningFingerprint = fingerprint;
+    return importRepository(update,
+        QByteArray::fromBase64(key->value(QStringLiteral("contents")).toString().toLatin1()),
+        keyUrl.toString(), fingerprint, error);
+}
+
 std::optional<GitHubImportResult> LibraryClient::importGitHub(
     const QUrl &url, const QString &assetRegex, const bool includePrereleases,
     const QString &existingProjectId, QString *error) const {

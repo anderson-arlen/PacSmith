@@ -139,6 +139,13 @@ public:
         const PackageRelease *current = nullptr, QString *error = nullptr) const;
     [[nodiscard]] std::optional<QJsonObject> inspectRepositoryKey(
         const QUrl &url, QString *error = nullptr) const;
+    [[nodiscard]] std::optional<QJsonObject> resolvePPA(
+        const QString &ppa, const QString &package,
+        const QString &architecture = QStringLiteral("amd64"),
+        QString *error = nullptr) const;
+    [[nodiscard]] std::optional<ImportResult> importPPA(
+        const QString &ppa, const QString &suite, const QString &package,
+        const QString &architecture = QStringLiteral("amd64"), QString *error = nullptr) const;
     [[nodiscard]] std::optional<GitHubImportResult> importGitHub(
         const QUrl &url, const QString &assetRegex = {}, bool includePrereleases = false,
         const QString &existingProjectId = {}, QString *error = nullptr) const;

@@ -288,6 +288,20 @@ QJsonArray tools() {
                            {QStringLiteral("version"), stringProperty(QStringLiteral("Optional explicit vendor version, required when it cannot be inferred from the artifact."))},
                            {QStringLiteral("expected_sha256"), stringProperty(QStringLiteral("Optional 64-character publisher SHA256 that must match the downloaded artifact."))}},
                           {QStringLiteral("url")}), annotations(false, false, false, true)),
+        tool(QStringLiteral("resolve_ppa"),
+             QStringLiteral("Discover a public Ubuntu PPA's repository, signing fingerprint and Ubuntu releases publishing one package for the requested architecture. Does not import or trust a key."),
+             objectSchema({{QStringLiteral("ppa"), stringProperty(QStringLiteral("PPA name such as ppa:ubuntugis/ubuntugis-unstable."))},
+                           {QStringLiteral("package"), stringProperty(QStringLiteral("Debian binary package name, such as grass-core."))},
+                           {QStringLiteral("architecture"), stringProperty(QStringLiteral("Debian architecture; defaults to amd64."))}},
+                          {QStringLiteral("ppa"), QStringLiteral("package")}), annotations(true, false, true, true)),
+        tool(QStringLiteral("import_ppa_package"),
+             QStringLiteral("Import one package from a public Ubuntu PPA and configure signed APT updates. Downloads and pins the PPA's Launchpad signing key, verifies signed repository metadata and the package checksum, then performs normal inspection. Marked destructive because it establishes signing-key trust; MCP host approval is the authorization boundary."),
+             objectSchema({{QStringLiteral("ppa"), stringProperty(QStringLiteral("PPA name such as ppa:ubuntugis/ubuntugis-unstable."))},
+                           {QStringLiteral("suite"), stringProperty(QStringLiteral("Ubuntu release codename returned by resolve_ppa."))},
+                           {QStringLiteral("package"), stringProperty(QStringLiteral("Exact published binary package name returned by resolve_ppa."))},
+                           {QStringLiteral("architecture"), stringProperty(QStringLiteral("Debian architecture; defaults to amd64."))}},
+                          {QStringLiteral("ppa"), QStringLiteral("suite"), QStringLiteral("package")}),
+             annotations(false, true, false, true)),
         tool(QStringLiteral("update_project_metadata"), QStringLiteral("Edit ordinary project display/package/vendor metadata."),
              objectSchema({{QStringLiteral("project"), project}, {QStringLiteral("display_name"), stringProperty(QStringLiteral("Display name."))},
                            {QStringLiteral("arch_package_name"), stringProperty(QStringLiteral("Arch package name."))},
@@ -1256,6 +1270,28 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
                                           {QStringLiteral("published_package_name"), state->publishedPackageName},
                                           {QStringLiteral("has_unstable"), state->hasUnstable},
                                           {QStringLiteral("has_stable"), state->hasStable}});
+    }
+    if (name == QStringLiteral("resolve_ppa") || name == QStringLiteral("import_ppa_package")) {
+        const auto ppa = argumentString(args, QStringLiteral("ppa"));
+        auto architecture = argumentString(args, QStringLiteral("architecture"));
+        if (architecture.isEmpty()) architecture = QStringLiteral("amd64");
+        if (name == QStringLiteral("resolve_ppa")) {
+            const auto resolved = library_.resolvePPA(
+                ppa, argumentString(args, QStringLiteral("package")), architecture, &error);
+            return resolved ? toolResult(id, *resolved) : fail(error);
+        }
+        const auto imported = library_.importPPA(
+            ppa, argumentString(args, QStringLiteral("suite")),
+            argumentString(args, QStringLiteral("package")), architecture, &error);
+        if (!imported) return fail(error);
+        const auto *importedRelease = imported->project.release(imported->releaseId);
+        return toolResult(id, QJsonObject{
+            {QStringLiteral("project_id"), imported->project.id},
+            {QStringLiteral("project_name"), imported->project.displayName},
+            {QStringLiteral("release_id"), imported->releaseId},
+            {QStringLiteral("release_name"), importedRelease == nullptr ? QString{} : importedRelease->debian.version},
+            {QStringLiteral("project_created"), imported->projectCreated},
+            {QStringLiteral("duplicate"), imported->duplicate}});
     }
     if (name == QStringLiteral("import_artifact")) {
         const auto path = argumentString(args, QStringLiteral("path"));

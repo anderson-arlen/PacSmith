@@ -38,6 +38,23 @@ func TestAPTMetadataSelection(t *testing.T) {
 	}
 }
 
+func TestAPTMetadataSelectionAcceptsPPAVersionFilename(t *testing.T) {
+	filename := "pool/main/g/grass/grass-core_8.4.2-1~noble1_amd64.deb"
+	index := []byte("Package: grass-core\nVersion: 8.4.2-1~noble1\nArchitecture: amd64\nFilename: " +
+		filename + "\nSHA256: " + strings.Repeat("0", sha256.Size*2) + "\nSize: 15\n")
+	selected, err := latestAPTPackage(index, "grass-core", "amd64")
+	if err != nil || selected.Filename != filename {
+		t.Fatalf("selected %+v: %v", selected, err)
+	}
+	for _, unsafe := range []string{"../" + filename, "/" + filename,
+		"https://example.org/" + filename, "pool/%2e%2e/" + filename,
+		filename + "?download=1", filename + "#fragment"} {
+		if safeRepositoryPath(unsafe, false) {
+			t.Errorf("unsafe repository path %q was accepted", unsafe)
+		}
+	}
+}
+
 func TestRPMMetadataSelection(t *testing.T) {
 	zeroDigest := hex.EncodeToString(make([]byte, sha256.Size))
 	repomd := []byte("<repomd xmlns=\"http://linux.duke.edu/metadata/repo\">" +
