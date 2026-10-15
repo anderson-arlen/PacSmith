@@ -387,9 +387,11 @@ std::optional<RepositorySourceChoice> chooseRepositorySource(QWidget *parent,
     return std::nullopt;
 }
 QString suggestedAssetRegex(const QString &asset) {
+    // Only numeric dotted prerelease components belong to the version, so suffixes
+    // such as .tar.gz or .x86_64.rpm stay fixed in the saved artifact rule.
     static const QRegularExpression version(
         QStringLiteral(
-            R"((?<![A-Za-z0-9])v?[0-9]+(?:\.[0-9]+)+(?:[-_](?:alpha|beta|rc|pre|preview|dev|nightly)[0-9A-Za-z.]*)?)"),
+            R"((?<![A-Za-z0-9])v?[0-9]+(?:\.[0-9]+)+(?:[-_]?(?:alpha|beta|rc|preview|pre|dev|nightly)[0-9A-Za-z]*(?:\.[0-9]+)*)?)"),
         QRegularExpression::CaseInsensitiveOption);
     const auto match = version.match(asset);
     if (!match.hasMatch()) return QRegularExpression::escape(asset);
