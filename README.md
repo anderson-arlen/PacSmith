@@ -6,18 +6,20 @@
 
 Turn upstream Linux artifacts into native Arch packages, then keep them updated from the developer's release channel.
 
-PacSmith imports Debian `.deb` files, RPMs, Arch packages, AppImages, archives, and standalone ELF executables. Inspect what the developer shipped, review dependencies and install behavior, build an ordinary pacman package, and optionally distribute it through your own signed repository. Use the Qt GUI, CLI, or an AI agent through MCP and the bundled Agent Skill.
+PacSmith imports Debian `.deb` files, RPMs, Arch packages, AppImages, archives, and standalone ELF executables. Inspect what the developer shipped, review dependencies and install behavior, build an ordinary pacman package, and optionally distribute it through your own signed repository.
+
+Use the Qt GUI or CLI directly, work with an agent through [in-app ACP chat](#in-app-chat-through-acp), or connect an [external AI harness through MCP and the Agent Skill](#external-agents-through-mcp-and-the-agent-skill).
 
 The library runs in `pacsmithd`, a Go daemon that owns projects, artifacts, update checks, builds, and shared AI conversations. Work locally or connect multiple machines to the same library over HTTPS with mutual TLS. Builds and scheduled work continue when the GUI is closed.
 
 **Project status:** PacSmith is in active alpha development for Arch Linux and Arch-based distributions. Published packages target **x86_64**. This README describes the current `master` branch; a published release contains the features available at its tag.
 
+- **ACP and MCP integration:** in-app **Ask AI** chat and automatic update reviews use ACP, with shared approvals across clients. External agents use MCP and the bundled Skill.
 - **Upstream updates:** signed APT/RPM repositories, public Ubuntu PPAs, GitHub releases and prereleases, moving direct-download URLs, and manual release submission.
 - **Maintained recipes:** structured Guided packaging or a Custom PKGBUILD with support files that carry forward to later releases.
 - **Source builds:** Custom PKGBUILDs run in rootless Podman with source and compiler caches; publish the resulting binaries for compatible Arch machines.
 - **Signed distribution:** an `unstable` pacman channel and an optional `stable` channel with manual or timed promotion.
 - **Shared workbench:** the GUI, CLI, and MCP use the same server-owned library, with live changes and preserved unsaved drafts.
-- **Optional AI:** in-app ACP chat, shared approvals, and automatic update review through an agent configured on the library server.
 
 <p align="center">
   <img src="docs/images/pacsmith-versions.png" alt="PacSmith managing releases, builds, update checks, and project history">
@@ -116,7 +118,9 @@ Original vendor scripts remain inspection evidence. For an imported Arch package
 
 Custom support files are available through the GUI, MCP, and `pacsmith custom-file <project> list|read|write|delete`.
 
-## AI integration
+## AI integration: ACP and MCP
+
+**ACP (Agent Client Protocol)** connects PacSmith to an agent running on the library server for in-app conversations and automatic update reviews. **MCP (Model Context Protocol)** gives agents access to PacSmith's packaging tools, while the bundled **Agent Skill** supplies workflow and review guidance. In-app ACP agents receive the MCP connection automatically; external harnesses connect through their own MCP setup.
 
 AI is optional. Package import, inspection, configuration, update discovery, builds, and publication remain available without an agent.
 
