@@ -4,59 +4,149 @@
 
 # PacSmith
 
-### Install and manage `.deb`, `.rpm`, and other upstream Linux packages as native Arch Linux packages, without the AUR.
+Turn upstream Linux artifacts into native Arch packages, then keep them updated from the developer's release channel.
 
-- **Automated updates** from upstream releases
-- **Painless distribution** through the included signed pacman repository
-- **Manage from anywhere**, locally or over the network from multiple machines
-- **AI-native management**, either completely through an AI agent or completely manually
-- **Build once, install everywhere**, compiling source packages once and distributing them as binaries
-- **Safer source builds** in isolated, rootless containers
-- **Use it your way** through the GUI, CLI, or MCP + Skill
+PacSmith imports Debian `.deb` files, RPMs, Arch packages, AppImages, archives, and standalone ELF executables. Inspect what the developer shipped, review dependencies and install behavior, build an ordinary pacman package, and optionally distribute it through your own signed repository. Use the Qt GUI, CLI, or an AI agent through MCP and the bundled Agent Skill.
+
+The library runs in `pacsmithd`, a Go daemon that owns projects, artifacts, update checks, builds, and shared AI conversations. Work locally or connect multiple machines to the same library over HTTPS with mutual TLS. Builds and scheduled work continue when the GUI is closed.
+
+**Project status:** PacSmith is in active alpha development for Arch Linux and Arch-based distributions. Published packages target **x86_64**. This README describes the current `master` branch; a published release contains the features available at its tag.
+
+- **Upstream updates:** signed APT/RPM repositories, public Ubuntu PPAs, GitHub releases and prereleases, moving direct-download URLs, and manual release submission.
+- **Maintained recipes:** structured Guided packaging or a Custom PKGBUILD with support files that carry forward to later releases.
+- **Source builds:** Custom PKGBUILDs run in rootless Podman with source and compiler caches; publish the resulting binaries for compatible Arch machines.
+- **Signed distribution:** an `unstable` pacman channel and an optional `stable` channel with manual or timed promotion.
+- **Shared workbench:** the GUI, CLI, and MCP use the same server-owned library, with live changes and preserved unsaved drafts.
+- **Optional AI:** in-app ACP chat, shared approvals, and automatic update review through an agent configured on the library server.
 
 <p align="center">
-  <img src="docs/images/pacsmith-versions.png" alt="PacSmith managing Brave Browser releases, builds, update checks, and project history">
+  <img src="docs/images/pacsmith-versions.png" alt="PacSmith managing releases, builds, update checks, and project history">
 </p>
-
-PacSmith takes the packages developers actually publish, including Debian `.deb` files, RPMs, AppImages, archives, and related artifacts, and converts them into ordinary pacman packages that you can install, update, and remove like anything else on the system. A PacSmith library can also publish those builds through its own signed pacman repository for other Arch machines.
-
-It is not an AUR helper. It does not download community PKGBUILDs. You import the developer's own packages, review the generated recipe, and become the package maintainer. The point is a shorter trust chain: developer → you, with no extra packager in the middle.
 
 ## Install and get started
 
-### Install PacSmith
-
-Download the newest `pacsmith-*.pkg.tar.zst` and its `SHA256SUMS` file from [GitHub Releases](https://github.com/anderson-arlen/PacSmith/releases). From a directory containing only that PacSmith package and checksum file, verify the download and install it with pacman:
+Download the `pacsmith-*.pkg.tar.zst` and its `SHA256SUMS` file from the [GitHub release](https://github.com/anderson-arlen/PacSmith/releases) you want to install, including prereleases. In a directory containing that release's package and checksum file:
 
 ```bash
 sha256sum -c SHA256SUMS
 sudo pacman -U ./pacsmith-*.pkg.tar.zst
+pacsmith-gui
 ```
 
-PacSmith includes its GUI, CLI, user daemon, Agent Skill, and MCP server. Launch the GUI with `pacsmith-gui`. The GUI, a library-using CLI command, or `pacsmith mcp` starts the local user daemon automatically, so an MCP harness does not require the GUI to be opened first. A client configured for a remote library connects to that server instead.
+The package includes the GUI, CLI, daemon, portable Agent Plugin, and MCP server. A local GUI, library-using CLI command, or `pacsmith mcp` enables and starts `pacsmithd.service` automatically. The daemon runs as your normal user. Remote clients connect to their configured library instead.
 
-### Connect an AI harness
+### Use the GUI
 
-Install the bundled PacSmith Skill for your user:
+1. Choose **New** and select **GitHub Link…**, **Package File…**, **Direct Download URL…**, **Ubuntu PPA…**, **APT Repository…**, or **RPM Repository…**. Supported files and links can also be dropped onto the window.
+2. Inspect the imported artifact's metadata, original scripts, and contents. Configure dependencies, payload decisions, install layout, commands, desktop integration, and lifecycle behavior.
+3. Review the generated Guided PKGBUILD, or switch to **Custom PKGBUILD** for packaging logic that needs Bash or arbitrary filesystem changes.
+4. Build on the library host. **View Output** shows retained and live output; closing it leaves the build running. **Cancel build** stops it.
+5. Install the retained build on this machine, or publish it through the library's pacman repository for other machines.
+
+The project dashboard has **Project Info**, **Versions**, **Update Monitoring**, and **Repository** tabs. **Edit / Set Up Release** opens the workbench, organized into the imported artifact, **Configuration**, and **Pacman Package** stages. Settings and configuration save automatically; validation errors and unresolved review items remain visible. Explicit script approval is still required where applicable.
+
+### Import from an Ubuntu PPA
+
+Choose **New → Ubuntu PPA…**, enter a public PPA such as `ppa:ubuntugis/ubuntugis-unstable` and the exact binary package name, such as `grass-core`. PacSmith asks Launchpad which Ubuntu releases publish that package for your architecture, then lets you select a release and review its signing key.
+
+The downloaded key must match Launchpad's fingerprint. Import verifies the signed APT metadata and package checksum and configures the project for subsequent signed APT updates. This imports a package into PacSmith; it does not enable APT on Arch or resolve every Ubuntu-to-Arch compatibility difference. Dependencies and package behavior still need review.
+
+MCP exposes the same workflow through `resolve_ppa` and `import_ppa_package`. Import requires MCP host authorization because it establishes signing-key trust. The CLI supports the underlying `pacsmith add apt` workflow rather than a separate PPA command.
+
+### Use the CLI
+
+```bash
+pacsmith add /path/to/vendor-package.deb
+pacsmith add /path/to/vendor-tool.tar.gz
+pacsmith add https://github.com/owner/project --asset-regex 'project-.*-linux-x86_64\.tar\.gz'
+pacsmith add apt https://vendor.example/debian stable main amd64 vendor-package https://vendor.example/signing-key.gpg
+pacsmith add rpm https://vendor.example/rpm/x86_64 x86_64 vendor-package https://vendor.example/signing-key.asc
+pacsmith list
+pacsmith versions <project>
+pacsmith info <project>
+pacsmith check <project>
+pacsmith check --all
+pacsmith build <project>
+pacsmith install <project>
+pacsmith rollback <project> <release-id-or-version>
+pacsmith uninstall <project>
+```
+
+Use `pacsmith --help` for the full command list. Project selectors accept a project ID, display name, or Arch package name.
+
+The GUI uses polkit for explicit local installation and removal. In an interactive terminal, CLI package operations use sudo and interactive pacman by default; `--polkit` selects graphical authentication instead. Agent harnesses use `pacsmith install --polkit <project>` so credentials are entered through the desktop authentication prompt. Installation is a local client action even when the package was built on a remote library host.
+
+## Updates and automatic handling
+
+Update monitoring is configured independently from the artifact used to create a project:
+
+| Source | What PacSmith follows |
+| --- | --- |
+| Signed APT repository | A package, suite, component, and architecture, verified with a reviewed key and pinned fingerprint; also used for imported PPAs |
+| Signed RPM repository | A package and architecture from verified Yum/DNF-style repository metadata |
+| GitHub Releases | Exactly one uploaded artifact or generated source archive selected by a persistent asset regular expression |
+| Direct URL | A version-agnostic HTTPS download whose response or redirect changes as the vendor publishes updates |
+| Manual | Releases supplied by a person through **Submit New Release**, a local artifact import, or a direct URL import |
+
+GitHub tracking prefers matching stable releases by default. When none match, it follows prereleases automatically and switches to stable when one becomes available. Enable **Track prereleases even after a stable release exists** to keep following previews. Asset rules must match exactly one installable artifact; signatures and checksum sidecars are excluded. Generated rules recognize both separated prerelease names such as `0.1.0-alpha.3` and compact names such as `0.1.0alpha3`.
+
+A versioned, immutable download URL cannot discover its successor. Use a signed repository or GitHub tracking when available; use Direct URL monitoring only for a genuinely moving download. Direct URL checks use remote validators before downloading and compare SHA-256 when content is fetched. Sources without usable validators have a configurable interval for automatic full-content checks; a manual check overrides that interval.
+
+Library settings control the check schedule, automatic preparation, build parallelism, and outdated-version retention. Each project also selects an automatic-build policy:
+
+- **Never:** prepare updates without building them automatically.
+- **When nothing is flagged for review:** build only when the maintained configuration and new artifact pass PacSmith's deterministic checks against a successful baseline.
+- **Resolve review items with AI automatically:** build a deterministically clear update directly, or queue evidence requiring judgment for the server's configured ACP agent.
+
+Discovery, verification, and preparation are deterministic. AI is used only for the later review policy when needed. Custom PKGBUILDs require review and cannot use the deterministic-only automatic-build policy. Missing agent configuration or required permission leaves work pending; failures and paused builds retain their reasons. PacSmith never installs updates automatically.
+
+On the **Versions** tab, **Submit New Release** accepts a local vendor artifact or direct HTTPS URL, an explicit version when needed, and an optional publisher SHA-256. Supplied checksums are enforced during import. Submitting a URL to a manually maintained project records provenance without turning it into Direct URL monitoring.
+
+After scheduled library-wide checks, retention preserves the Stable-to-Unstable rollout window and the configured number of completed versions behind it, then removes older releases and their unreferenced artifacts. With no populated Stable version, Unstable defines the boundary. On-demand checks and manual imports do not trigger version retention. Project history retains its 100 newest entries during that cleanup.
+
+## Guided and Custom recipes
+
+**Guided** mode covers package metadata, dependency mapping and explicit Arch runtime dependencies, payload decisions, supported layouts, commands and wrappers, AppRun, desktop entries, icons, lifecycle scripts, and update sources. PacSmith generates the PKGBUILD from those settings. Guided builds run `makepkg` as the daemon user on the library host.
+
+**Custom PKGBUILD** mode supports source compilation and packaging logic outside those controls. Custom recipes and declared dependencies build inside rootless Podman. The first build may download the Arch build image and dependencies; source and compiler caches are retained for later builds. Podman must work for the daemon's user account.
+
+For a successor release, reviewed Guided choices carry forward where applicable. A Custom PKGBUILD and its explicitly owned text support files copy forward verbatim. PacSmith regenerates `pacsmith.vars` from the new version, architecture, verified artifact filename, checksum, and other release identity. Custom recipes should source that file and use its `_PACSMITH_*` values so updates follow the new artifact. Editing a successor does not change the predecessor, and PacSmith does not merge arbitrary shell code.
+
+Original vendor scripts remain inspection evidence. For an imported Arch package, **Configuration → Scripts → Approve and Use Original Script** can copy and approve its unchanged `.INSTALL`; edited or foreign scripts follow the authored-script review rules. Approval is tied to the exact contents.
+
+Custom support files are available through the GUI, MCP, and `pacsmith custom-file <project> list|read|write|delete`.
+
+## AI integration
+
+AI is optional. Package import, inspection, configuration, update discovery, builds, and publication remain available without an agent.
+
+### In-app chat through ACP
+
+Open **Ask AI** beside the Local/Remote connection control, or press **Ctrl+Shift+Space**. Questions include the selected screen, project, and release context. Chat supports streaming responses, tool details, screenshot attachments, model settings advertised by the agent, cancellation, and saved conversations.
+
+In **Settings → AI Harness**, select an agent from the ACP registry or configure an installed ACP stdio executable with separate arguments. Registry entries using npm/npx or uvx need the corresponding runner on the library server. Configure and authenticate the agent on that server; authorized clients share the same harness and conversations. PacSmith supervises the ACP process rather than embedding a model provider.
+
+Approvals are shared across connected clients; the first answer resolves a pending request. Closing the chat pane or disconnecting a client does not stop server work. Automatic update reviews also run on the server without an open GUI and wait for approval when required. Provider-specific settings come from the agent; defaults apply to new conversations, while resumed conversations keep their settings.
+
+Codex uses a separate PacSmith home on the library server. Only the server user's login credential file is shared with personal Codex; personal configuration and conversations are not imported. Unsent drafts and screenshot caches remain local to each client; sent messages and attachments belong to the shared conversation.
+
+### External agents through MCP and the Agent Skill
+
+Install the bundled Skill for harnesses that discover shared Agent Skills:
 
 ```bash
 pacsmith skill install
+pacsmith skill path
 ```
 
-This installs the Skill at `~/.agents/skills/pacsmith` for harnesses that discover shared Agent Skills. Restart or reload the harness if it was already running. `pacsmith skill path` prints the active Skill path, and `pacsmith plugin path` prints the complete portable Agent Plugin containing both the Skill and MCP declaration.
+The user Skill is installed at `~/.agents/skills/pacsmith`. Restart or reload a running harness if needed. `pacsmith plugin path` prints the portable Agent Plugins 1.0 bundle containing the Skill and MCP declaration; give that directory to a compatible plugin installer.
 
-Register PacSmith's local stdio MCP server in the harnesses you use:
-
-- **[Codex](https://developers.openai.com/codex/mcp/):** `codex mcp add pacsmith -- pacsmith mcp`
-- **[Claude Code](https://code.claude.com/docs/en/mcp):** `claude mcp add --scope user --transport stdio pacsmith -- pacsmith mcp`
-- **[Gemini CLI](https://geminicli.com/docs/tools/mcp-server/):** `gemini mcp add --scope user pacsmith pacsmith mcp`
-- **[Cursor](https://cursor.com/docs/mcp):** add the following entry to the `mcpServers` object in `~/.cursor/mcp.json`:
+Alternatively, register a local stdio MCP server in your harness with executable `pacsmith` and argument `mcp`. For harnesses using an `mcpServers` JSON configuration:
 
 ```json
 {
   "mcpServers": {
     "pacsmith": {
-      "type": "stdio",
       "command": "pacsmith",
       "args": ["mcp"]
     }
@@ -64,264 +154,103 @@ Register PacSmith's local stdio MCP server in the harnesses you use:
 }
 ```
 
-If the harness supports Agent Plugins 1.0 directly, you can instead give its plugin installer the directory printed by `pacsmith plugin path`. Review and approve the MCP tools when the harness asks.
+The MCP process uses the same configured local or remote library connection as the GUI and CLI. The in-app ACP agent receives its PacSmith MCP connection automatically; external harness setup is separate.
 
-PacSmith also offers in-app ACP chat from the **Ask AI** button beside the Local/Remote connection button. Choose an agent from the ACP registry in **Settings → AI Harness** or when opening chat for the first time. The agent receives the current screen’s context with each question.
+MCP exposes project and release evidence, artifact import, dependency and payload review, Guided settings, Custom recipes and support files, update configuration, builds and logs, repository management, and library administration. Agents inspect package contents through `get_payload` and `get_payload_file_inspection`. `get_release_issues` reports unresolved review items and whether maintenance is complete; a successful build alone does not clear outstanding review.
 
-The build **View Output** window includes output emitted before it opened and tracks elapsed time from the daemon’s build start. Close it at any time to let the build continue in the background; **Cancel build** explicitly stops it.
+Sensitive deletion, system, trust, credential, publication, and automation tools carry MCP permission annotations. The MCP host authorizes those calls; PacSmith does not ask for a second confirmation after host approval. Ordinary recipe edits use the same controls available in the GUI. MCP does not install packages or execute repository bootstrap scripts; agents request explicit installation through the constrained CLI command described above.
 
-## Quick start
+The Skill prefers MCP and permits documented CLI operations when MCP is unavailable. It forbids bypassing those interfaces through direct HTTP, sockets, daemon management, database access, or storage scraping. Features available only through MCP require that integration to be connected.
 
-### Use the GUI
+## One library, many machines
 
-Open `pacsmith-gui`, choose **New**, and import an official vendor package file, direct download, GitHub project, or signed APT/RPM repository. Review the detected metadata, dependencies, scripts, payload decisions, desktop integration, and generated PKGBUILD. When the review is clear, build and install the resulting native package. Configure update monitoring to keep the project current from the same upstream source.
+| Program | Role |
+| --- | --- |
+| `pacsmithd` | Go library daemon: SQLite state, artifacts, credentials, inspection, jobs, builds, updates, repository publication, and ACP conversations |
+| `pacsmith-gui` | C++/Qt workbench, shared chat, and this machine's install state and explicit package operations |
+| `pacsmith` | CLI and stdio MCP server using the same library API |
 
-### Use an AI agent
+Local clients connect over a Unix socket at `$XDG_RUNTIME_DIR/pacsmith/pacsmith.sock`. The library lives under `$XDG_DATA_HOME/pacsmith/server` (normally `~/.local/share/pacsmith/server`), with SQLite state and a content-addressed artifact store. Clients cache presentation data rather than maintaining independent libraries.
 
-With the PacSmith Skill installed and MCP connected, just ask your agent:
+Remote management is disabled by default. On the library host, enable it in **Settings → Library** or through the CLI; on another machine, enroll from the Local/Remote control or CLI:
 
-> What's the best way to install X on this machine?
+```bash
+# On the library host, enable listening and display its identity:
+pacsmith server listen on --port 8443
+pacsmith server info
 
-The agent can weigh the available options and suggest PacSmith when it is a good fit. If it does, tell it to “set it up.” It can add and configure the project, build the native Arch package, and install it without you ever opening the GUI. Elevated privileges are needed only for the final pacman installation. PacSmith requests them through polkit, which asks you for your password directly, so the agent never has access to it.
+# On a client, begin enrollment:
+pacsmith connect remote <host>:8443
 
-The GUI and agent stay synchronized through the same server-owned library, so you can begin a project in one and continue in the other.
+# On the library host, approve the pending client:
+pacsmith clients pending
+pacsmith clients approve <registration-id>
 
-## Why PacSmith
+# On the client, inspect the completed connection:
+pacsmith connect status
 
-Arch Linux is excellent at what it ships in the official repositories. Third-party application support outside those repos is another story. The Arch User Repository exists to fill that gap, and for years it has been the default answer to "how do I install this on Arch?" It has real problems.
-
-### You have to trust a stranger
-
-Installing software always requires some trust in the people who wrote it. The AUR adds a second, often invisible, party: the package maintainer.
-
-A typical AUR package is not the developer's release. It is a community PKGBUILD that downloads, unpacks, and installs that release. The person who wrote that recipe is usually not the software author. You do not know them. If they later walk away, someone else can adopt the package and inherit the name, the history, and the trust that accumulated around it.
-
-PacSmith removes that extra person from the chain. You import the developer's package yourself, inspect it, generate the PKGBUILD, and keep the project. The only maintainer you have to trust is you. When useful, your existing AI harness can assist through PacSmith's standards-based MCP tools and Agent Skill.
-
-### The AUR has become a malware target
-
-That extra-maintainer model is not a theoretical weakness. It is how recent AUR attacks actually worked.
-
-In June 2026, a campaign later called **Atomic Arch** showed how cheap it is to buy existing trust. Attackers did not need to break into Arch's official repositories. They adopted abandoned AUR packages — a normal, documented process — and rewrote the PKGBUILDs. The first wave injected a malicious npm package during install. When that was noticed, they switched delivery methods within a day. Community tracking put the total above 1,500 packages. The payload was a credential stealer aimed at SSH keys, browser data, cloud tokens, password managers, and crypto wallets, with an eBPF rootkit available to hide on compromised machines.
-
-That was not the last wave. In late July and August 2026 another campaign hit, again through compromised maintainers and orphaned-package adoption. A loader installed a Tor client, fetched a second-stage payload from an onion service, then delivered a Rust infostealer with remote-access and SSH-worm behavior. Fairly popular packages were among those reported. Arch's response escalated from disabling new AUR account registrations, to freezing package adoption, to blocking AUR pushes entirely while the mess was cleaned up.
-
-None of this required a novel exploit in pacman. The AUR's trust model *is* the attack surface: recipes from people you do not know, attached to package names users already recognize. Similar orphaned-package takeovers go back years. 2026 simply made the scale impossible to ignore.
-
-If you install from the AUR, you are not only trusting the application developer. You are trusting whoever currently controls that PKGBUILD.
-
-### Updates depend on that same extra party
-
-Trust is only half of the problem. The other half is time.
-
-Once you rely on an AUR package, you also rely on that maintainer to notice upstream releases, update the recipe, and push. Developers ship; the AUR lags. Packages go stale. Maintainers disappear. Orphans sit with a trusted name until someone — possibly not a volunteer you would choose — picks them up.
-
-### The AUR also does not have everything
-
-Even a healthy AUR is incomplete. New applications, niche tools, and Linux builds that only the developer publishes often have no AUR package yet. Waiting for a volunteer to appear puts you back in the same trust-and-latency situation. PacSmith is for those cases too: if the developer publishes a Debian package, RPM, AppImage, GitHub release, or similar artifact, you can turn it into a local Arch package without waiting for the AUR to catch up.
-
-### Flathub is decent. It is still someone else's repo
-
-Flatpak, and Flathub in particular, is a reasonable answer for a lot of desktop software. The distribution model is cleaner than the AUR, updates come from a real repository, and the sandbox is a genuine security feature when it is actually used.
-
-You are still trusting a third party. The application on Flathub is packaged, reviewed, and shipped by people who are usually not the developer. That is a better-run extra party than a random AUR maintainer, but it is the same kind of extra party: another org in the trust chain, another place a recipe or manifest can drift from what the developer published.
-
-The sandbox also helps less often than the marketing implies. Flatpak permissions are powerful when they are tight. In practice, a large share of popular apps request far more than they need: full home-directory access, host filesystem access, unfiltered network, device nodes, and so on. Once an app can read `$HOME` and talk to the network, a lot of the isolation is already gone. You still get some benefits — a separate runtime, cleaner uninstall — but you should not treat "it is a Flatpak" as equivalent to "it is confined."
-
-PacSmith's bet is different. Take the developer's own package, make it a pacman package you control, and keep the update channel pointed at the developer. No Flathub maintainer, no AUR PKGBUILD, and no sandbox you have to pretend is tighter than the permissions on the app.
-
-## What PacSmith is
-
-PacSmith is a conversion wizard from foreign Linux artifacts into pacman-managed installs.
-
-You point it at a `.deb`, RPM, AppImage, Arch package, tar/zip archive, or standalone executable — from a local file, a direct HTTPS URL, a signed APT or RPM repository, or a GitHub release. GitHub URLs go directly to `pacsmithd`, which uses its server-owned token to resolve and download the release without exposing the credential or routing the artifact through a remote client. PacSmith inspects the artifact as data, without executing it. It extracts metadata, dependencies, desktop entries, icons, payload layout, and (for DEB/RPM) maintainer scripts as review evidence. It then generates an editable PKGBUILD. Foreign install scripts and dependency mapping can be reviewed manually or interactively with an external AI harness through MCP.
-
-From there the workbench walks you through ordinary Arch packaging:
-
-1. Review what the developer shipped.
-2. Map dependencies, commands, desktop files, and anything suspicious, optionally with an external agent using the same controls through MCP.
-3. Build with `makepkg` as your normal user.
-4. Install with a narrowly scoped `pkexec pacman -U`.
-5. Optionally publish the signed build through your library's pacman channels.
-6. Uninstall or roll back later through pacman, because the result is a real package, not a pile of files in `/opt` that you will forget about.
-
-The last step is the point of using pacman at all. Third-party Linux software is often distributed as an AppImage, a tarball, or a Debian package "you can just extract." Those leave you with ad-hoc files, leftover systemd units, and no clean inverse operation. PacSmith's output is a pacman package, so the application shows up in the package database and comes off the system the same way official packages do.
-
-### Updates are the feature that actually matters
-
-Creating a one-off PKGBUILD from a developer's `.deb` or RPM is not why this app exists. Nobody would go to that trouble if the next release meant doing it again by hand. Keeping the package current, without handing the job back to an AUR maintainer, is the part most Arch users do not have a good answer for.
-
-PacSmith is the update authority for the packages it creates. After import, each project has an update configuration. You can watch:
-
-- **Signed Debian/Ubuntu APT repositories** — the same developer channel the `.deb` originally came from
-- **Signed RPM / Red Hat-style repositories** — Fedora, RHEL, OpenSUSE, and the developer's own Yum/DNF repos
-- **GitHub Releases** — tagged assets from the developer's repository, including cases where there is no Linux package repo at all.
-
-When a newer upstream version appears, PacSmith can notify you, optionally download and inspect it, and walk you through a new release of *your* package. Your reviewed Guided choices carry forward across same-format updates. A Custom PKGBUILD and its support files copy forward verbatim while PacSmith regenerates `pacsmith.vars` for the new verified artifact. Discovery and preparation remain deterministic. Per project, the subsequent build can be disabled or allowed when deterministic review is clear; the AI policy queues evidence requiring judgment for the server’s ACP agent.
-
-Vendors that publish behind an interactive download page or have no machine-readable release channel can use Manual monitoring. On the Versions tab, **Submit New Release** accepts either a locally downloaded vendor artifact or its direct HTTPS URL, an explicit version when the artifact does not identify itself, and an optional publisher SHA-256. PacSmith verifies a supplied checksum during the download and again at the server import boundary. The artifact then follows the same inspection, configuration carry-forward, review, build, and repository workflow as an automatically discovered release. A submitted URL records acquisition provenance without changing Manual monitoring into Direct URL monitoring.
-
-That is the difference between "I converted a `.deb` once" and "I can actually live without the AUR." The first is a weekend script. The second is why PacSmith exists.
-
-Update checks can run on demand or on pacsmithd's schedule. An optional tray helper badges available updates. One retention setting chooses how many completed versions to keep behind each package's oldest active distribution pointer. Stable is the boundary when it has a published version; otherwise Unstable is. After each scheduled library-wide update check, PacSmith cleans up every excess older version's source artifact and built packages together while preserving the entire Stable-to-Unstable rollout window, and trims each project's history to its 100 newest entries. Manual imports and on-demand checks do not apply version retention. Repository HTTP listening does not control these internal pointers.
-
-Deleting a release or project also removes its unreferenced source and build artifacts and abandoned build workspaces. Shared artifacts and repository packages remain while referenced; active project jobs must finish before deletion. The daemon sweeps leftovers on startup and hourly, independently of update settings, with a 24-hour grace period for unattached uploads. Clients remove deleted release caches and prune stale cache entries when refreshing the library. Cleanup errors are reported and retried. The older local library under `~/.local/share/pacsmith/projects` is separate and is not removed by server cleanup.
-
-### In-app AI through ACP
-
-`pacsmithd` launches ACP agents on the server over stdio and provides an in-app conversation with streaming responses, tool activity, approvals, model controls, cancellation, and saved conversations. In **Settings → AI Harness**, choose **Browse ACP registry** to select an agent’s declared npm or uvx distribution (the required runner downloads it on first use), or enter an installed ACP executable with one argument per line. Context is sent through ACP; do not use `{prompt}` or a terminal launcher. Configure and authenticate the agent once on the server; all authorized clients use the same harness for chats and automatic reviews. The executable and any npm/uvx runner must be available on the server.
-
-Use the sliders icon beside the configured agent to set its provider-specific model, reasoning effort, fast mode, and other advertised options. Choices and descriptions come from the agent, including changes caused by selecting another model. Accepted changes save automatically and apply to new chats and automatic reviews. The conversation settings button adjusts the current session; resuming a chat preserves its session settings. Codex remains in Ask for approval mode, so that fixed mode is hidden. Approval requests appear on every connected client with the choices offered by the agent. Any authorized client may answer; the first response resolves the request atomically, and other clients dismiss it. Reconnecting clients retrieve still-pending requests. For Codex PacSmith tool calls, **Allow for this session** survives resuming that conversation, and **Always allow** persists for the same tool, agent, and library across new conversations and app restarts. Agent settings includes a reset for remembered tool permissions. Other tools and providers control their own permission scope.
-
-The transcript shows message bubbles and compact tool activity. Each tool call updates one row, with an outlined wrench icon on the left throughout and a spinner on the right while it runs. Tool output is available under **Show details**. Saved conversations retain these entries, and can be viewed from any client.
-
-Paste screenshots into the composer with **Ctrl+V**, drag in image files, or use the image icon beside the message field. The stacked image and sliders icons sit beside the composer. The sliders icon opens conversation settings; **New chat** is at the top of the pane. A compact arrow inside the composer sends the message and becomes a stop button while the agent is working. All resizable panes share a visible grip and wider drag area. The AI pane has no title strip or tab bar; the Ask AI toggle shows or hides it without cancelling work. PNG, JPEG, GIF, and WebP are supported, with up to four images per message and a 10 MB limit per image. Preview and remove attachments before sending. Agents must advertise ACP image support; unsupported images and the question remain in the draft. Drafts and sent screenshots are saved privately with the conversation. Sent images appear inside their message bubbles, including after reopening the chat; click an image for a larger preview.
-
-The registry is fetched from the official ACP endpoint with refresh and a three-hour local cache; cached entries remain usable when offline. Like CareerShopper, PacSmith supports registry entries with npm/npx or uvx distributions. Entries requiring another distribution show setup guidance. Registry profiles retain the selected agent ID, version, arguments, and environment; Codex isolation settings always take precedence.
-
-Codex gets a dedicated home under the server's `$XDG_DATA_HOME/pacsmith/server/ai/codex-home`. Only the server user's login credential file is shared with personal Codex; personal conversations and configuration are not imported. Shared conversation history, agent session IDs, permission decisions, and harness configuration live in the server database. **Ask AI** reopens the latest conversation for the selected package. **New chat** creates a separate conversation. Closing a client does not stop an agent. Drafts and screenshot caches remain local; sent messages and screenshots are shared through the server. Existing desktop-only histories remain in their original local files.
-
-On first upgrade, the daemon imports an ACP harness already configured on the server host if its shared configuration is still empty. Remote client profiles and credentials are not copied. After a daemon restart, pending approvals from terminated agents are invalidated, and manual conversations can be resumed by sending another message. Automatic reviews are recovered by the server.
-
-The portable Agent Plugins 1.0 bundle remains available for external clients:
-
-- `pacsmith mcp` runs a stdio MCP server using the exact same configured local Unix-socket or remote HTTPS/mTLS library connection as the CLI and GUI.
-- `pacsmith plugin path` prints the Agent Plugin directory containing `plugin.json`, `mcp.json`, and the PacSmith Agent Skill.
-- `pacsmith skill install` also copies the Skill into the cross-harness user directory `~/.agents/skills/pacsmith` for clients that discover standalone Skills; `pacsmith skill path` prints the active Skill directory.
-
-`make install` installs the bundle and the shared standalone Skill. A Skill is guidance, not permission to execute an MCP server. Agents prefer MCP when it is available and may use documented PacSmith CLI commands when it is not. If a task needs MCP-only functionality, the agent asks whether you want the integration installed; after approval, the harness uses its native Agent Plugin or MCP installation control with the directory from `pacsmith plugin path`. Agents must not bypass MCP or the CLI through Unix sockets, D-Bus, daemon control, direct HTTP, database access, or PacSmith storage.
-
-MCP exposes typed PacSmith reads and ordinary domain edits: project/release evidence, inspected dependency mappings, explicit Arch runtime dependencies, package description/homepage/licenses/compatibility relations, payload rules, lifecycle state, AppRun, launchers, desktop entries and icons, deterministic update checks and update sources, vendor APT/RPM signing-key import, Guided/Custom mode, PKGBUILD and support files, builds/jobs/logs/artifacts, project and global repository state, library update/retention policy, repository signing, local-admin remote enrollment, the GitHub credential, this client's tray/login preferences, and the shared server AI harness edited in the GUI. `import_artifact` submits a local manual release to an existing project; `import_direct_url` does the same from a first-party HTTPS URL. Both accept an explicit version and publisher SHA-256. `check_updates` accepts an optional project and checks every project when omitted. `import_repository_signing_key` downloads and validates a first-party OpenPGP key after the MCP host authorizes the destructive tool call, then records its fingerprint while pinning it. The harness is managed with `get_ai_harness`, `set_ai_harness`, and `clear_ai_harness`; executable and arguments remain separate values and are never evaluated by a shell. MCP has no generic internal-state mutation tool and no setting that only an agent can edit.
-
-Agents inspect package contents through PacSmith itself: `get_payload` supplies the complete inventory and `get_payload_file_inspection` supplies metadata, hashes, bounded text, and static ELF details for an exact member. This works through local and remote connections without exporting or unpacking the vendor package in the harness workspace.
-
-`get_release_issues` is the structured completion check. It reports every current dependency, payload, lifecycle, AppRun, launcher, desktop-entry, and icon review item with a remediation, alongside build status. Its `maintenance_complete` result requires both a clear review and a retained successful build. Agents are instructed to call it before building and again before claiming completion: a successful build or repository publication does not make unresolved review evidence disappear.
-
-The running GUI watches its client settings file and subscribes to authenticated daemon change events. Projects, releases, jobs, repository state, library policy, credentials, listeners, enrollments, and clients changed through MCP or another remote client update live. `pacsmithd` owns scheduled and manual APT, RPM, Direct URL, and GitHub checks plus their downloads, preparation, and review-free builds, so this work continues with every client closed. AI settings and approval state come from the server; tray/login preferences remain local. Unsaved GUI drafts are preserved and must be explicitly reloaded before they can be replaced or saved.
-
-Custom support files are also directly manageable by a person with `pacsmith custom-file <project> list|read|write|delete`; MCP uses the same release-file API and validation.
-
-Routine recipe edits, including Custom PKGBUILD writes, are ordinary MCP work. Custom recipes execute only inside PacSmith's rootless Podman build environment. Destructive deletion, release-reset reanalysis, published/global repository and signing changes, vendor APT/RPM signing-key trust, library automation/retention changes, login-autostart changes, remote-listener/client trust, and credential changes are marked destructive for the MCP host's permission UI. PacSmith does not issue a second confirmation after the host authorizes the tool, so a host-level “always allow” decision is respected. MCP exposes repository bootstrap scripts only as text for review; it does not execute them, change pacman trust, enable a repository on the machine, or install packages.
-
-All mutating project/release tools use the display/package name and release version shown by `list_projects`, not opaque database IDs. This keeps host permission prompts understandable. Read tools can continue using stable IDs without presenting an approval prompt.
-
-Settings and package configuration save automatically: choices save when changed, text fields when editing finishes, and script editors after a short typing pause. Validation errors remain visible; lifecycle scripts still require explicit approval after saving.
-
-For an imported Arch package, Configuration → Scripts shows the existing `.INSTALL` alongside the output script. **Approve and Use Original Script** copies and approves the unchanged original, retaining its helper functions and shell behavior. This path uses syntax-only validation and requires an exact match to the imported Arch script; edited or foreign scripts use PacSmith's authored-script policy. Approval is tied to the exact output contents. The Arch handling dropdown only records responsibility decisions and does not copy scripts.
-
-Automatic AI update resolution uses the server harness in **Settings → AI Harness**. Prepared updates that need judgment run as shared server conversations without opening the main window or requiring a desktop session. They wait when no agent is configured, or when permission is required. Any connected client can display the conversation and answer pending approvals.
-
-Guided mode remains intentionally finite. Use it for PacSmith's structured package metadata, dependency, payload, layout, launcher, AppRun, desktop, lifecycle, and update controls. The Dependencies page can add an explicit Arch runtime package when static evidence shows an undeclared, unbundled requirement. AppImages are treated as bundled runtimes first; PacSmith does not turn every transitive host library used by an optional plugin into a dependency. Use Custom PKGBUILD for arbitrary Bash or filesystem logic. Custom recipes should source `pacsmith.vars` and use `_PACSMITH_*` values so deterministic automatic updates keep working.
-
-### One library, many machines
-
-The conversion workbench is a client. The library is a server.
-
-`pacsmithd` owns projects, reviewed recipes, vendor artifacts, and built packages. The GUI and CLI talk to that daemon; they do not keep their own copy of the library. On the machine that holds the library, that is a Unix socket. Turn remote listening on, and other computers enroll over HTTPS with mTLS and use the same library.
-
-That is a major part of the product, not a networking extra. Inspect a vendor artifact once. Keep the PKGBUILD, desktop entries, icon, and dependency mappings in one place. Build on the library host. Any enrolled machine can open those projects and install the packages that already exist. Machines that only need packages do not need to enroll at all; they can use the library's [signed pacman repository](#publish-your-own-pacman-repository). You are not copying `~/pacsmith` folders around, and you are not repeating the workbench on every box.
-
-Remote access is off until you enable it on the library host. Local management stays the default. See [Using PacSmith](#using-pacsmith) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-### Publish your own pacman repository
-
-The library host can serve completed builds as an ordinary pacman repository. Repository consumers do not run PacSmith, connect to the management API, or enroll as library clients. They use pacman normally after installing the PacSmith keyring and repository configuration.
-
-Repository publication and automatic soak promotion are project-wide, opt-out policies. Projects participate by default, including projects imported before the repository or Stable channel is enabled. Enabling the repository makes the latest successful retained builds available through `unstable`; future successful builds are published automatically. When the system-wide `stable` channel is enabled, projects automatically promote after the library's soak period. A project can explicitly disable publication, choose manual-only promotion, or override the soak duration. Turning a global feature off does not change those project preferences. Upgrades enable publication for existing projects with no saved repository policy and preserve saved project choices. PacSmith maintains signed `pacsmith.db` and `pacsmith.files` databases for each architecture and includes architecture-independent packages where pacman expects them.
-
-| Channel | Intended use | How it changes |
-| --- | --- | --- |
-| `unstable` | Immediate testing of the newest successful build | Updated as soon as an opted-in project produces a publishable package |
-| `stable` | Optional system-wide channel for machines that should receive promoted releases | Updated manually, or after the version's soak period when automatic promotion is enabled for the project |
-
-When a project enables automatic promotion, each upstream version has its own soak timer. The library-wide duration is the default, and a project may override it without changing other projects. Changing either duration recalculates an active inherited timer from its original start rather than restarting it. Rebuilding the same upstream version resets only that version's timer; a newer release does not restart an older release's soak. When candidates become eligible, PacSmith promotes the newest version that advances stable. Automatic promotion never downgrades stable. The project Repository page shows the version in each enabled channel and the remaining soak time on unstable.
-
-Package names can retain the generated Arch name, receive a library-wide prefix such as `pacsmith-`, or use a per-project override. The prefix is useful when repository packages might otherwise collide with names from the official repositories. Changing a name after publication is a package migration, so PacSmith keeps the originally published name visible and warns before the change.
-
-#### Signing and trust
-
-PacSmith generates a dedicated OpenPGP repository signing key on the library server. Its private key never leaves `pacsmithd`. Packages, repository databases, and the generated `pacsmith-keyring` package are signed; the keyring package is published in both channels.
-
-Two trust models are available:
-
-- **Direct trust** trusts the PacSmith repository signing key itself. This is the default and the simplest choice for a personal library.
-- **Root-certified trust** lets an administrator-owned OpenPGP root key certify PacSmith's operational signing key. The root private key stays offline: upload the root public key, download PacSmith's public key, certify it on the trusted machine, and upload the certified public key. PacSmith verifies both the key identity and certification before accepting it.
-
-Changing repository trust material produces a new keyring package. Bootstrap scripts pin the expected signing and, when configured, root fingerprints; they stop instead of installing key material that does not match.
-
-#### Configure and use the repository
-
-The repository listener is disabled by default. Its initial configuration binds only to `127.0.0.1` on port `8080`, and the default stable soak period is 30 days.
-
-On the library host:
-
-1. Open **Settings → Repository → Network**, choose the listen interfaces and port, enable the HTTP listener, and apply the network changes.
-2. Under **Publication**, optionally add the system-wide Stable channel. Its default soak duration appears only when Stable exists; projects can inherit or override it. The optional package-name prefix applies independently.
-3. Under **Signing and trust**, initialize signing and choose direct or root-certified trust.
-4. Under **Client setup**, set the advertised URL that client machines can actually reach, choose `stable` or `unstable`, and copy the bootstrap script.
-5. Open a project, go to its **Repository** page, enable publication, save, and build the package.
-
-The advertised URL is written into the client configuration as pacman's `Server`. It should be the address consuming machines actually use, which may be a reverse-proxied HTTPS URL rather than the listener's bind address.
-
-Review the bootstrap script and deliver it through a channel you already trust, such as configuration management or a provisioned system image. It installs the PacSmith keyring files, configures pacman with `SigLevel = Required TrustedOnly`, verifies the expected fingerprints, and adds `/etc/pacman.d/pacsmith`. It must run as root because it writes pacman's system configuration and keyring.
-
-The repository listener is separate from the mTLS management listener used by enrolled PacSmith clients. The pacman repository protocol does not use client enrollment or authentication; OpenPGP signatures establish package and repository authenticity. If repository downloads should be restricted, expose the listener only on a trusted private network such as a LAN, Tailscale, WireGuard, or similar network. Do not publish it directly to the public Internet.
-
-## How the trust chain works
-
-```text
-developer → developer's own package → persistent local project
-                → editable PKGBUILD → Guided host build or Custom rootless Podman build
-                    ├→ explicit privileged pacman -U
-                    └→ signed unstable → soak/manual promotion
-                                         → signed stable → pacman clients
+# To return that client to its own local library:
+pacsmith connect local
 ```
 
-Imported packages are untrusted data, even when they come from a known developer. PacSmith never executes an imported binary, shared object, or Debian/RPM maintainer script during analysis. Guided `makepkg` runs as the daemon user. Custom PKGBUILDs and their declared build dependencies run inside rootless Podman. Only an explicit Install action elevates, and it runs one constrained `pacman -U` command.
+Compare the client's server verification code with the identity shown by `pacsmith server info` before trusting it. Enrollment pins that identity and uses HTTPS with mutual TLS. Client approvals and revocations are administered through the library host's local Unix connection. Choosing remote mode stops and disables that client's local daemon. The remote library host runs the builds; installation and installed-package queries remain local to each client.
 
-Signed APT and RPM checks do not trust HTTPS alone. A project-local public key and a pinned signer fingerprint are required. GitHub tracking records a publisher `sha256:` digest when GitHub provides one, always hashes the downloaded bytes, and marks releases without a publisher digest as unsigned.
+The GUI subscribes to server change events for projects, releases, jobs, settings, credentials, and approvals. Unsaved drafts are preserved when another client changes a project; reload before saving over the newer version.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the client/server architecture, artifact analysis, and update trust flows. The repository keeps those programs in separate trees: `client/` is the C++/Qt GUI and CLI, `server/` is `pacsmithd`.
+For a library that should run before login or after logout, the administrator can enable systemd user lingering for its account with `loginctl enable-linger <user>`. Installers do not enable lingering automatically.
 
-## Using PacSmith
+## Publish your own pacman repository
 
-The GUI is the main workbench. New projects can start from **GitHub Link…**, **Package File…**, **Direct Download URL…**, **Ubuntu PPA…**, **APT Repository…**, or **RPM Repository…**. Supported files and links can also be dropped onto the window.
+The library can serve completed builds through signed pacman repositories. Consumer machines need pacman's repository configuration and signing trust; they do not need PacSmith or management enrollment.
 
-For a PPA, choose **New → Ubuntu PPA…** and enter the PPA (such as `ppa:ubuntugis/ubuntugis-unstable`) and package name (such as `grass-core`). PacSmith discovers the repository and signing fingerprint from Launchpad, offers the Ubuntu releases publishing that package for your architecture, and opens the normal signing-key review. The focused query avoids fetching every package and architecture in a large PPA. The downloaded key must match Launchpad's fingerprint; the package is then verified against signed APT metadata and configured for signed updates. Imported DEBs still undergo Arch dependency and package review. MCP provides `resolve_ppa` for package discovery and `import_ppa_package` for acquisition; the import requires host authorization because it pins a signing key.
+| Channel | Purpose |
+| --- | --- |
+| `unstable` | New successful builds from participating projects |
+| `stable` | Optional library-wide channel, advanced manually or after each version's configured soak period |
 
-Each application becomes a library project with a dashboard (project info, version history, update configuration) and a numbered setup workbench that ends at PKGBUILD and Build. The package list shows install state: not installed, current, or update available. The **Ask AI** button, marked with AI sparkles, stays to the right of the Local/Remote connection button on the main and build configuration screens, with **Ctrl+Shift+Space** as a shortcut. The button stays pressed while the pane is open; click it again to hide the pane. Opening it focuses the message field without sending anything. **Enter** sends your message; **Shift+Enter** inserts a new line. Tool activity uses an outlined wrench icon in the transcript. Screen context is supplied automatically with each question; there is no context field to fill in. Each question includes the current screen and selected project/release context; the agent reads further evidence through MCP.
+Project publication and automatic soak promotion are opt-out policies. Projects participate by default, while the repository HTTP listener is disabled until configured. Enabling the repository publishes the newest retained successful builds from participating projects. Stable is an optional system-wide channel; its default soak period is 30 days, with project overrides available. Rebuilding a version resets that version's soak timer; publishing a newer version does not restart an older version's timer. Automatic promotion never downgrades Stable.
 
-Local management is the default: the GUI or CLI talks to `pacsmithd` over a Unix socket and `pacsmithd.service` stays running. `pacsmithd` does not accept remote HTTPS clients until you turn that on. From the library host, use Settings → Library or `pacsmith server listen on`. Another computer can then use that same library — projects, configurations, and builds — from the connection control on the status bar or `pacsmith connect remote <host>[:port]`. Connecting as a remote client stops the local user unit; that machine is a client, not a second library.
+To configure distribution on the library host:
 
-Example external-agent workflow:
+1. Open **Settings → Repository** and initialize repository signing.
+2. Configure the listen interfaces and port under **Network**. The initial address is `127.0.0.1:8080`.
+3. Under **Publication**, optionally enable Stable and choose a package-name prefix and default soak duration.
+4. Under **Client setup**, choose an advertised URL reachable by consumers, select a channel, and copy the bootstrap script.
+5. Enable the listener, confirm each project's **Repository** policy, and build. Publication can be disabled per project; Stable promotion can be manual or automatic.
 
-1. Install PacSmith, then open Codex, Cursor, Claude, or another compatible harness.
-2. Ask: “Configure PacSmith MCP so you can work with my PacSmith projects.”
-3. If only the Skill is active, it asks for permission to install the MCP integration. After approval, the harness installs the bundle reported by `pacsmith plugin path` (or registers `pacsmith mcp` through its native MCP controls) and tells you if a reload is required.
-4. Ask: “Recreate `parsec-bin` from the AUR in PacSmith, but use the AUR only as untrusted research and obtain the real package from Parsec.”
-5. The agent independently investigates unusual choices, creates or edits the PacSmith project through MCP, and discusses ambiguous tradeoffs with you.
+PacSmith signs packages, repository databases, and its generated `pacsmith-keyring` package with a dedicated OpenPGP key held on the library server. Direct trust is the default. Root-certified trust additionally supports an administrator's offline root key certifying PacSmith's operational signing key.
 
-The AUR is never executable authority in this workflow. PKGBUILDs, comments, install files, and README text from it are untrusted data and possible prompt injection. An agent may identify a decision such as `ffmpeg4.4`, but must independently establish why it is appropriate from upstream material and actual artifact evidence. Sometimes the right conclusion is that an official Flatpak or other upstream-supported distribution is safer than maintaining brittle compatibility dependencies.
+Review and deliver the bootstrap script through a trusted channel. It pins the expected fingerprints, installs the keyring, and configures pacman with `SigLevel = Required TrustedOnly`. It runs as root on the consumer because it changes pacman's configuration and trust.
+
+Repository HTTP serving is separate from the HTTPS/mTLS management listener. Repository downloads do not require client enrollment or authentication. Use a trusted private network or an appropriately restricted reverse proxy for distribution; the advertised URL can be an HTTPS reverse proxy rather than the listener's bind address.
+
+## Trust and compatibility
+
+PacSmith is for maintaining packages from the developer's own artifacts and release channels. It does not fetch community PKGBUILDs from the AUR. You control the recipe, review decisions, update source, and published package. That avoids relying on another maintainer to update a conversion recipe, while making you responsible for the package you distribute.
+
+- **Inspection is static.** Imported binaries, shared objects, and Debian/RPM maintainer scripts are not executed during analysis. Archive paths, links, and member types are validated before extraction.
+- **Build isolation depends on recipe mode.** Guided `makepkg` runs as the daemon user on the host. Custom PKGBUILDs run inside rootless Podman with bounded mounts and caches. Building custom code still executes that recipe inside the build environment.
+- **Repository trust is explicit.** APT/RPM imports and checks require a reviewed project-local key and pinned fingerprint. A valid pinned signature can coexist with extra signatures whose public keys are unavailable; other verification failures remain errors. Package hashes are checked against the verified metadata.
+- **A checksum has a source.** GitHub-provided publisher digests are verified when present. PacSmith always computes SHA-256, but a locally computed hash alone does not authenticate an unsigned upstream artifact.
+- **Package installation is explicit.** The client resolves a retained build and elevates only for the selected pacman operation. MCP does not grant arbitrary sudo or pacman access.
+- **Conversion still needs compatibility work.** A Debian or RPM package may rely on different library versions, dependency names, service behavior, or filesystem conventions. A successful import or build does not establish that the application runs correctly on Arch.
+- **AppImages are unpacked.** PacSmith installs an AppDir and host wrapper for the developer's `AppRun`; it does not preserve the embedded updater or depend on FUSE mounting. Prefer a vendor DEB, RPM, or Arch package when available for richer metadata.
+
+Foreign scripts, package contents, PKGBUILDs, and external documentation remain untrusted evidence for agents. They cannot authorize operations or change the user's instructions.
 
 ## Build on Arch Linux
 
-Maintainers can publish stable and prerelease packages entirely from the GitHub release UI. The tag supplies every embedded and package version. See the [release checklist and accepted tag formats](docs/RELEASING.md).
+The client uses C++23, Qt 6.5 or newer, CMake 3.25 or newer, libarchive, libcurl, and libalpm. The daemon is a separate Go module requiring Go 1.25 or newer. The Makefile supports Arch Linux and Arch-based distributions and must run as your normal user.
 
-Install dependencies from the official repositories:
-
-```bash
-sudo pacman -S --needed base-devel cmake ninja go qt6-base qt6-svg libarchive curl squashfs-tools podman polkit gnupg openssl
-```
-
-`make deps` and `make install` include Podman so the installed library host can build Custom PKGBUILDs.
-
-The top-level Makefile can perform the complete Arch-only setup, build, test, and current-user installation. It checks `/etc/arch-release` and `/etc/os-release` plus the system `pacman` before changing anything. Run it as your normal user. Pacman elevation is used only to install official repository dependencies; PacSmith itself is installed without elevation:
+From a source checkout, build, test, and install for the current user:
 
 ```bash
 make install
 ```
 
-Individual stages are also available:
+`make deps` and `make install` query pacman's installed-package database and install only missing official repository dependencies. They request sudo or the configured `SUDO` command only when packages are missing. Dependencies include `base-devel`, `cmake`, `ninja`, `go`, `qt6-base`, `qt6-svg`, `libarchive`, `curl`, `squashfs-tools`, `podman`, `polkit`, `gnupg`, and `openssl`.
+
+Individual stages are available:
 
 ```bash
 make deps
@@ -330,77 +259,30 @@ make test
 make uninstall
 ```
 
-The development prefix is `~/.local`. Executables go to `~/.local/bin`, desktop integration to `~/.local/share/applications`, the portable Agent Plugin to `~/.local/share/pacsmith/agent-plugin`, and the library daemon unit to `~/.local/share/systemd/user`. `make install` also installs the standalone Agent Skill at `~/.agents/skills/pacsmith` and restarts `pacsmithd.service` when it is already running. The first local client launch enables and starts an inactive daemon. The packaged install path is the Arch package from GitHub releases, which ships the same user unit under `/usr/lib/systemd/user`; package upgrades restart active PacSmith user daemons, while package-manager installs can activate the user-level Skill with `pacsmith skill install`. Harness installation remains an explicit user-approved action.
+The default prefix is `~/.local`; executables go to `~/.local/bin`. Add that directory to `PATH` if needed. `make install` installs desktop integration, the daemon user unit, portable Agent Plugin, and shared user Skill, and restarts an already running daemon. `SUDO=doas`, `PREFIX=/another/user/writable/prefix`, `BUILD_DIR=build`, and `BUILD_TYPE=Debug` are supported overrides.
 
-`make uninstall` removes the files recorded by the last install and the PacSmith-managed user Skill. It refuses to remove an unmanaged `~/.agents/skills/pacsmith` directory. It does not delete the legacy library under `~/.local/share/pacsmith/projects` or new server data under `~/.local/share/pacsmith/server`.
-
-`SUDO=doas` may be supplied on systems using `doas` instead of `sudo`. `PREFIX=/another/user/writable/prefix` can override the installation location.
-If `~/.local/bin` is not already on the shell's `PATH`, add it or launch `~/.local/bin/pacsmith-gui` directly.
-
-Build and test:
+For a direct CMake build after installing the dependencies:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-```
-
-AddressSanitizer and UndefinedBehaviorSanitizer can be enabled together:
-
-```bash
-cmake -S . -B build-asan -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug -DPACSMITH_SANITIZERS=ON
-cmake --build build-asan
-```
-
-Run directly from the build tree:
-
-```bash
+./build/pacsmith --help
 ./build/pacsmithd --version
-./build/pacsmith add /path/to/vendor-package.deb
-./build/pacsmith add /path/to/vendor-tool.tar.gz
-./build/pacsmith add https://github.com/owner/project --asset-regex 'project-.*-linux-x86_64\.tar\.gz'
-./build/pacsmith add apt https://vendor.example/debian stable main amd64 vendor-package https://vendor.example/signing-key.gpg
-./build/pacsmith add rpm https://vendor.example/rpm/x86_64 x86_64 vendor-package https://vendor.example/signing-key.asc
-./build/pacsmith list
-./build/pacsmith versions <project-id>
-./build/pacsmith info <project-id>
-./build/pacsmith check <project-id>
-./build/pacsmith build <project-id>
-./build/pacsmith mcp --help
-./build/pacsmith plugin path
-./build/pacsmith skill install
-./build/pacsmith skill path
-./build/pacsmith rollback <project-id> <release-id-or-version>
-./build/pacsmith uninstall <project-id>
-./build/pacsmith-gui --import /path/to/vendor-package.deb
-./build/pacsmith-gui --import https://github.com/owner/project/releases/latest
+./build/pacsmith-gui
 ```
 
-Direct CMake builds also default to the current user's `~/.local` prefix. An explicit `-DCMAKE_INSTALL_PREFIX=...` remains available for packagers and staging builds.
+Direct CMake builds also default to `~/.local`; packagers can set `-DCMAKE_INSTALL_PREFIX`. Enable AddressSanitizer and UndefinedBehaviorSanitizer with `-DPACSMITH_SANITIZERS=ON` in a separate build directory.
 
-## Security model
+`make uninstall` removes files recorded by the last installation and the PacSmith-managed user Skill. It leaves server data and the older `~/.local/share/pacsmith/projects` library intact. Current clients do not migrate or modify that legacy library.
 
-- PacSmith never executes an imported binary, shared object, or maintainer script during analysis.
-- Original maintainer scripts remain untrusted evidence. Acknowledgment records a content fingerprint, never permission to execute the Debian or RPM script.
-- Archive member paths are normalized; traversal, absolute paths, duplicate members, special device entries, unsafe hard links, and escaping symlinks are rejected.
-- External processes use `QProcess` with explicit argument lists — never `/bin/sh -c` with imported values.
-- Guided `makepkg` runs in a disposable workspace as the daemon user. Custom PKGBUILDs run as a container user under rootless Podman with bounded mounts and project-scoped source/compiler caches.
-- Only an explicit Install action runs `/usr/bin/pkexec /usr/bin/pacman --noconfirm -U -- <absolute-package-path>`.
-- APT source files and repository keyrings are flagged and excluded from generated packages unless explicitly retained. Repository checks require a trusted project-local key and a pinned signer fingerprint.
-- Published packages and repository databases are OpenPGP-signed. Bootstrap scripts pin the expected key fingerprints and configure pacman to require trusted signatures.
-- MCP agents have only ordinary PacSmith domain operations. Sensitive destructive, system, trust, credential, automation, and published-repository changes require PacSmith-enforced interactive confirmation and fail closed without it.
-- PKGBUILD validation is intentionally static and does not source or execute the file.
+Official release versions come from Git tags. Publishing a GitHub release runs the Arch x86_64 packaging workflow, including the test suite, and attaches the package and `SHA256SUMS`. See [Releasing PacSmith](docs/RELEASING.md) for accepted stable/prerelease tags and the release procedure.
 
-AppImage import is static decomposition: PacSmith unpacks the SquashFS payload, installs an intact AppDir under `/opt`, and generates a host wrapper that runs the developer's `AppRun`. It does not execute the AppImage, preserve its embedded updater, or mount it with FUSE. Prefer a `.deb`, RPM, or Arch package when the developer offers one; those formats generally carry more useful dependencies and integration metadata.
+## Project documentation
 
-## Persistent projects
-
-`pacsmithd` owns projects and releases in its SQLite library plus content-addressed artifact storage. Clients never edit that storage directly; local and remote clients use the same HTTP API. Old `$XDG_DATA_HOME/pacsmith/projects` trees remain untouched as legacy data.
-
-Guided configuration is release-owned structured state. A Custom PKGBUILD and explicitly owned text support files are copied verbatim into the next applicable release; they are never regenerated or shell-merged. PacSmith-owned source artifacts, inspection results, build outputs, and logs are not copied. `pacsmith.vars` is regenerated for every release from the current version, architecture, verified artifact filename, and checksum. Editing a new release never changes its historical predecessor.
-
-Generated packages include pacman xdata linking the installed package to its PacSmith project, immutable release, acquisition identity, artifact type, and source SHA256. PacSmith can therefore identify managed packages even if the local project files are later missing.
+- [Architecture](docs/ARCHITECTURE.md): library ownership, local/remote connections, artifact storage, build execution, repository signing, and update trust.
+- [Implementation notes](docs/IMPLEMENTATION.md): agent integration, review behavior, persistence, and background work.
+- [Release guide](docs/RELEASING.md): versioning and GitHub release packaging.
 
 ## License
 
