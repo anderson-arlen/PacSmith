@@ -655,6 +655,36 @@ void CoreTests::reportsInstalledUpdateStatus() {
     QVERIFY(!project.hasAvailableUpdate());
 }
 
+void CoreTests::reportsStableSuccessorOfGitHubPrerelease() {
+    pacsmith::PackageRelease preview;
+    preview.id = QStringLiteral("preview");
+    preview.debian.version = QStringLiteral("0.1.0_rc.4");
+    preview.sourceType = pacsmith::SourcePackageType::ArchPackage;
+    preview.acquisition.kind = pacsmith::AcquisitionKind::GitHubRelease;
+    preview.acquisition.githubPrerelease = true;
+    auto stable = preview;
+    stable.id = QStringLiteral("stable");
+    stable.debian.version = QStringLiteral("0.1.0");
+    stable.acquisition.githubPrerelease = false;
+
+    pacsmith::Project project;
+    project.releases = {preview, stable};
+    project.installedReleaseId = preview.id;
+    project.installedVersion = QStringLiteral("0.1.0_rc.4-1");
+    QCOMPARE(pacsmith::compareReleaseVersions(stable, preview), 1);
+    QCOMPARE(pacsmith::compareReleaseVersions(preview, stable), -1);
+    QCOMPARE(project.newestRelease()->id, stable.id);
+    QVERIFY(project.hasAvailableUpdate());
+    const auto &readOnlyProject = project;
+    QCOMPARE(readOnlyProject.newestRelease()->id, stable.id);
+
+    project.installedReleaseId = stable.id;
+    project.installedVersion = QStringLiteral("0.1.0-1");
+    QVERIFY(!project.hasAvailableUpdate());
+    preview.debian.version = QStringLiteral("0.2.0_rc.1");
+    QVERIFY(pacsmith::compareReleaseVersions(preview, stable) > 0);
+}
+
 void CoreTests::selectsPacsmithBuildArtifactInsteadOfImportedSource() {
     pacsmith::PackageRelease release;
     release.archPackageName = QStringLiteral("vendor-tool");

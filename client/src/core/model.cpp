@@ -1192,8 +1192,8 @@ bool Project::hasAvailableUpdate() const {
     if (installedVendorVersion.isEmpty()) return false;
     return std::any_of(releases.cbegin(), releases.cend(), [&](const auto &candidate) {
         if (candidate.id == installed->id || candidate.debian.version.isEmpty()) return false;
-        return comparePackageVersions(candidate.sourceType, candidate.debian.version,
-                                      installedVendorVersion) > 0;
+        const auto version = compareReleaseVersions(candidate, *installed);
+        return version > 0;
     });
 }
 
@@ -1519,6 +1519,18 @@ int comparePackageVersions(const SourcePackageType sourceType,
 }
 
 int compareReleaseVersions(const PackageRelease &left, const PackageRelease &right) {
+    if (left.acquisition.kind == AcquisitionKind::GitHubRelease &&
+        right.acquisition.kind == AcquisitionKind::GitHubRelease &&
+        left.acquisition.githubPrerelease != right.acquisition.githubPrerelease) {
+        // Normalized tags such as 0.1.0_rc.4 sort above the final package version.
+        // GitHub's release stage identifies the stable successor of that same core.
+        static const QRegularExpression core(QStringLiteral(R"([0-9]+(?:\.[0-9]+)+)"));
+        const auto leftCore = core.match(left.debian.version).captured();
+        const auto rightCore = core.match(right.debian.version).captured();
+        if (!leftCore.isEmpty() && leftCore == rightCore) {
+            return left.acquisition.githubPrerelease ? -1 : 1;
+        }
+    }
     const auto type = left.sourceType == SourcePackageType::Rpm ||
                       right.sourceType == SourcePackageType::Rpm
         ? SourcePackageType::Rpm : left.sourceType;

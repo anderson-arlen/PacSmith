@@ -432,13 +432,17 @@ func (s *Service) checkGitHub(ctx context.Context, target checkTarget, log func(
 		return Result{}, fmt.Errorf("GitHub owner and repository must be configured")
 	}
 	log("Querying GitHub releases…\n")
+	// Observations describe the latest upstream candidate, not the artifact
+	// acquired for this release. Using them here can hide an unprepared update.
+	acquisition := object(target.Release.Document["acquisition"])
 	source, err := s.GitHub.Resolve(ctx, githubapi.ResolveRequest{
 		URL:                "https://github.com/" + owner + "/" + repository,
 		AssetRegex:         stringValue(target.Update, "githubAssetRegex"),
 		IncludePrereleases: boolValue(target.Update, "githubIncludePrereleases"),
 		CurrentVersion:     target.Version,
-		CurrentReleaseID:   int64Value(target.Update, "githubReleaseId"),
-		CurrentAssetID:     int64Value(target.Update, "githubAssetId"),
+		CurrentReleaseID:   int64Value(acquisition, "githubReleaseId"),
+		CurrentAssetID:     int64Value(acquisition, "githubAssetId"),
+		CurrentPrerelease:  boolValue(acquisition, "githubPrerelease"),
 	})
 	if err != nil {
 		return Result{}, err
@@ -730,6 +734,15 @@ func activeTrackingRelease(project library.Project) *library.Release {
 }
 
 func releaseVersionCompare(left, right library.Release) int {
+	leftAcquisition := object(left.Document["acquisition"])
+	rightAcquisition := object(right.Document["acquisition"])
+	if stringValue(leftAcquisition, "kind") == "github-release" &&
+		stringValue(rightAcquisition, "kind") == "github-release" {
+		if stage := githubapi.CompareReleaseStages(left.VendorVersion, boolValue(leftAcquisition, "githubPrerelease"),
+			right.VendorVersion, boolValue(rightAcquisition, "githubPrerelease")); stage != 0 {
+			return stage
+		}
+	}
 	if left.SourceType == "rpm" || right.SourceType == "rpm" {
 		return rpmVersionCompare(left.VendorVersion, right.VendorVersion)
 	}

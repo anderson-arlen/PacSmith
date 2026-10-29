@@ -48,6 +48,7 @@ private slots:
     void selectsActiveTrackingRelease();
     void ignoresStaleClonedUpdateFailure();
     void reportsInstalledUpdateStatus();
+    void reportsStableSuccessorOfGitHubPrerelease();
     void selectsPacsmithBuildArtifactInsteadOfImportedSource();
     void deletingUpdateReleaseClearsAvailableStatus();
     void dropsUnbuiltIntermediateUpdates();

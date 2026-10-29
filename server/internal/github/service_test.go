@@ -144,6 +144,45 @@ func TestSelectReleaseTreatsDifferentAssetInSameReleaseAsUpdate(t *testing.T) {
 	}
 }
 
+func TestSelectReleasePromotesPrereleaseWithNormalizedVersion(t *testing.T) {
+	releases := []apiRelease{{ID: 20, Tag: "v0.1.0", Assets: []apiAsset{{
+		ID: 201, Name: "cephfs-mount-helper-0.1.0-1-x86_64.pkg.tar.zst",
+	}}}}
+	pattern := regexp.MustCompile(`cephfs-mount-helper-.*-x86_64\.pkg\.tar\.zst`)
+	for _, tc := range []struct {
+		name       string
+		request    ResolveRequest
+		wantUpdate bool
+	}{
+		{"legacy prerelease without provider ID", ResolveRequest{
+			CurrentVersion: "0.1.0_rc.4", CurrentPrerelease: true,
+		}, true},
+		{"prerelease with provider ID", ResolveRequest{
+			CurrentVersion: "0.1.0_rc.4", CurrentReleaseID: 10, CurrentPrerelease: true,
+		}, true},
+		{"same provider release", ResolveRequest{
+			CurrentVersion: "0.1.0_rc.4", CurrentReleaseID: 20, CurrentPrerelease: true,
+		}, false},
+		{"newer prerelease core", ResolveRequest{
+			CurrentVersion: "0.2.0_rc.4", CurrentReleaseID: 30, CurrentPrerelease: true,
+		}, false},
+		{"stable release is already current", ResolveRequest{
+			CurrentVersion: "0.1.0", CurrentReleaseID: 20,
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := selectRelease(releases, tc.request, "vendor", "tool", "",
+				pattern.String(), pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !selected.Success || selected.UpdateAvailable != tc.wantUpdate {
+				t.Fatalf("selected %+v, want update %v", selected, tc.wantUpdate)
+			}
+		})
+	}
+}
+
 func TestSelectReleaseRejectsAmbiguousAndSidecarMatches(t *testing.T) {
 	release := []apiRelease{{ID: 1, Tag: "v1.0.0", Assets: []apiAsset{
 		{ID: 1, Name: "tool_1.0.0_amd64.deb"},
@@ -188,5 +227,21 @@ func TestSelectSourceArchive(t *testing.T) {
 	if !selected.Success || selected.AssetID != 0 || selected.DetectedVersion != "2.0.0_beta" ||
 		selected.Filename != "tool-2.0.0_beta.tar.gz" || len(selected.AvailableAssets) != 2 {
 		t.Fatalf("source selection %+v", selected)
+	}
+}
+
+func TestSelectReleaseDoesNotReplaceStableWithSameCorePrerelease(t *testing.T) {
+	releases := []apiRelease{{ID: 10, Tag: "v0.1.0-rc.4", Prerelease: true,
+		Assets: []apiAsset{{ID: 101, Name: "demo.tar"}},
+	}}
+	pattern := regexp.MustCompile(`demo\.tar`)
+	selected, err := selectRelease(releases, ResolveRequest{
+		CurrentVersion: "0.1.0", CurrentReleaseID: 20,
+	}, "vendor", "demo", "", pattern.String(), pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.UpdateAvailable {
+		t.Fatalf("prerelease replaced stable release: %+v", selected)
 	}
 }

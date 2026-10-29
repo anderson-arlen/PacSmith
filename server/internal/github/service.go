@@ -360,10 +360,11 @@ func selectRelease(releases []apiRelease, request ResolveRequest, owner, reposit
 			}
 		}
 		result.UpdateAvailable = available
-		if !release.Prerelease && request.CurrentPrerelease && request.CurrentReleaseID != 0 &&
-			request.CurrentReleaseID != release.ID && numericVersionCore(request.CurrentVersion) != "" &&
-			numericVersionCore(request.CurrentVersion) == numericVersionCore(result.DetectedVersion) {
-			result.UpdateAvailable = true
+		if request.CurrentReleaseID == 0 || request.CurrentReleaseID != release.ID {
+			if stage := CompareReleaseStages(result.DetectedVersion, release.Prerelease,
+				request.CurrentVersion, request.CurrentPrerelease); stage != 0 {
+				result.UpdateAvailable = stage > 0
+			}
 		}
 		fallback := release.Prerelease && requestedTag == "" && !request.IncludePrereleases
 		if result.UpdateAvailable {
@@ -432,6 +433,19 @@ func isSidecar(name string) bool {
 
 func numericVersionCore(value string) string {
 	return regexp.MustCompile(`[0-9]+(?:\.[0-9]+)+`).FindString(value)
+}
+
+// CompareReleaseStages handles normalized tags such as 0.1.0_rc.4, whose
+// package-version ordering puts them above the final release of the same core.
+func CompareReleaseStages(left string, leftPrerelease bool, right string, rightPrerelease bool) int {
+	if leftPrerelease == rightPrerelease || numericVersionCore(left) == "" ||
+		numericVersionCore(left) != numericVersionCore(right) {
+		return 0
+	}
+	if leftPrerelease {
+		return -1
+	}
+	return 1
 }
 
 func rateLimitSuffix(response *http.Response, message string) string {

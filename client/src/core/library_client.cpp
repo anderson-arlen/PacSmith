@@ -386,10 +386,9 @@ UpdateCheckResult LibraryClient::resolveGitHub(const QUrl &url, const QString &a
                      {QStringLiteral("asset_regex"), assetRegex},
                      {QStringLiteral("include_prereleases"), includePrereleases}};
     if (current != nullptr) {
-        const auto providerRelease = current->acquisition.githubReleaseId > 0
-            ? current->acquisition.githubReleaseId : current->update.githubReleaseId;
         body.insert(QStringLiteral("current_version"), current->debian.version);
-        body.insert(QStringLiteral("current_release_id"), providerRelease);
+        body.insert(QStringLiteral("current_release_id"), current->acquisition.githubReleaseId);
+        body.insert(QStringLiteral("current_asset_id"), current->acquisition.githubAssetId);
         body.insert(QStringLiteral("current_prerelease"),
                     current->acquisition.githubPrerelease);
     }
