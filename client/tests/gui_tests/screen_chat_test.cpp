@@ -1,6 +1,7 @@
 #include "../server_ai_host.hpp"
 #include "core/acp_conversations.hpp"
 #include <QComboBox>
+#include <QCheckBox>
 #include <QScopeGuard>
 #include "gui/main_window/main_window.hpp"
 #include "gui/acp_chat_widget.hpp"
@@ -88,6 +89,121 @@ private slots:
             QVERIFY(inspected);
         }
         if (configHome.isNull()) qunsetenv("XDG_CONFIG_HOME"); else qputenv("XDG_CONFIG_HOME", configHome);
+    }
+    void agentSettingsAreSharedBetweenMenuAndChat() {
+        QTemporaryDir directory;
+        const auto dataHome = qgetenv("XDG_DATA_HOME");
+        qputenv("XDG_DATA_HOME", directory.path().toUtf8());
+        const auto restore = qScopeGuard([&] {
+            if (dataHome.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", dataHome);
+        });
+        QFile script(directory.filePath(QStringLiteral("agent.py")));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(R"PY(import json,sys
+options=[dict(id='model',name='Model',type='select',currentValue='standard',options=[dict(value='standard',name='Standard'),dict(value='deliberate',name='Deliberate')]),dict(id='fast',name='Fast',type='boolean',currentValue=False)]
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{})
+ if method=='initialize': result=dict(protocolVersion=1,agentCapabilities={})
+ elif method=='session/new': result=dict(sessionId='settings',configOptions=options)
+ elif method=='session/set_config_option':
+  next(o for o in options if o['id']==p['configId'])['currentValue']=p['value']
+  result=dict(configOptions=options)
+ else: raise Exception(method)
+ print(json.dumps(dict(jsonrpc='2.0',id=m['id'],result=result)),flush=True)
+)PY");
+        script.close();
+        HarnessProfile profile;
+        profile.name = QStringLiteral("Settings test");
+        profile.executable = QStringLiteral("/usr/bin/python3");
+        profile.arguments = {script.fileName()};
+        tests::ServerAiHost host(profile);
+        AppSettingsStore store(directory.filePath(QStringLiteral("settings")));
+        MainWindow window(store);
+        window.show();
+
+        auto withAgentSettings = [&](QPushButton *button, const std::function<void(QDialog *)> &inspect) {
+            bool inspected = false;
+            QTimer timer;
+            timer.setInterval(20);
+            connect(&timer, &QTimer::timeout, &window, [&] {
+                auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                if (!dialog || dialog->objectName() != QStringLiteral("agentSettings")) return;
+                timer.stop();
+                const auto close = qScopeGuard([dialog] { dialog->reject(); });
+                inspect(dialog);
+                inspected = true;
+            });
+            timer.start();
+            QTimer::singleShot(10000, &timer, [] {
+                if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) dialog->reject();
+            });
+            button->click();
+            QVERIFY(inspected);
+        };
+        auto fromMenu = [&](const std::function<void(QDialog *)> &inspect) {
+            QPushButton *button = nullptr;
+            for (auto *candidate : window.findChildren<QPushButton *>())
+                if (candidate->text() == QStringLiteral("Settings")) button = candidate;
+            QVERIFY(button != nullptr);
+            bool inspected = false;
+            QTimer timer;
+            timer.setInterval(20);
+            connect(&timer, &QTimer::timeout, &window, [&] {
+                auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                if (!dialog) return;
+                auto *page = dialog->findChild<QWidget *>(QStringLiteral("aiHarnessPage"));
+                if (!page || !page->isEnabled()) return;
+                timer.stop();
+                const auto close = qScopeGuard([dialog] { dialog->reject(); });
+                for (auto *tabs : dialog->findChildren<QTabWidget *>())
+                    if (tabs->indexOf(page) >= 0) tabs->setCurrentWidget(page);
+                auto *agentSettings = page->findChild<QPushButton *>(QStringLiteral("harnessAgentSettings"));
+                QVERIFY(agentSettings && agentSettings->isEnabled());
+                withAgentSettings(agentSettings, inspect);
+                inspected = true;
+            });
+            timer.start();
+            QTimer::singleShot(15000, &timer, [] {
+                if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) dialog->reject();
+            });
+            button->click();
+            QVERIFY(inspected);
+        };
+        const auto model = [](QDialog *dialog) -> QComboBox * {
+            for (auto *box : dialog->findChildren<QComboBox *>(QStringLiteral("model")))
+                if (box->isVisible() && box->isEnabled()) return box;
+            return nullptr;
+        };
+        fromMenu([&](QDialog *dialog) {
+            QTRY_VERIFY(model(dialog) != nullptr);
+            auto *box = model(dialog);
+            QCOMPARE(box->currentData().toString(), QStringLiteral("standard"));
+            box->setCurrentIndex(1); box->activated(1);
+            QTRY_COMPARE(ServerAi(host.connection).harness()->configDefaults.value(QStringLiteral("model")).toString(), QStringLiteral("deliberate"));
+        });
+        AcpChatWidget chat(profile, host.connection, QStringLiteral("shared-settings"), {});
+        chat.show();
+        QTRY_VERIFY(!chat.isBusy());
+        auto *chatSettings = chat.findChild<QPushButton *>(QStringLiteral("conversationSettings"));
+        QVERIFY(chatSettings != nullptr);
+        QCOMPARE(chatSettings->accessibleName(), QStringLiteral("Agent settings"));
+        withAgentSettings(chatSettings, [&](QDialog *dialog) {
+            QTRY_VERIFY(model(dialog) != nullptr);
+            QCOMPARE(model(dialog)->currentData().toString(), QStringLiteral("deliberate"));
+            auto *fast = dialog->findChild<QCheckBox *>(QStringLiteral("fast"));
+            QVERIFY(fast && fast->isEnabled());
+            fast->click();
+            QTRY_VERIFY(ServerAi(host.connection).harness()->configDefaults.value(QStringLiteral("fast")).toBool());
+        });
+        fromMenu([&](QDialog *dialog) {
+            QTRY_VERIFY(model(dialog) != nullptr);
+            QCOMPARE(model(dialog)->currentData().toString(), QStringLiteral("deliberate"));
+            auto *fast = dialog->findChild<QCheckBox *>(QStringLiteral("fast"));
+            QVERIFY(fast && fast->isChecked());
+        });
+        const auto snapshot = ServerAi(host.connection).request(QStringLiteral("GET"), QStringLiteral("/conversations/shared-settings"));
+        QVERIFY(snapshot);
+        QVERIFY(snapshot->value(QStringLiteral("session_id")).toString().isEmpty());
     }
     void conversationsAreSharedAndSurviveClientClosure() {
         QTemporaryDir directory;

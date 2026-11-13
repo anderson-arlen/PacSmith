@@ -19,6 +19,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 #include "gui/chat_transcript.hpp"
@@ -37,6 +38,7 @@ QString fakeAgent(const QString &directory) {
     file.write(R"PY(import json,sys,os,subprocess
 session = 'private-session'
 prompt = None
+wait_after_permission = False
 options = [{'id':'model','name':'Model','type':'select','currentValue':'test-model','options':[{'name':'Test provider','options':[{'value':'test-model','name':'Test model'},{'value':'deliberate','name':'Deliberate model'}]}]}, {'id':'reasoning','name':'Reasoning effort','type':'select','currentValue':'low','description':'How much reasoning to use.','options':[{'value':'low','name':'Low'}]}, {'id':'provider.fast','name':'Fast mode','type':'boolean','currentValue':False,'description':'Faster responses.'}]
 options.sort(key=lambda option: option['id']!='reasoning')
 if 'codex-acp' in sys.argv: options.append(dict(id='mode',name='Mode',type='select',currentValue='read-only',options=[dict(value='read-only',name='Ask for approval')]))
@@ -80,6 +82,7 @@ for line in sys.stdin:
   prompt=id
   send(dict(id='foreign',method='session/request_permission',params=dict(sessionId='personal-session',toolCall=dict(toolCallId='foreign-tool'),options=[dict(optionId='yes',kind='allow_once',name='Allow')])))
   text=params['prompt'][0]['text'].split('\n\n')[-1]
+  wait_after_permission = text=='permission-wait'
   if text=='name-session':
    assert 'set_session_description' in params['prompt'][0]['text']
    env=dict(os.environ, **{entry['name']:entry['value'] for entry in server['env']})
@@ -97,7 +100,7 @@ for line in sys.stdin:
   update('agent_message_chunk',content=dict(type='text',text='world'))
   if text=='hello-tool':
    update('tool_call',toolCallId='inspect-test',title='Inspect package',status='completed',content=[dict(type='content',content=dict(type='text',text='<b>Package details</b>'))])
-  if text in ['permission','cancel','invalid-option']:
+  if text in ['permission','permission-wait','cancel','invalid-option']:
    update('tool_call',toolCallId='tool1',title='Inspect release',rawInput=dict(server='pacsmith_session',tool='get_project'),_meta=dict(is_mcp_tool_call=True))
    send(dict(id='permission1',method='session/request_permission',params=dict(sessionId=session,toolCall=dict(toolCallId='tool1'),options=[dict(optionId='yes',kind='allow_once',name='Allow once'),dict(optionId='allow_session',kind='allow_always',name='Allow for this session'),dict(optionId='allow_always',kind='allow_always',name='Always allow'),dict(optionId='no',kind='reject_once',name='Reject')])) )
   else: reply(id,dict(stopReason='end_turn'))
@@ -107,7 +110,7 @@ for line in sys.stdin:
  elif id=='permission1':
   outcome=msg['result']['outcome']
   update('agent_message_chunk',content=dict(type='text',text=json.dumps(outcome)))
-  if outcome['outcome']=='selected': reply(prompt,dict(stopReason='end_turn'))
+  if outcome['outcome']=='selected' and not wait_after_permission: reply(prompt,dict(stopReason='end_turn'))
 )PY");
     return path;
 }
@@ -394,14 +397,9 @@ private slots:
         auto agentProfile = profile(fakeAgent(directory.path()));
         const auto requests = directory.filePath(QStringLiteral("requests.jsonl"));
         agentProfile.environment.insert(QStringLiteral("PACSMITH_TEST_REQUESTS"), requests);
-        AppSettingsStore store(directory.filePath(QStringLiteral("settings")));
-        QVERIFY(store.setHarness(agentProfile));
         tests::ServerAiHost host(agentProfile);
         {
-            pacsmith::gui::AgentSettingsDialog dialog(agentProfile, {}, [&](const QJsonObject &values, QString *error) {
-                agentProfile.configDefaults = values;
-                return store.setHarness(agentProfile, error) && ServerAi(host.connection).setHarness(agentProfile,error);
-            });
+            pacsmith::gui::AgentSettingsDialog dialog(host.connection);
             dialog.show();
             const auto combo = [&](const QString &id) -> QComboBox * {
                 for (auto *box : dialog.findChildren<QComboBox *>(id)) if (box->isVisible() && box->isEnabled()) return box;
@@ -411,21 +409,21 @@ private slots:
             auto *model = combo(QStringLiteral("model"));
             QCOMPARE(model->count(), 2);
             model->setCurrentIndex(1); model->activated(1);
-            QTRY_COMPARE(store.load().harness->configDefaults.value(QStringLiteral("model")).toString(), QStringLiteral("deliberate"));
+            QTRY_COMPARE(ServerAi(host.connection).harness()->configDefaults.value(QStringLiteral("model")).toString(), QStringLiteral("deliberate"));
             QTRY_VERIFY(combo(QStringLiteral("reasoning")) != nullptr);
             auto *reasoning = combo(QStringLiteral("reasoning"));
             QCOMPARE(reasoning->count(), 2);
             reasoning->setCurrentIndex(1); reasoning->activated(1);
-            QTRY_COMPARE(store.load().harness->configDefaults.value(QStringLiteral("reasoning")).toString(), QStringLiteral("high"));
+            QTRY_COMPARE(ServerAi(host.connection).harness()->configDefaults.value(QStringLiteral("reasoning")).toString(), QStringLiteral("high"));
             QCheckBox *fast = nullptr;
             for (auto *check : dialog.findChildren<QCheckBox *>(QStringLiteral("provider.fast"))) if (check->isVisible()) fast = check;
             QVERIFY(fast != nullptr); QTRY_VERIFY(fast->isEnabled()); fast->click();
-            QTRY_VERIFY(store.load().harness->configDefaults.value(QStringLiteral("provider.fast")).toBool());
+            QTRY_VERIFY(ServerAi(host.connection).harness()->configDefaults.value(QStringLiteral("provider.fast")).toBool());
             if (qEnvironmentVariableIsSet("PACSMITH_TEST_DEFAULTS_SCREENSHOT")) dialog.grab().save(qEnvironmentVariable("PACSMITH_TEST_DEFAULTS_SCREENSHOT"));
         }
         QFile record(requests); QVERIFY(record.open(QIODevice::ReadOnly));
         QVERIFY(!record.readAll().contains("session/prompt")); record.close();
-        agentProfile = *store.load().harness;
+        agentProfile = *ServerAi(host.connection).harness();
         AcpClient client;
         QSignalSpy ready(&client, &AcpClient::ready);
         client.start(agentProfile, environment(directory.path()), acpMcpServers({}, QStringLiteral("/test/pacsmith")));
@@ -443,6 +441,30 @@ private slots:
         QVERIFY(record.open(QIODevice::ReadOnly));
         QVERIFY(!record.readAll().contains("session/set_config_option"));
         if (previous.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", previous);
+    }
+    void sharedSettingsRejectStaleDialogsAndPreserveHarnessDetails() {
+        QTemporaryDir directory;
+        auto expected = profile(fakeAgent(directory.path()));
+        tests::ServerAiHost host(expected);
+        const ServerAi server(host.connection);
+        auto renamed = expected;
+        renamed.name = QStringLiteral("Renamed agent");
+        QVERIFY(server.setHarness(renamed));
+        const QJsonObject values{{QStringLiteral("model"), QStringLiteral("deliberate")}};
+        QString error;
+        QVERIFY2(server.setConfigDefaults(expected, values, &error), qPrintable(error));
+        QCOMPARE(server.harness()->name, renamed.name);
+        QCOMPARE(server.harness()->configDefaults, values);
+        QVERIFY(!server.setConfigDefaults(expected, {{QStringLiteral("model"), QStringLiteral("test-model")}}, &error));
+        QVERIFY(error.contains(QStringLiteral("changed elsewhere")));
+        QCOMPARE(server.harness()->configDefaults, values);
+        expected = *server.harness();
+        auto replacement = expected;
+        replacement.environment.insert(QStringLiteral("OTHER_AGENT"), QStringLiteral("1"));
+        QVERIFY(server.setHarness(replacement));
+        QVERIFY(!server.setConfigDefaults(expected, {}, &error));
+        QCOMPARE(server.harness()->environment, replacement.environment);
+        QCOMPARE(server.harness()->configDefaults, values);
     }
     void composerKeyboardShortcuts() {
         pacsmith::gui::ChatImageInput input;
@@ -863,18 +885,71 @@ private slots:
         }
         if (previous.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", previous);
     }
-    void fixedPermissionModeIsHidden() {
+    void externalAlwaysApprovalClearsWaitingStatusWhileAgentWorks_data() {
+        QTest::addColumn<int>("answerPath");
+        QTest::newRow("popup") << 0;
+        QTest::newRow("concurrent-inline-click") << 1;
+        QTest::newRow("inline") << 2;
+    }
+    void externalAlwaysApprovalClearsWaitingStatusWhileAgentWorks() {
+        QFETCH(int, answerPath);
         QTemporaryDir directory;
-        AcpClient client;
+        const auto previous = qgetenv("XDG_DATA_HOME");
+        qputenv("XDG_DATA_HOME", directory.path().toUtf8());
+        const auto restore = qScopeGuard([&] {
+            if (previous.isNull()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", previous);
+        });
         auto agentProfile = profile(fakeAgent(directory.path()));
         agentProfile.arguments.append(QStringLiteral("codex-acp"));
-        QSignalSpy ready(&client, &AcpClient::ready);
-        client.start(agentProfile, environment(directory.path()), acpMcpServers({}, QStringLiteral("/test/pacsmith")));
-        QTRY_COMPARE(ready.count(), 1);
-        pacsmith::gui::AgentSettingsDialog dialog(&client, true);
+        tests::ServerAiHost host(agentProfile);
+        pacsmith::gui::AcpChatWidget chat(agentProfile, host.connection, QStringLiteral("external-approval"), {});
+        chat.show();
+        QTRY_VERIFY(!chat.isBusy());
+        auto *status = chat.findChild<QLabel *>(QStringLiteral("chatStatus"));
+        QVERIFY(status);
+        QSignalSpy completed(&chat, &pacsmith::gui::AcpChatWidget::completed);
+        QVERIFY(chat.submit(QStringLiteral("permission-wait")));
+        QTRY_COMPARE(status->text(), QStringLiteral("Waiting for your approval"));
+        const ServerAi server(host.connection);
+        const auto pending = server.request(QStringLiteral("GET"), QStringLiteral("/permissions"));
+        QVERIFY(pending);
+        const auto requests = pending->value(QStringLiteral("permissions")).toArray();
+        QCOMPARE(requests.size(), 1);
+        const auto id = requests.first().toObject().value(QStringLiteral("id")).toString();
+        QPushButton *always = nullptr;
+        for (auto *button : chat.findChildren<QPushButton *>(QStringLiteral("permissionChoice")))
+            if (button->isVisible() && button->property("optionId").toString() == QStringLiteral("allow_always"))
+                always = button;
+        QVERIFY(always);
+        if (answerPath != 2) {
+            QVERIFY(server.request(QStringLiteral("POST"), QStringLiteral("/permissions/%1/response").arg(id),
+                                   {{QStringLiteral("option_id"), QStringLiteral("allow_always")}}));
+        }
+        if (answerPath != 0) {
+            always->click();
+            if (answerPath == 1) {
+                QVERIFY(always->isEnabled());
+                QVERIFY(always->isVisible());
+            }
+        }
+        QTRY_COMPARE(status->text(), QStringLiteral("Agent working…"));
+        QVERIFY(chat.isBusy());
+        QCOMPARE(completed.count(), 0);
+        for (auto *button : chat.findChildren<QPushButton *>(QStringLiteral("permissionChoice")))
+            QVERIFY(!button->isVisible());
+        chat.findChild<QPushButton *>(QStringLiteral("chatAction"))->click();
+        QTRY_COMPARE(completed.count(), 1);
+        QCOMPARE(status->text(), QStringLiteral("Stopped"));
+    }
+    void fixedPermissionModeIsHidden() {
+        QTemporaryDir directory;
+        auto agentProfile = profile(fakeAgent(directory.path()));
+        agentProfile.arguments.append(QStringLiteral("codex-acp"));
+        tests::ServerAiHost host(agentProfile);
+        pacsmith::gui::AgentSettingsDialog dialog(host.connection);
         dialog.show();
+        QTRY_VERIFY(dialog.findChild<QComboBox *>(QStringLiteral("model")) != nullptr);
         QVERIFY(dialog.findChild<QComboBox *>(QStringLiteral("mode")) == nullptr);
-        QVERIFY(dialog.findChild<QComboBox *>(QStringLiteral("model")) != nullptr);
         QCOMPARE(dialog.windowTitle(), QStringLiteral("Agent settings"));
     }
     void permissionsAndCancellation() {

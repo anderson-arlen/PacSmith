@@ -68,6 +68,24 @@ bool ServerAi::setHarness(const std::optional<HarnessProfile> &profile, QString 
                    error)
         .has_value();
 }
+bool ServerAi::setConfigDefaults(const HarnessProfile &expected, const QJsonObject &values,
+                                  QString *error) const {
+    const auto current = request(QStringLiteral("GET"), QStringLiteral("/settings"), {}, error);
+    if (!current)
+        return false;
+    auto profile = profileFromJson(current->value(QStringLiteral("harness")).toObject());
+    if (profile.executable != expected.executable || profile.arguments != expected.arguments ||
+        profile.environment != expected.environment || profile.configDefaults != expected.configDefaults) {
+        if (error)
+            *error = QStringLiteral("Agent settings changed elsewhere. Reopen Agent settings to load the latest values.");
+        return false;
+    }
+    profile.configDefaults = values;
+    return request(QStringLiteral("PUT"), QStringLiteral("/settings"),
+                   {{QStringLiteral("revision"), current->value(QStringLiteral("revision"))},
+                    {QStringLiteral("harness"), profileJson(profile)}}, error)
+        .has_value();
+}
 QJsonArray ServerAi::conversations(const QString &project, QString *error) const {
     const auto result = request(QStringLiteral("GET"),
                                 QStringLiteral("/conversations?project_id=") +

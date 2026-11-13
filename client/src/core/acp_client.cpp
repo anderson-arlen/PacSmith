@@ -289,14 +289,18 @@ bool AcpClient::clearRememberedPermissions(QString *error) {
     return !toolPermissions_ || toolPermissions_->clear(error);
 }
 
-void AcpClient::answerPermission(const QJsonValue &requestId, const QString &optionId) {
+bool AcpClient::answerPermission(const QJsonValue &requestId, const QString &optionId) {
     if (serverConnection_) {
         QString error;
-        if (!ServerAi(*serverConnection_).request(QStringLiteral("POST"),QStringLiteral("/permissions/%1/response").arg(requestId.toString()),{{QStringLiteral("option_id"),optionId}},&error)) emit configurationWarning(error);
-        pollServer(); return;
+        const bool answered = ServerAi(*serverConnection_)
+            .request(QStringLiteral("POST"), QStringLiteral("/permissions/%1/response").arg(requestId.toString()),
+                     {{QStringLiteral("option_id"), optionId}}, &error).has_value();
+        if (!answered) emit configurationWarning(error);
+        pollServer();
+        return answered;
     }
     const auto key = permissionKey(requestId);
-    if (!permissions_.contains(key)) return;
+    if (!permissions_.contains(key)) return false;
     const auto offered = permissions_.take(key);
     bool valid = false;
     for (const auto &entry : offered.value(QStringLiteral("params")).toObject().value(QStringLiteral("options")).toArray()) {
@@ -312,6 +316,7 @@ void AcpClient::answerPermission(const QJsonValue &requestId, const QString &opt
     send({{QStringLiteral("jsonrpc"), QStringLiteral("2.0")}, {QStringLiteral("id"), requestId},
           {QStringLiteral("result"), QJsonObject{{QStringLiteral("outcome"), outcome}}}});
     if (permissions_.isEmpty()) emit permissionsCleared();
+    return true;
 }
 
 void AcpClient::request(const QString &method, const QJsonObject &params, Callback callback, ErrorCallback error) {

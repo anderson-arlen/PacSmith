@@ -716,8 +716,9 @@ QString projectDirectory(const LibraryClient &library, const Project &project) {
 }
 
 QIcon projectIcon(const LibraryClient &library, const Project &project) {
-    for (const auto &release : project.releases) {
-        if (!release.installMapping.icon.isConfigured()) continue;
+    if (const auto *selected = project.activeTrackingRelease()) {
+        const auto &release = *selected;
+        if (!release.installMapping.icon.isConfigured()) return systemIcon(QStringLiteral("application-x-executable"));
         if (release.installMapping.icon.sourceKind == IconSourceKind::SystemTheme) {
             return systemIcon(release.installMapping.icon.iconName);
         }
@@ -727,9 +728,9 @@ QIcon projectIcon(const LibraryClient &library, const Project &project) {
             QPixmap pixmap;
             if (pixmap.load(QString::fromUtf8(path.string().c_str()))) return QIcon(pixmap);
         }
-        if (release.iconArtifactId.isEmpty()) continue;
+        if (release.iconArtifactId.isEmpty()) return systemIcon(QStringLiteral("application-x-executable"));
         const auto cached = library.cachedArtifactPath(release.iconArtifactId, QStringLiteral("icon"));
-        if (cached.isEmpty()) continue;
+        if (cached.isEmpty()) return systemIcon(QStringLiteral("application-x-executable"));
         QPixmap pixmap;
         if (pixmap.load(cached)) return QIcon(pixmap);
     }

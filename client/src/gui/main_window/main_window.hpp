@@ -81,6 +81,7 @@ protected:
 private:
     friend class LibrarySyncTest;
     friend class ScriptsPageTest;
+    friend class ReleaseIdentityTest;
 
     enum class EditorSection {
         SourceOverview,
@@ -300,7 +301,7 @@ private:
     void startUninstall();
     void preparePackageInstallation(const QString &releaseId,
                                     const QString &operation,
-                                    bool synchronizeLifecycle);
+                                    bool synchronizeLifecycle, const Project *targetProject = nullptr);
     void showCommandProgress(const QString &title, const QString &status, bool cancelable);
     void finishCommandProgress(bool success, const QString &summary);
     void installSelectedRelease();
@@ -617,6 +618,8 @@ private:
     QPushButton *resultPkgbuildBuildButton_{nullptr};
     QListWidget *historyList_{nullptr};
     QString pendingPackageOperation_;
+    QString pendingPackageOperationReleaseId_;
+    std::optional<Project> pendingPackageOperationProject_;
     bool installAfterSuccessfulBuild_{false};
     ImportOptions pendingImportOptions_;
     QHash<int, SectionLocation> sectionLocations_;

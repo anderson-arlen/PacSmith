@@ -19,8 +19,7 @@ var releaseConfigurationFields = map[string]struct{}{
 	"dependencies":    {}, "maintainerScripts": {}, "scriptFindings": {},
 	"payloadRules": {}, "generatedPkgbuild": {}, "generatedPkgbuildSha256": {},
 	"pkgbuildManuallyModified": {}, "lifecycleScript": {}, "fieldProvenance": {},
-	"aiChanges": {}, "update": {}, "buildStatus": {}, "state": {},
-	"lastBuildLog": {}, "producedPackages": {},
+	"aiChanges": {}, "update": {}, "state": {},
 }
 
 // PatchReleaseConfiguration keeps large inspection evidence on the daemon. The allowlist is

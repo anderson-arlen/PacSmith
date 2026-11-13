@@ -457,8 +457,7 @@ QJsonArray tools() {
         tool(QStringLiteral("delete_project"), QStringLiteral("Permanently delete a project and its releases. Marked destructive for MCP host approval."),
              objectSchema({{QStringLiteral("project_name"), projectName}}, {QStringLiteral("project_name")}), sensitive),
     };
-    // Harnesses can preflight any mutating tool before PacSmith receives the call, so the
-    // input schema itself must carry a target a person recognizes rather than only a UUID.
+    // Approval preflight needs readable labels alongside the exact artifact identity.
     for (qsizetype index = 0; index < catalog.size(); ++index) {
         auto entry = catalog.at(index).toObject();
         if (entry.value(QStringLiteral("annotations")).toObject()
@@ -481,12 +480,13 @@ QJsonArray tools() {
             required = next;
         };
         if (properties.contains(QStringLiteral("release_id"))) {
-            properties.remove(QStringLiteral("release_id"));
             properties.insert(QStringLiteral("project_name"), projectName);
             properties.insert(QStringLiteral("release_name"), releaseName);
             replaceRequired(QStringLiteral("release_id"),
                             {QStringLiteral("project_name"), QStringLiteral("release_name")});
         }
+        if (properties.contains(QStringLiteral("release_name")))
+            properties.insert(QStringLiteral("release_id"), stringProperty(QStringLiteral("Optional exact release UUID from list_projects; use it to distinguish artifacts with identical versions or filenames. Keep project_name and release_name for approval display.")));
         if (properties.contains(QStringLiteral("project"))) {
             properties.remove(QStringLiteral("project"));
             properties.insert(QStringLiteral("project_name"), projectName);
@@ -550,10 +550,20 @@ std::optional<Project> loadNamedProject(LibraryClient &library, const QString &n
 
 bool locateNamedRelease(LibraryClient &library, const QString &projectName,
                         const QString &releaseName, Project *project,
-                        PackageRelease **release, QString *error) {
+                        PackageRelease **release, QString *error, const QString &releaseId = {}) {
     auto loaded = loadNamedProject(library, projectName, error);
     if (!loaded) return false;
     *project = std::move(*loaded);
+    if (!releaseId.isEmpty()) {
+        *release = project->release(releaseId);
+        if (*release == nullptr ||
+            ((*release)->debian.version.compare(releaseName, Qt::CaseInsensitive) != 0 &&
+             (*release)->originalSourceFilename.compare(releaseName, Qt::CaseInsensitive) != 0)) {
+            if (error) *error = QStringLiteral("release_id must belong to project_name and match the displayed release_name; use list_projects to select a candidate.");
+            return false;
+        }
+        return true;
+    }
     QList<PackageRelease *> matches;
     for (auto &candidate : project->releases) {
         if (candidate.debian.version.compare(releaseName, Qt::CaseInsensitive) == 0 ||
@@ -569,7 +579,15 @@ bool locateNamedRelease(LibraryClient &library, const QString &projectName,
     }
     if (matches.size() > 1) {
         if (error != nullptr) {
-            *error = QStringLiteral("release_name is ambiguous; use the unique source filename from list_projects");
+            QJsonArray candidates;
+            for (const auto *candidate : matches)
+                candidates.append(QJsonObject{{QStringLiteral("release_id"), candidate->id},
+                    {QStringLiteral("version"), candidate->debian.version},
+                    {QStringLiteral("source_filename"), candidate->originalSourceFilename},
+                    {QStringLiteral("source_sha256"), candidate->sourceSha256},
+                    {QStringLiteral("imported_at"), candidate->createdAt.toUTC().toString(Qt::ISODateWithMs)}});
+            *error = QStringLiteral("release_name is ambiguous. Add release_id while keeping project_name and release_name. Candidates: %1")
+                .arg(QString::fromUtf8(QJsonDocument(candidates).toJson(QJsonDocument::Compact)));
         }
         return false;
     }
@@ -594,6 +612,7 @@ QJsonObject releaseSummary(const PackageRelease &release) {
             {QStringLiteral("state"), releaseStateName(release.state)},
             {QStringLiteral("source_type"), sourcePackageTypeName(release.sourceType)},
             {QStringLiteral("source_sha256"), release.sourceSha256},
+            {QStringLiteral("imported_at"), release.createdAt.toUTC().toString(Qt::ISODateWithMs)},
             {QStringLiteral("recipe_mode"), release.pkgbuildManuallyModified ? QStringLiteral("custom")
                                                                               : QStringLiteral("guided")},
             {QStringLiteral("build_status"), buildStatusName(release.buildStatus)}};
@@ -858,7 +877,8 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
         PackageRelease *discovered = nullptr;
         if (!locateNamedRelease(library_, argumentString(args, QStringLiteral("project_name")),
                                 argumentString(args, QStringLiteral("release_name")),
-                                &preparedProject, &discovered, &error)) {
+                                &preparedProject, &discovered, &error,
+                                argumentString(args, QStringLiteral("release_id")))) {
             return fail(error);
         }
         const auto started = library_.startUpdatePreparation(discovered->id, &error);
@@ -1153,7 +1173,7 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
     if (namedRelease) {
         if (!locateNamedRelease(library_, argumentString(args, QStringLiteral("project_name")),
                                 argumentString(args, QStringLiteral("release_name")),
-                                &project, &release, &error)) {
+                                &project, &release, &error, releaseId)) {
             return fail(error);
         }
         releaseId = release->id;
@@ -1176,6 +1196,9 @@ QJsonObject Server::callTool(const QJsonValue &id, const QJsonObject &params) {
                               name == QStringLiteral("start_build") ||
                               name == QStringLiteral("reanalyze_release") ||
                               name == QStringLiteral("delete_release");
+    if (needsRelease && !namedRelease && !name.startsWith(QStringLiteral("get_")) &&
+        !name.startsWith(QStringLiteral("read_")))
+        return fail(QStringLiteral("Include project_name and release_name for the approval prompt; add release_id to select an exact artifact."));
     if (needsRelease && !namedRelease && !releaseId.isEmpty() &&
         !locateRelease(library_, releaseId, &project, &release, &error)) {
         return fail(error);

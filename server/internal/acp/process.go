@@ -227,12 +227,20 @@ func (r *runner) initialize() error {
 	if err := r.handshake(); err != nil {
 		return err
 	}
+	defaults, err := r.sharedDefaults()
+	if err != nil {
+		return err
+	}
 	if r.ready {
-		return nil
+		result, err := r.currentOptions()
+		if err != nil {
+			return err
+		}
+		return r.applyDefaults(result, defaults)
 	}
 	r.mu.Lock()
 	r.row.Status = "starting"
-	err := r.service.save(r.service.ctx, r.row)
+	err = r.service.save(r.service.ctx, r.row)
 	r.mu.Unlock()
 	if err != nil {
 		return err
@@ -297,47 +305,9 @@ func (r *runner) initialize() error {
 			return fmt.Errorf("agent did not accept Ask for approval mode")
 		}
 	}
-	defaults := map[string]any{}
-	if method == "session/new" {
-		for k, v := range r.profile.Defaults {
-			defaults[k] = v
-		}
+	if err := r.applyDefaults(result, defaults); err != nil {
+		return err
 	}
-	for len(defaults) > 0 {
-		applied := false
-		opts, _ := result["configOptions"].([]any)
-		for _, v := range opts {
-			o := object(v)
-			key := str(o["id"])
-			value, ok := defaults[key]
-			if !ok {
-				continue
-			}
-			if r.codex && key == "mode" {
-				delete(defaults, key)
-				continue
-			}
-			_, boolean := value.(bool)
-			if !(o["type"] == "boolean" && boolean) && !accepts(o["options"], value) {
-				continue
-			}
-			delete(defaults, key)
-			p := map[string]any{"sessionId": r.session(), "configId": key, "value": value}
-			if boolean {
-				p["type"] = "boolean"
-			}
-			result, err = r.call("session/set_config_option", p)
-			if err != nil {
-				return err
-			}
-			applied = true
-			break
-		}
-		if !applied {
-			break
-		}
-	}
-	r.options(result)
 	r.ready = true
 	return nil
 }

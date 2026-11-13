@@ -1,5 +1,6 @@
 #include <QUuid>
 #include "gui/agent_settings_dialog.hpp"
+#include "core/server_ai.hpp"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -26,19 +27,19 @@ void addChoices(QComboBox *box, const QJsonArray &choices, const QString &group 
 }
 }
 
-AgentSettingsDialog::AgentSettingsDialog(const HarnessProfile &profile, const ConnectionConfig &connection,
-                                       SaveDefaults save, QWidget *parent)
-    : QDialog(parent), agent_(new AcpClient(this)), lockedMode_(isCodexAcp(profile)), save_(std::move(save)) {
-    initialize(true);
-    agent_->startServer(connection, QUuid::createUuid().toString(QUuid::WithoutBraces));
+AgentSettingsDialog::AgentSettingsDialog(const ConnectionConfig &connection, QWidget *parent)
+    : QDialog(parent), agent_(new AcpClient(this)), lockedMode_(false), connection_(connection) {
+    QString error;
+    profile_ = ServerAi(connection_).harness(&error);
+    lockedMode_ = profile_ && isCodexAcp(*profile_);
+    initialize();
+    if (profile_)
+        agent_->startServer(connection_, QUuid::createUuid().toString(QUuid::WithoutBraces));
+    else
+        status_->setText(error.isEmpty() ? QStringLiteral("Choose an AI agent in Settings first.") : error);
 }
 
-AgentSettingsDialog::AgentSettingsDialog(AcpClient *agent, bool lockedMode, QWidget *parent)
-    : QDialog(parent), agent_(agent), lockedMode_(lockedMode) {
-    initialize(false);
-}
-
-void AgentSettingsDialog::initialize(bool defaults) {
+void AgentSettingsDialog::initialize() {
     setWindowTitle(QStringLiteral("Agent settings"));
     setObjectName(QStringLiteral("agentSettings"));
     resize(520, 560);
@@ -47,9 +48,7 @@ void AgentSettingsDialog::initialize(bool defaults) {
     auto *heading = new QLabel(windowTitle(), this);
     auto font = heading->font(); font.setPointSizeF(font.pointSizeF() + 5); heading->setFont(font);
     layout->addWidget(heading);
-    auto *notice = new QLabel(defaults
-        ? QStringLiteral("Used for new chats and automatic reviews. Choices come from the selected agent. Changes save automatically.")
-        : QStringLiteral("Used for the next turn in this conversation. Choices come from its agent."), this);
+    auto *notice = new QLabel(QStringLiteral("Shared by all chats and automatic reviews using this agent. Changes save automatically and apply to the next turn, including in existing chats."), this);
     notice->setWordWrap(true);
     layout->addWidget(notice);
     auto *scroll = new QScrollArea(this);
@@ -108,14 +107,18 @@ void AgentSettingsDialog::initialize(bool defaults) {
     connect(agent_, &AcpClient::configurationWarning, this, [this, warning](const QString &message) { status_->clear(); warning->setText(message); warning->show(); });
     connect(agent_, &AcpClient::configOptionApplied, this, [this, warning](const QString &, const QJsonValue &) {
         warning->hide();
-        if (!save_) { status_->setText(QStringLiteral("Updated")); return; }
         QJsonObject values;
         for (const auto &entry : agent_->configOptions()) {
             const auto option = entry.toObject();
             values.insert(option.value(QStringLiteral("id")).toString(), option.value(QStringLiteral("currentValue")));
         }
         QString error;
-        status_->setText(save_(values, &error) ? QStringLiteral("Defaults saved") : QStringLiteral("Could not save defaults: %1").arg(error));
+        if (profile_ && ServerAi(connection_).setConfigDefaults(*profile_, values, &error)) {
+            profile_->configDefaults = values;
+            status_->setText(QStringLiteral("Settings saved"));
+        } else {
+            status_->setText(QStringLiteral("Could not save settings: %1").arg(error));
+        }
     });
     render(agent_->configOptions());
     if (agent_->isReady()) status_->clear();

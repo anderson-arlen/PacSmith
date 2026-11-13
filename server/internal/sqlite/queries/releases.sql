@@ -34,6 +34,10 @@ WHERE id = sqlc.arg(id);
 INSERT OR IGNORE INTO builds (id, release_id, status, log_text, started_at, finished_at)
 VALUES (?, ?, ?, ?, ?, ?);
 
+-- name: FinishBuild :exec
+UPDATE builds SET status = ?, log_text = ?, finished_at = ?
+WHERE id = ? AND release_id = ?;
+
 -- name: UpdateRelease :one
 UPDATE releases
 SET state = ?,

@@ -32,7 +32,12 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
         if (!annotations.value(QStringLiteral("readOnlyHint")).toBool()) {
             const auto properties = entry.value(QStringLiteral("inputSchema")).toObject()
                                         .value(QStringLiteral("properties")).toObject();
-            QVERIFY2(!properties.contains(QStringLiteral("release_id")), qPrintable(name));
+            if (properties.contains(QStringLiteral("release_id"))) {
+                const auto required = entry.value(QStringLiteral("inputSchema")).toObject()
+                                          .value(QStringLiteral("required")).toArray();
+                QVERIFY2(required.contains(QStringLiteral("project_name")), qPrintable(name));
+                QVERIFY2(required.contains(QStringLiteral("release_name")), qPrintable(name));
+            }
             QVERIFY2(!properties.contains(QStringLiteral("project")), qPrintable(name));
             QVERIFY2(!properties.contains(QStringLiteral("existing_project")), qPrintable(name));
         }
@@ -179,7 +184,7 @@ void CoreTests::describesDomainMcpToolsAndPermissions() {
     QVERIFY(signingKeyProperties.contains(QStringLiteral("project_name")));
     QVERIFY(signingKeyProperties.contains(QStringLiteral("release_name")));
     QVERIFY(signingKeyProperties.contains(QStringLiteral("url")));
-    QVERIFY(!signingKeyProperties.contains(QStringLiteral("release_id")));
+    QVERIFY(signingKeyProperties.contains(QStringLiteral("release_id")));
     QVERIFY(signingKeySchema.value(QStringLiteral("required")).toArray()
                 .contains(QStringLiteral("url")));
     QVERIFY(signingKeyImport.value(QStringLiteral("description")).toString()

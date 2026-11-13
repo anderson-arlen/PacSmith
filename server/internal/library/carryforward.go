@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/anderson-arlen/pacsmith/server/internal/inspect"
 )
 
 func carryForwardRelease(previous, next map[string]any) {
@@ -291,6 +293,29 @@ func carryIcon(prevInstall, nextInstall, next map[string]any) {
 		icon["missing"] = !payloadStillExists
 		nextInstall["icon"] = icon
 	}
+}
+
+func refreshPayloadIcon(document map[string]any, analysis *inspect.Analysis, sourcePath string) error {
+	install, _ := mapValue(document, "installMapping")
+	icon, _ := mapValue(install, "icon")
+	if stringValue(icon, "sourceKind") != "payload" || boolValue(icon, "missing") {
+		return nil
+	}
+	member := stringValue(icon, "sourcePath")
+	var contents []byte
+	if analysis.Icon != nil && analysis.Icon.SourcePath == member {
+		contents = analysis.Icon.Contents
+	} else {
+		var err error
+		contents, err = inspect.ReadPayloadFile(sourcePath, member, 4<<20)
+		if err != nil {
+			return err
+		}
+	}
+	// Carry the selected path and integration name, never bytes from the previous artifact.
+	icon["sha256"] = sha256Hex(contents)
+	analysis.Icon = &inspect.ExtractedIcon{SourcePath: member, Contents: contents}
+	return nil
 }
 
 func carryAppRun(prevInstall, nextInstall map[string]any) {

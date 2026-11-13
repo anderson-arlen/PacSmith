@@ -29,7 +29,7 @@ public:
     void authenticate(const QString &methodId);
     void setConfigOption(const QString &id, const QJsonValue &value);
     bool clearRememberedPermissions(QString *error = nullptr);
-    void answerPermission(const QJsonValue &requestId, const QString &optionId = {});
+    bool answerPermission(const QJsonValue &requestId, const QString &optionId = {});
     [[nodiscard]] bool isReady() const { return ready_; }
     [[nodiscard]] bool isBusy() const { return busy_; }
     [[nodiscard]] QString sessionId() const { return sessionId_; }

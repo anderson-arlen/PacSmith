@@ -113,8 +113,7 @@ QJsonObject releaseConfiguration(const PackageRelease &release) {
         QStringLiteral("generatedPkgbuildSha256"), QStringLiteral("pkgbuildManuallyModified"),
         QStringLiteral("lifecycleScript"), QStringLiteral("fieldProvenance"),
         QStringLiteral("aiChanges"), QStringLiteral("update"),
-        QStringLiteral("buildStatus"), QStringLiteral("state"),
-        QStringLiteral("lastBuildLog"), QStringLiteral("producedPackages"),
+        QStringLiteral("state"),
     };
     for (const auto &field : editableFields) configuration.insert(field, document.value(field));
     return configuration;

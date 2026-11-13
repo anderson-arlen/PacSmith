@@ -197,6 +197,13 @@ if(BUILD_TESTING)
     add_test(NAME pacsmith-library-sync-tests COMMAND pacsmith-library-sync-tests)
     set_tests_properties(pacsmith-library-sync-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    add_executable(pacsmith-release-identity-tests tests/gui_tests/release_identity_test.cpp)
+    add_dependencies(pacsmith-release-identity-tests pacsmith pacsmithd)
+    target_link_libraries(pacsmith-release-identity-tests PRIVATE pacsmith_gui Qt6::Test)
+    pacsmith_target_defaults(pacsmith-release-identity-tests)
+    add_test(NAME pacsmith-release-identity-tests COMMAND pacsmith-release-identity-tests)
+    set_tests_properties(pacsmith-release-identity-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(pacsmith-scripts-page-tests tests/gui_tests/scripts_page_test.cpp)
     target_link_libraries(pacsmith-scripts-page-tests PRIVATE pacsmith_gui Qt6::Test)
     pacsmith_target_defaults(pacsmith-scripts-page-tests)

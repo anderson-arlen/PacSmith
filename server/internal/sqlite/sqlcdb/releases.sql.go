@@ -33,6 +33,30 @@ func (q *Queries) DeleteReleaseArtifactsByRole(ctx context.Context, arg DeleteRe
 	return err
 }
 
+const finishBuild = `-- name: FinishBuild :exec
+UPDATE builds SET status = ?, log_text = ?, finished_at = ?
+WHERE id = ? AND release_id = ?
+`
+
+type FinishBuildParams struct {
+	Status     string         `json:"status"`
+	LogText    string         `json:"log_text"`
+	FinishedAt sql.NullString `json:"finished_at"`
+	ID         string         `json:"id"`
+	ReleaseID  string         `json:"release_id"`
+}
+
+func (q *Queries) FinishBuild(ctx context.Context, arg FinishBuildParams) error {
+	_, err := q.db.ExecContext(ctx, finishBuild,
+		arg.Status,
+		arg.LogText,
+		arg.FinishedAt,
+		arg.ID,
+		arg.ReleaseID,
+	)
+	return err
+}
+
 const getRelease = `-- name: GetRelease :one
 SELECT id, project_id, revision, state, source_type, vendor_version, original_filename, source_sha256, source_artifact_id, arch_package_name, arch_pkgrel, body_json, created_at, modified_at FROM releases WHERE id = ?
 `

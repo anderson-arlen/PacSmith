@@ -92,7 +92,7 @@ func (s *Service) publishBuildLocked(ctx context.Context, projectID, releaseID s
 
 	now := s.nowString()
 	for _, item := range pending {
-		if settings.StableEnabled != 0 {
+		if settings.StableEnabled != 0 && policy.AutomaticSoak {
 			if err := s.DB.Queries.UpsertSoak(ctx, item.soak); err != nil {
 				return err
 			}

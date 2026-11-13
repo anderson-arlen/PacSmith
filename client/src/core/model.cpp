@@ -1193,7 +1193,8 @@ bool Project::hasAvailableUpdate() const {
     return std::any_of(releases.cbegin(), releases.cend(), [&](const auto &candidate) {
         if (candidate.id == installed->id || candidate.debian.version.isEmpty()) return false;
         const auto version = compareReleaseVersions(candidate, *installed);
-        return version > 0;
+        return version > 0 || (version == 0 && candidate.createdAt > installed->createdAt &&
+                              !candidate.sourceSha256.isEmpty() && candidate.sourceSha256 != installed->sourceSha256);
     });
 }
 

@@ -34,7 +34,10 @@ namespace pacsmith::gui {
 namespace {
 void clearLayout(QLayout *layout) {
     while (auto *item = layout->takeAt(0)) {
-        if (item->widget() != nullptr) item->widget()->deleteLater();
+        if (item->widget() != nullptr) {
+            item->widget()->hide();
+            item->widget()->deleteLater();
+        }
         delete item;
     }
 }
@@ -71,6 +74,7 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
     transcript_->setImageDirectory(QFileInfo(filePath_).dir().filePath(QStringLiteral("images")));
     layout->addWidget(transcript_, 1);
     status_ = new QLabel(QStringLiteral("Ready to connect"), this);
+    status_->setObjectName(QStringLiteral("chatStatus"));
     status_->setWordWrap(true);
     layout->addWidget(status_);
     permissions_ = new QWidget(this);
@@ -119,8 +123,8 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
     attach_->setObjectName(QStringLiteral("attachImage"));
     settings_ = new QPushButton(this);
     settings_->setIcon(chatIcon(ChatIcon::Settings));
-    settings_->setAccessibleName(QStringLiteral("Conversation settings"));
-    settings_->setToolTip(QStringLiteral("Conversation settings"));
+    settings_->setAccessibleName(QStringLiteral("Agent settings"));
+    settings_->setToolTip(QStringLiteral("Agent settings"));
     settings_->setObjectName(QStringLiteral("conversationSettings"));
     for (auto *button : {settings_, attach_}) {
         button->setFlat(true);
@@ -130,8 +134,7 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
     }
     composerRow->addLayout(accessories);
     connect(settings_, &QPushButton::clicked, this, [this] {
-        if (!agent_.isReady()) start();
-        AgentSettingsDialog dialog(&agent_, isCodexAcp(profile_), this);
+        AgentSettingsDialog dialog(connection_, this);
         dialog.exec();
     });
     auto *frame = new QFrame(this);
@@ -228,6 +231,7 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
     });
     connect(&agent_, &AcpClient::permissionRemembered, this, [this](const QString &message) { append(message); });
     connect(&agent_, &AcpClient::permissionRequested, this, [this](const QJsonValue &id, const QJsonObject &params) {
+        waitingForApproval_ = true;
         status_->setText(QStringLiteral("Waiting for your approval"));
         auto *card = new QWidget(permissions_);
         auto *cardLayout = new QVBoxLayout(card);
@@ -259,8 +263,12 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
             }
             connect(button, &QPushButton::clicked, this, [this, id, option, card] {
                 card->setEnabled(false);
+                if (!agent_.answerPermission(id, option.value(QStringLiteral("optionId")).toString())) {
+                    card->setEnabled(true);
+                    return;
+                }
                 append(QStringLiteral("\n\nPermission: %1\n").arg(option.value(QStringLiteral("name")).toString()));
-                agent_.answerPermission(id, option.value(QStringLiteral("optionId")).toString());
+                card->hide();
                 card->deleteLater();
                 status_->setText(QStringLiteral("Agent working…"));
             });
@@ -269,9 +277,14 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
         permissionLayout_->addWidget(card);
         emit approvalRequired();
     });
-    connect(&agent_, &AcpClient::permissionsCleared, this, [this] { clearLayout(permissionLayout_); });
+    connect(&agent_, &AcpClient::permissionsCleared, this, [this] {
+        clearLayout(permissionLayout_);
+        if (std::exchange(waitingForApproval_, false))
+            status_->setText(agent_.isBusy() ? QStringLiteral("Agent working…") : QStringLiteral("Ready"));
+    });
     connect(&agent_, &AcpClient::configurationWarning, this, [this](const QString &message) { transcript_->message(QStringLiteral("notice"), message); });
     connect(&agent_, &AcpClient::turnFinished, this, [this](const QString &reason) {
+        waitingForApproval_ = false;
         status_->setText(reason == QStringLiteral("end_turn") ? QStringLiteral("Ready") : QStringLiteral("Stopped"));
         transcript_->endTurn(reason == QStringLiteral("end_turn"));
         const bool active = std::exchange(turnActive_, false);
@@ -279,6 +292,7 @@ AcpChatWidget::AcpChatWidget(HarnessProfile profile, ConnectionConfig connection
         if (active) emit completed(reason == QStringLiteral("end_turn") ? QString{} : QStringLiteral("Agent stopped: %1").arg(reason));
     });
     connect(&agent_, &AcpClient::failed, this, [this](const QString &message) {
+        waitingForApproval_ = false;
         queued_.clear();
         if (input_->toPlainText().isEmpty()) input_->setPlainText(queuedQuestion_);
         status_->setText(message);

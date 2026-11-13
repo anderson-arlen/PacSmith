@@ -556,12 +556,15 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
         const auto operation = pendingPackageOperation_.isEmpty()
             ? QStringLiteral("install") : pendingPackageOperation_;
         pendingPackageOperation_.clear();
-        if (project_ && (operation == QStringLiteral("uninstall") || currentRelease() != nullptr)) {
+        const auto operationProject = pendingPackageOperationProject_;
+        pendingPackageOperationProject_.reset();
+        if (operationProject) {
             const auto config = library_.config();
-            const auto projectSnapshot = *project_;
-            const auto projectId = project_->id;
+            const auto projectSnapshot = *operationProject;
+            const auto projectId = operationProject->id;
             const auto releaseId = operation == QStringLiteral("uninstall")
-                ? QString{} : currentReleaseId_;
+                ? QString{} : pendingPackageOperationReleaseId_;
+            pendingPackageOperationReleaseId_.clear();
             auto *watcher = new QFutureWatcher<PackageOperationFinishResult>(this);
             connect(watcher, &QFutureWatcher<PackageOperationFinishResult>::finished, this,
                     [this, watcher, projectId] {
@@ -601,7 +604,8 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
     });
     connect(&installService_, &InstallService::finished, this, [this](const ProcessResult &result) {
         projectList_->setEnabled(false);
-        if (!project_) {
+        const auto operationProject = pendingPackageOperationProject_;
+        if (!operationProject) {
             pendingPackageOperation_.clear();
             finishCommandProgress(result.succeeded(),
                                   result.succeeded() ? QStringLiteral("Package operation completed.")
@@ -610,10 +614,10 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
         }
         const auto operation = pendingPackageOperation_.isEmpty()
             ? QStringLiteral("install") : pendingPackageOperation_;
-        const auto projectId = project_->id;
+        const auto projectId = operationProject->id;
         const auto releaseId = operation == QStringLiteral("uninstall")
-            ? QString{} : currentReleaseId_;
-        const auto projectSnapshot = *project_;
+            ? QString{} : pendingPackageOperationReleaseId_;
+        const auto projectSnapshot = *operationProject;
         const auto config = library_.config();
         const auto succeeded = result.succeeded();
         const auto summary = operation == QStringLiteral("uninstall")
@@ -640,6 +644,8 @@ MainWindow::MainWindow(AppSettingsStore &settingsStore, QWidget *parent)
             watcher->deleteLater();
             packageOperationFinishInFlight_ = false;
             pendingPackageOperation_.clear();
+            pendingPackageOperationProject_.reset();
+            pendingPackageOperationReleaseId_.clear();
             if (finalized.project && project_ && finalized.project->id == projectId) {
                 project_ = std::move(*finalized.project);
                 projectCache_.insert(project_->id, *project_);

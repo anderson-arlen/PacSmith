@@ -1603,21 +1603,10 @@ void MainWindow::showSettings() {
         commitHarness();
         harnessSave->flush();
         if (harnessDirty || harness.executable.isEmpty()) return;
-        const auto openedHarness = harness;
-        AgentSettingsDialog settings(harness, library_.config(),
-            [&](const QJsonObject &values, QString *error) {
-                if (harness.executable != openedHarness.executable || harness.arguments != openedHarness.arguments) {
-                    *error = QStringLiteral("The configured harness changed while its settings were open.");
-                    return false;
-                }
-                harness.configDefaults = values;
-                harnessDirty = true;
-                harnessSave->schedule();
-                harnessSave->flush();
-                if (harnessDirty) *error = externalHarnessNotice->text();
-                return !harnessDirty;
-            }, &dialog);
+        AgentSettingsDialog settings(library_.config(), &dialog);
         settings.exec();
+        appSettings_.harness = ServerAi(library_.config()).harness();
+        if (!harnessDirty) replaceHarness();
     });
     harnessSave->watch(harnessName);
     harnessSave->watch(harnessExecutable);

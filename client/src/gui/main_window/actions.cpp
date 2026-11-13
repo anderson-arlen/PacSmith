@@ -273,6 +273,8 @@ void MainWindow::startBuild(const bool installWhenSuccessful, const bool automat
     installAfterSuccessfulBuild_ = false;
     if (!project_ || currentRelease() == nullptr || buildInProgress() ||
         !ensureCurrentProjectWritable()) return;
+    const auto releaseId = currentRelease()->id;
+    const auto projectId = project_->id;
     bool lifecycleChanged = false;
     QString lifecycleError;
     if (!library_.synchronizeLifecycle(*project_, *currentRelease(), &lifecycleChanged, &lifecycleError)) {
@@ -392,8 +394,6 @@ void MainWindow::startBuild(const bool installWhenSuccessful, const bool automat
                           ? EditorSection::ConfigPkgbuild : EditorSection::ConfigScripts);
         return;
     }
-    currentRelease()->buildStatus = BuildStatus::Building;
-    persistCurrent();
     populateOverview();
     if (!installWhenSuccessful) {
         if (projectSidebar_ != nullptr) projectSidebar_->hide();
@@ -402,9 +402,9 @@ void MainWindow::startBuild(const bool installWhenSuccessful, const bool automat
     }
     installAfterSuccessfulBuild_ = installWhenSuccessful;
     QString error;
-    const auto job = library_.startBuild(currentRelease()->id, &error, automatic);
+    if (!project_ || project_->id != projectId || project_->release(releaseId) == nullptr) return;
+    const auto job = library_.startBuild(releaseId, &error, automatic);
     if (!job || job->id.isEmpty()) {
-        currentRelease()->buildStatus = BuildStatus::Failed;
         QMessageBox::critical(this, QStringLiteral("Build could not start"), error);
         populateBuild();
         updateDashboardActions();
@@ -413,7 +413,7 @@ void MainWindow::startBuild(const bool installWhenSuccessful, const bool automat
     }
     buildJobId_ = job->id;
     buildProjectId_ = project_->id;
-    buildReleaseId_ = currentRelease()->id;
+    buildReleaseId_ = releaseId;
     buildProjectName_ = project_->displayName.isEmpty() ? project_->archPackageName
                                                        : project_->displayName;
     if (buildPollTimer_ == nullptr) {
@@ -525,10 +525,11 @@ void MainWindow::finishBuildJob() {
     buildFinishInFlight_ = true;
     const auto jobId = buildJobId_;
     const auto projectId = buildProjectId_;
+    const auto releaseId = buildReleaseId_;
     const auto config = library_.config();
     auto *watcher = new QFutureWatcher<BuildFinishResult>(this);
     connect(watcher, &QFutureWatcher<BuildFinishResult>::finished, this,
-            [this, watcher, jobId, projectId] {
+            [this, watcher, jobId, projectId, releaseId] {
         auto result = watcher->result();
         watcher->deleteLater();
         buildFinishInFlight_ = false;
@@ -540,9 +541,10 @@ void MainWindow::finishBuildJob() {
         activeBuildJobs_.remove(jobId);
         updatePreparationIndicators();
         syncActivityTimer();
+        const auto completedProject = result.project;
         if (!projectId.isEmpty() && result.project && result.project->id == projectId) {
-            project_ = std::move(*result.project);
-            projectCache_.insert(project_->id, *project_);
+            projectCache_.insert(projectId, *result.project);
+            if (project_ && project_->id == projectId) project_ = std::move(*result.project);
         }
         const bool succeeded = result.job && result.job->status == QStringLiteral("succeeded");
         const bool canceled = result.job && result.job->status == QStringLiteral("interrupted");
@@ -556,7 +558,9 @@ void MainWindow::finishBuildJob() {
         statusBar()->showMessage(canceled ? QStringLiteral("Build canceled")
                                  : succeeded ? QStringLiteral("Build succeeded")
                                              : QStringLiteral("Build failed"), 8000);
-        if (shouldInstall) QTimer::singleShot(0, this, [this] { startInstall(); });
+        if (shouldInstall && completedProject) QTimer::singleShot(0, this, [this, completedProject, releaseId] {
+            preparePackageInstallation(releaseId, QStringLiteral("install"), true, &*completedProject);
+        });
     });
     watcher->setFuture(QtConcurrent::run([config, jobId, projectId] {
         LibraryClient client(config);
@@ -607,16 +611,19 @@ bool MainWindow::packageOperationInProgress() const {
 
 void MainWindow::preparePackageInstallation(const QString &releaseId,
                                             const QString &operation,
-                                            const bool synchronizeLifecycle) {
-    if (!project_ || packageOperationInProgress()) return;
-    const auto *release = project_->release(releaseId);
+                                            const bool synchronizeLifecycle, const Project *targetProject) {
+    if (packageOperationInProgress()) return;
+    const auto *target = targetProject != nullptr ? targetProject : project_ ? &*project_ : nullptr;
+    if (target == nullptr) return;
+    const auto projectSnapshot = *target;
+    const auto *release = target->release(releaseId);
     if (release == nullptr) return;
     installPreparationInFlight_ = true;
     projectList_->setEnabled(false);
     showCommandProgress(
         operation == QStringLiteral("rollback")
-            ? QStringLiteral("Rolling back %1").arg(project_->displayName)
-            : QStringLiteral("Installing %1").arg(project_->displayName),
+            ? QStringLiteral("Rolling back %1").arg(target->displayName)
+            : QStringLiteral("Installing %1").arg(target->displayName),
         QStringLiteral("Preparing the retained package…"), false);
     statusBar()->showMessage(QStringLiteral("Preparing package installation…"));
     updateDashboardActions();
@@ -624,13 +631,13 @@ void MainWindow::preparePackageInstallation(const QString &releaseId,
     updateDeleteButton();
 
     const auto config = library_.config();
-    const auto projectSnapshot = *project_;
     auto *watcher = new QFutureWatcher<InstallPreparationResult>(this);
     connect(watcher, &QFutureWatcher<InstallPreparationResult>::finished, this,
             [this, watcher, operation] {
         auto result = watcher->result();
         watcher->deleteLater();
         installPreparationInFlight_ = false;
+        const auto operationProject = result.project;
         if (result.project && project_ && result.project->id == project_->id) {
             project_ = std::move(*result.project);
             projectCache_.insert(project_->id, *project_);
@@ -666,6 +673,8 @@ void MainWindow::preparePackageInstallation(const QString &releaseId,
             return;
         }
         pendingPackageOperation_ = operation;
+        pendingPackageOperationReleaseId_ = result.releaseId;
+        pendingPackageOperationProject_ = operationProject;
         const auto status = operation == QStringLiteral("rollback")
             ? QStringLiteral("Waiting for polkit authorization to roll back…")
             : QStringLiteral("Waiting for polkit authorization to install…");
@@ -884,6 +893,8 @@ void MainWindow::startUninstall() {
                               QStringLiteral("Authorize pacman to remove %1 non-interactively? The PacSmith project and retained releases will remain. Polkit may request your password.")
                                   .arg(project_->archPackageName)) != QMessageBox::Yes) return;
     pendingPackageOperation_ = QStringLiteral("uninstall");
+    pendingPackageOperationProject_ = project_;
+    pendingPackageOperationReleaseId_.clear();
     if (project_->installedRelease() != nullptr) currentReleaseId_ = project_->installedReleaseId;
     projectList_->setEnabled(false);
     showCommandProgress(QStringLiteral("Uninstalling %1").arg(project_->displayName),

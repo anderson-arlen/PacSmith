@@ -778,6 +778,9 @@ func (s *Service) OnProjectDeleted(ctx context.Context, projectID string) error 
 func (s *Service) CleanupExclusive(ctx context.Context, fn func(protected map[string]struct{}) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.discardDisabledSoaksLocked(ctx); err != nil {
+		return err
+	}
 	protected, err := s.protectedLocked(ctx)
 	if err != nil {
 		return err

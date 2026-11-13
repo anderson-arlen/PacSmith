@@ -16,6 +16,8 @@ class ServerAi final {
     [[nodiscard]] std::optional<HarnessProfile> harness(QString *error = nullptr) const;
     [[nodiscard]] bool setHarness(const std::optional<HarnessProfile> &profile,
                                   QString *error = nullptr) const;
+    [[nodiscard]] bool setConfigDefaults(const HarnessProfile &expected, const QJsonObject &values,
+                                         QString *error = nullptr) const;
     [[nodiscard]] QJsonArray conversations(const QString &project, QString *error = nullptr) const;
     [[nodiscard]] static QJsonObject profileJson(const HarnessProfile &profile);
     [[nodiscard]] static HarnessProfile profileFromJson(const QJsonObject &object);

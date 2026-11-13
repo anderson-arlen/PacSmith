@@ -465,23 +465,35 @@ QString repackagedPkgrel(const QString &upstream) {
 }
 
 QString installedReleaseIdForVersion(const Project &project, const QString &installedVersion) {
+    QSet<QString> builtMatches;
     for (const auto &release : project.releases) {
-        if (expectedArchVersion(release) == installedVersion) return release.id;
         for (const auto &build : release.builds) {
             if (std::any_of(build.artifacts.cbegin(), build.artifacts.cend(),
                             [&](const auto &artifact) {
                                 return artifact.packageName == project.archPackageName &&
                                        artifact.packageVersion == installedVersion;
                             })) {
-                return release.id;
+                builtMatches.insert(release.id);
             }
         }
     }
-    return {};
+    if (!builtMatches.isEmpty()) return builtMatches.size() == 1 ? *builtMatches.cbegin() : QString{};
+    QSet<QString> legacyMatches;
+    for (const auto &release : project.releases)
+        if (expectedArchVersion(release) == installedVersion) legacyMatches.insert(release.id);
+    return legacyMatches.size() == 1 ? *legacyMatches.cbegin() : QString{};
 }
 
 bool releaseMatchesInstalledVersion(const Project &project, const QString &installedVersion) {
-    return !installedReleaseIdForVersion(project, installedVersion).isEmpty();
+    // Ambiguous release identity must not permit deleting a project with an installed package.
+    for (const auto &release : project.releases) {
+        if (expectedArchVersion(release) == installedVersion) return true;
+        for (const auto &build : release.builds)
+            for (const auto &artifact : build.artifacts)
+                if (artifact.packageName == project.archPackageName &&
+                    artifact.packageVersion == installedVersion) return true;
+    }
+    return false;
 }
 
 bool projectOwnsInstalledPackage(const Project &project, const QString &installedVersion) {

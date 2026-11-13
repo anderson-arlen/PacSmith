@@ -55,7 +55,7 @@ func (s *Service) attachBuildRecords(ctx context.Context, release *Release,
 		})
 	}
 	release.Document["builds"] = records
-	if len(builds) == 0 {
+	if len(builds) == 0 || stringValue(release.Document, "buildStatus") == "building" {
 		return nil
 	}
 	latest := builds[len(builds)-1]

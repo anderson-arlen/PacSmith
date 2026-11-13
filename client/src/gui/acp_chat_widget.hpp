@@ -64,6 +64,7 @@ private:
     QWidget *imagesScroll_;
     QPushButton *attach_;
     bool turnActive_{false};
+    bool waitingForApproval_{false};
     ChatTranscript *transcript_;
     QPlainTextEdit *input_;
     QLabel *status_;

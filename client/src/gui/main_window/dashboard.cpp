@@ -126,11 +126,15 @@ const PackageRelease *MainWindow::dashboardActionRelease() const {
         }
         if (candidate.id == installed->id) continue;
         if (!candidate.debian.version.isEmpty() && !installed->debian.version.isEmpty() &&
-            comparePackageVersions(candidate.sourceType, candidate.debian.version,
-                                   installed->debian.version) <= 0) {
+            (comparePackageVersions(candidate.sourceType, candidate.debian.version,
+                                    installed->debian.version) < 0 ||
+             (compareReleaseVersions(candidate, *installed) == 0 &&
+              (candidate.createdAt <= installed->createdAt ||
+               candidate.sourceSha256.isEmpty() || candidate.sourceSha256 == installed->sourceSha256)))) {
             continue;
         }
-        if (best == nullptr || compareReleaseVersions(candidate, *best) > 0) best = &candidate;
+        if (best == nullptr || compareReleaseVersions(candidate, *best) > 0 ||
+            (compareReleaseVersions(candidate, *best) == 0 && candidate.createdAt > best->createdAt)) best = &candidate;
     }
     return best;
 }
@@ -1078,15 +1082,15 @@ void MainWindow::prefetchProjectIcons() {
     };
     QList<IconJob> jobs;
     for (auto iterator = projectCache_.cbegin(); iterator != projectCache_.cend(); ++iterator) {
-        for (const auto &release : iterator.value().releases) {
+        if (const auto *selected = iterator.value().activeTrackingRelease()) {
+            const auto &release = *selected;
             if (!release.installMapping.icon.isConfigured() ||
                 release.iconArtifactId.isEmpty()) continue;
             if (!library_.cachedArtifactPath(release.iconArtifactId,
                                              QStringLiteral("icon")).isEmpty()) {
-                break;
+                continue;
             }
             jobs.append({iterator.key(), release.iconArtifactId});
-            break;
         }
     }
     if (jobs.isEmpty()) return;
@@ -1407,13 +1411,14 @@ void MainWindow::populateOverview() {
                      acquisitionLocation.toHtmlEscaped(), tracker->sourceSha256.toHtmlEscaped()));
     }
 
-    const auto selectedBefore = selectedDashboardReleaseId().isEmpty()
+    const auto selectedBefore = project_->release(currentReleaseId_) != nullptr
         ? currentReleaseId_ : selectedDashboardReleaseId();
     QSignalBlocker tableBlocker(releaseTable_);
     QList<const PackageRelease *> ordered;
     for (const auto &release : project_->releases) ordered.append(&release);
     std::sort(ordered.begin(), ordered.end(), [](const auto *left, const auto *right) {
-        return compareReleaseVersions(*left, *right) > 0;
+        const auto version = compareReleaseVersions(*left, *right);
+        return version == 0 ? left->createdAt > right->createdAt : version > 0;
     });
     releaseTable_->setRowCount(static_cast<int>(ordered.size()));
     int selectedRow = -1;
@@ -1467,6 +1472,8 @@ void MainWindow::populateOverview() {
         for (int column = 0; column < values.size(); ++column) {
             auto *item = new QTableWidgetItem(values.at(column));
             item->setData(Qt::UserRole, release.id);
+            item->setToolTip(QStringLiteral("Release: %1\nImported: %2\nSHA256: %3")
+                                 .arg(release.id, release.createdAt.toUTC().toString(Qt::ISODateWithMs), release.sourceSha256));
             releaseTable_->setItem(row, column, item);
         }
         if (release.id == selectedBefore) selectedRow = row;

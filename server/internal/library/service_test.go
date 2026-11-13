@@ -265,7 +265,7 @@ func TestAppendProjectHistoryIsServerOwnedAndPreservedByProjectPatches(t *testin
 		t.Fatal(err)
 	}
 	if len(withBuild.History) != 4 || withBuild.History[3].Event != "build" ||
-		withBuild.History[3].Detail != "Build of release 1.0 succeeded" {
+		withBuild.History[3].Detail != "Build of release 1.0 ("+release.ID+") succeeded" {
 		t.Fatalf("build history = %#v", withBuild.History)
 	}
 }

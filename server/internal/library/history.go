@@ -112,6 +112,7 @@ func (s *Service) RecordBuildOutcome(ctx context.Context, releaseID string, auto
 	if automatic {
 		detail = "Automatic build of release " + release.VendorVersion
 	}
+	detail += " (" + release.ID + ")"
 	if buildErr == nil {
 		detail += " succeeded"
 	} else if errors.Is(buildErr, context.Canceled) {
@@ -150,7 +151,7 @@ func (s *Service) RecordPackageOperation(ctx context.Context, projectID, release
 		if release.ProjectID != project.ID {
 			return Project{}, fmt.Errorf("%w: release does not belong to project", ErrInvalid)
 		}
-		target = "release " + release.VendorVersion
+		target = "release " + release.VendorVersion + " (" + release.ID + ")"
 	}
 	detail := label + " of " + target
 	failure = strings.Join(strings.Fields(failure), " ")

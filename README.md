@@ -130,7 +130,7 @@ Open **Ask AI** beside the Local/Remote connection control, or press **Ctrl+Shif
 
 In **Settings → AI Harness**, select an agent from the ACP registry or configure an installed ACP stdio executable with separate arguments. Registry entries using npm/npx or uvx need the corresponding runner on the library server. Configure and authenticate the agent on that server; authorized clients share the same harness and conversations. PacSmith supervises the ACP process rather than embedding a model provider.
 
-Approvals are shared across connected clients; the first answer resolves a pending request. Closing the chat pane or disconnecting a client does not stop server work. Automatic update reviews also run on the server without an open GUI and wait for approval when required. Provider-specific settings come from the agent; defaults apply to new conversations, while resumed conversations keep their settings.
+Approvals are shared across connected clients; the first answer resolves a pending request. Closing the chat pane or disconnecting a client does not stop server work. Automatic update reviews also run on the server without an open GUI and wait for approval when required. Provider-specific settings come from the agent. Both the Settings menu and the chat settings button edit the same shared settings, which apply on the next turn in new and existing conversations using that agent.
 
 Codex uses a separate PacSmith home on the library server. Only the server user's login credential file is shared with personal Codex; personal configuration and conversations are not imported. Unsent drafts and screenshot caches remain local to each client; sent messages and attachments belong to the shared conversation.
 

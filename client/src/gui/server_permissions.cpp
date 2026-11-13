@@ -41,10 +41,11 @@ void ApplicationSession::refreshPermissions() {
                 pending.insert(id);
                 if (permissionDialogs_.contains(id))
                     continue;
-                auto *dialog = new QDialog;
+                auto *dialog = new QDialog(nullptr, Qt::Tool | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
                 dialog->setAttribute(Qt::WA_DeleteOnClose);
                 dialog->setWindowTitle(QStringLiteral("PacSmith — AI permission"));
-                dialog->resize(560, 420);
+                // Publish fixed-size hints before mapping so tiling compositors float the prompt.
+                dialog->setFixedSize(560, 420);
                 permissionDialogs_.insert(id, dialog);
                 auto *layout = new QVBoxLayout(dialog);
                 auto *server = new QLabel(connection.summary(), dialog);

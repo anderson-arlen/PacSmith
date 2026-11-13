@@ -49,6 +49,55 @@ func TestManagerNotifiesJobTransitions(t *testing.T) {
 	}
 }
 
+func TestBuildQueueRestoresExactReleaseIDs(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logDir := filepath.Join(t.TempDir(), "jobs")
+	queued, err := New(db, logDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"older-artifact", "newer-artifact"} {
+		job, err := queued.Enqueue(ctx, KindBuild, map[string]string{"release_id": id}, "same-project", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Status != "queued" || job.ReleaseID != id {
+			t.Fatalf("queued identity: %+v", job)
+		}
+	}
+	delivered := make(chan string, 2)
+	restored, err := New(db, logDir, func(_ context.Context, job Job, payload json.RawMessage, _ func(string), _ func(Progress)) (json.RawMessage, error) {
+		var request map[string]string
+		if err := json.Unmarshal(payload, &request); err != nil {
+			return nil, err
+		}
+		delivered <- job.ReleaseID + ":" + request["release_id"]
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restored.Stop)
+	for _, id := range []string{"older-artifact", "newer-artifact"} {
+		select {
+		case actual := <-delivered:
+			if actual != id+":"+id {
+				t.Fatalf("restored identity %q", actual)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued build was not restored")
+		}
+	}
+}
+
 func TestRepositoryDistributionJobsAreDeduplicatedByProject(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "pacsmith.db"))

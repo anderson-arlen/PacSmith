@@ -19,6 +19,7 @@
 #include <optional>
 
 namespace pacsmith {
+namespace gui { class ReleaseIdentityTest; }
 
 struct JobStatus {
     QString id;
@@ -278,6 +279,7 @@ public:
     [[nodiscard]] const ConnectionConfig &config() const noexcept { return config_; }
 
 private:
+    friend class gui::ReleaseIdentityTest;
     [[nodiscard]] bool reconcileInstalled(
         Project &project, const QHash<QString, ManagedPackageInfo> &packages,
         QString *error = nullptr) const;
