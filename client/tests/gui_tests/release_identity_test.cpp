@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QScopeGuard>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -53,8 +54,17 @@ QString appImage(const QString &directory, const QByteArray &color) {
     return path;
 }
 
-QJsonObject mcp(const QString &tool, const QJsonObject &arguments) {
+QJsonObject mcp(const ConnectionConfig &connection, const QString &tool, const QJsonObject &arguments) {
     QProcess process;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    const auto directory = QFileInfo(connection.socketPath).absolutePath();
+    // User services must not hide a subprocess that uses the default daemon instead of the fixture.
+    environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), directory);
+    environment.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"),
+                       QStringLiteral("unix:path=") + directory + QStringLiteral("/missing-bus"));
+    environment.insert(QStringLiteral("PACSMITH_MCP_MODE"), QStringLiteral("local"));
+    environment.insert(QStringLiteral("PACSMITH_MCP_SOCKET"), connection.socketPath);
+    process.setProcessEnvironment(environment);
     process.start(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("pacsmith")), {QStringLiteral("mcp")});
     if (!process.waitForStarted()) qFatal("Cannot start MCP test client");
     const QJsonArray requests{
@@ -99,7 +109,7 @@ private slots:
         const auto first = client.importSource(appImage(directory.filePath(QStringLiteral("older")), "#e02020"), options, &error);
         QVERIFY2(first, qPrintable(error));
         const auto olderId = first->releaseId;
-        const auto compatible = mcp(QStringLiteral("set_package_metadata"),
+        const auto compatible = mcp(host.connection, QStringLiteral("set_package_metadata"),
             {{QStringLiteral("project_name"), first->project.archPackageName},
              {QStringLiteral("release_name"), QStringLiteral("0.1.0+1")},
              {QStringLiteral("description"), QStringLiteral("Compatible name selector")}});
@@ -131,7 +141,7 @@ private slots:
             auto arguments = labels;
             arguments.insert(QStringLiteral("release_name"), selector);
             arguments.insert(QStringLiteral("description"), QStringLiteral("ambiguous"));
-            const auto response = mcp(QStringLiteral("set_package_metadata"), arguments);
+            const auto response = mcp(host.connection, QStringLiteral("set_package_metadata"), arguments);
             QVERIFY(response.value(QStringLiteral("isError")).toBool());
             const auto text = QJsonDocument(response).toJson();
             QVERIFY(text.contains(olderId.toUtf8()));
@@ -142,17 +152,17 @@ private slots:
             auto arguments = labels;
             arguments.insert(QStringLiteral("release_id"), id);
             arguments.insert(QStringLiteral("description"), id);
-            const auto response = mcp(QStringLiteral("set_package_metadata"), arguments);
+            const auto response = mcp(host.connection, QStringLiteral("set_package_metadata"), arguments);
             QVERIFY2(!response.value(QStringLiteral("isError")).toBool(), QJsonDocument(response).toJson().constData());
         }
-        QVERIFY(mcp(QStringLiteral("set_package_metadata"),
+        QVERIFY(mcp(host.connection, QStringLiteral("set_package_metadata"),
             {{QStringLiteral("release_id"), newerId}, {QStringLiteral("description"), QStringLiteral("missing labels")}})
                 .value(QStringLiteral("isError")).toBool());
         auto mismatch = labels;
         mismatch.insert(QStringLiteral("release_id"), newerId);
         mismatch.insert(QStringLiteral("release_name"), QStringLiteral("wrong version"));
         mismatch.insert(QStringLiteral("description"), QStringLiteral("mismatched label"));
-        QVERIFY(mcp(QStringLiteral("set_package_metadata"), mismatch).value(QStringLiteral("isError")).toBool());
+        QVERIFY(mcp(host.connection, QStringLiteral("set_package_metadata"), mismatch).value(QStringLiteral("isError")).toBool());
         project = *client.load(project.id, &error);
         QCOMPARE(project.release(olderId)->packageMetadata.description, olderId);
         QCOMPARE(project.release(newerId)->packageMetadata.description, newerId);
