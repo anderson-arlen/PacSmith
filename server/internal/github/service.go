@@ -169,6 +169,13 @@ func (s *Service) Download(ctx context.Context, source Source) (artifact.Record,
 		return artifact.Record{}, err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
+	parts := strings.Split(strings.Trim(download.EscapedPath(), "/"), "/")
+	if download.Hostname() == "api.github.com" && len(parts) >= 4 && parts[0] == "repos" &&
+		(parts[3] == "tarball" || parts[3] == "zipball") {
+		// Source archive endpoints reject the binary media type used by release assets.
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", apiVersion)
+	}
 	req.Header.Set("User-Agent", "PacSmith/0.2")
 	if token, tokenErr := s.token(ctx); tokenErr != nil {
 		return artifact.Record{}, tokenErr
